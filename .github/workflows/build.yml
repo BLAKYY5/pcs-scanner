@@ -57,7 +57,7 @@ jobs:
         run: |
           $data = @("scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage")
+          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "tkinterdnd2")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
 

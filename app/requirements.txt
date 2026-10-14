@@ -4,3 +4,4 @@ pillow==11.3.0
 google-auth
 google-auth-oauthlib
 google-api-python-client
+tkinterdnd2==0.6.4

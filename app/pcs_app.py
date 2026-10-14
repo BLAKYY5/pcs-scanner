@@ -133,7 +133,15 @@ class Writer:
         if s.strip(): self.q.put(s.rstrip())
     def flush(self): pass
 
-class App(tk.Tk):
+try:                                   # drag and drop of recordings (and folders) onto the window
+    from tkinterdnd2 import TkinterDnD, DND_FILES
+    Base = TkinterDnD.Tk
+except Exception:
+    TkinterDnD = None; Base = tk.Tk
+
+VIDEO_EXT = ('.mp4', '.mkv', '.mov')
+
+class App(Base):
     def __init__(self):
         super().__init__()
         self.title(f'{APP} {BUILD.get("version", "")}'); self.geometry('760x560'); self.minsize(620, 460)
@@ -150,6 +158,12 @@ class App(tk.Tk):
         ttk.Button(mid, text='Clear', command=self.clear).pack(side='left', padx=6)
         self.scanbtn = ttk.Button(mid, text='Scan and upload', command=self.start); self.scanbtn.pack(side='right')
         self.lst = tk.Listbox(self, height=6); self.lst.pack(fill='x', **pad)
+        self.hint = ttk.Label(self.lst, text='Drag and drop recordings or folders here', foreground='#888')
+        if TkinterDnD:
+            self.drop_target_register(DND_FILES); self.dnd_bind('<<Drop>>', self.dropped)
+            self.dnd_bind('<<DropEnter>>', lambda e: (self.lst.configure(background='#e6f2ff'), e.action)[1])
+            self.dnd_bind('<<DropLeave>>', lambda e: (self.lst.configure(background='white'), e.action)[1])
+            self.hint.place(relx=0.5, rely=0.5, anchor='center')
         self.prog = ttk.Progressbar(self, mode='indeterminate'); self.prog.pack(fill='x', **pad)
         self.log = tk.Text(self, height=14, wrap='word', state='disabled', font=('Consolas', 9)); self.log.pack(fill='both', expand=True, **pad)
         bot = ttk.Frame(self); bot.pack(fill='x', **pad)
@@ -186,10 +200,28 @@ class App(tk.Tk):
         threading.Thread(target=go, daemon=True).start()
 
     def add(self):
-        fs = filedialog.askopenfilenames(title='Pick Apex recordings', filetypes=[('Videos', '*.mp4 *.mkv *.mov'), ('All files', '*.*')])
+        self.add_files(filedialog.askopenfilenames(title='Pick Apex recordings', filetypes=[('Videos', '*.mp4 *.mkv *.mov'), ('All files', '*.*')]))
+    def add_files(self, fs):
+        skipped = 0
         for f in fs:
-            if f not in self.files: self.files.append(f); self.lst.insert('end', os.path.basename(f))
-    def clear(self): self.files = []; self.lst.delete(0, 'end')
+            f = os.path.normpath(f)
+            if f.lower().endswith(VIDEO_EXT):
+                if f not in self.files: self.files.append(f); self.lst.insert('end', os.path.basename(f))
+            else: skipped += 1
+        if skipped: self.say(f'Skipped {skipped} file(s) that are not .mp4, .mkv or .mov recordings.')
+        if self.files: self.hint.place_forget()
+    def dropped(self, e):
+        self.lst.configure(background='white')
+        fs = []
+        for p in self.tk.splitlist(e.data):
+            if os.path.isdir(p):           # a dropped folder adds every recording inside it (not subfolders)
+                fs += sorted(os.path.join(p, n) for n in os.listdir(p) if n.lower().endswith(VIDEO_EXT))
+            else: fs.append(p)
+        if self.busy: self.say('A scan is running; dropped recordings are queued for the next scan.')
+        self.add_files(fs); return e.action
+    def clear(self):
+        self.files = []; self.lst.delete(0, 'end')
+        if TkinterDnD: self.hint.place(relx=0.5, rely=0.5, anchor='center')
 
     def start(self):
         if self.busy: return
@@ -226,10 +258,11 @@ if __name__ == '__main__':
     if '--selftest' in sys.argv:       # used by the build: proves the scanner's libraries load inside the exe
         out = sys.argv[sys.argv.index('--selftest') + 1]
         try:
-            import numpy, scipy.ndimage, PIL.Image, pcs_scan, pcs_hud
+            import numpy, scipy.ndimage, PIL.Image, pcs_scan, pcs_hud, tkinterdnd2
             numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
+            w = TkinterDnD.Tk(); w.withdraw(); w.drop_target_register(DND_FILES); w.destroy()   # loads the drag-and-drop Tk extension
             ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
-            msg = f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(HERE, "client.json"))}'
+            msg = f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(HERE, "client.json"))} dragdrop {TkinterDnD is not None}'
         except Exception:
             msg = 'FAIL ' + traceback.format_exc()
         open(out, 'w').write(msg); sys.exit(0)
