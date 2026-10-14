@@ -25,7 +25,7 @@ jobs:
       - name: Install Python packages
         run: |
           python -m pip install --upgrade pip
-          pip install -r app/requirements.txt pyinstaller==6.10.0
+          pip install -r app/requirements.txt pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
       - name: Get ffmpeg
         shell: pwsh
@@ -57,9 +57,17 @@ jobs:
         run: |
           $data = @("scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud")
+          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
+
+      - name: Test the .exe (libraries load, ffmpeg and sign-in ID bundled)
+        shell: pwsh
+        run: |
+          Start-Process -FilePath dist/PCS-Scanner.exe -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
+          $r = Get-Content selftest.txt -Raw
+          Write-Host $r
+          if (-not $r.StartsWith("OK")) { throw "Self-test failed" }
 
       - uses: actions/upload-artifact@v4
         with:

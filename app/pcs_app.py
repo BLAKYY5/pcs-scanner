@@ -223,4 +223,14 @@ class App(tk.Tk):
 
 if __name__ == '__main__':
     multiprocessing.freeze_support()   # the scanner splits recordings into parallel chunks
+    if '--selftest' in sys.argv:       # used by the build: proves the scanner's libraries load inside the exe
+        out = sys.argv[sys.argv.index('--selftest') + 1]
+        try:
+            import numpy, scipy.ndimage, PIL.Image, pcs_scan, pcs_hud
+            numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
+            ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
+            msg = f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(HERE, "client.json"))}'
+        except Exception:
+            msg = 'FAIL ' + traceback.format_exc()
+        open(out, 'w').write(msg); sys.exit(0)
     App().mainloop()
