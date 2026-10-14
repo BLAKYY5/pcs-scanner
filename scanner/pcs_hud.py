@@ -12,6 +12,8 @@ PRE_T = {k: np.array(v) for k, v in _F['pre'].items()}
 RSLOTS = [(295, 313), (335, 353), (355, 373)]       # m : s s   (x at 2560 wide)
 PSLOTS = [(203, 229), (231, 254), (280, 307), (307, 333)]   # pre-ring clock 'mm:ss' next to the round icon
 SPEC_OFF = 85                                        # HUD drops 85 px while spectating
+STRETCH = False   # 4:3 stretched recording (decided by the scanner): the 60 fps corner reads unsquash rows too
+LOOSE = False   # set by the scanner for 4:3 stretched recordings (softer, rescaled text): looser text thresholds
 NUMRX = re.compile(r'(?<![\d])(-?\d{1,6})[.?\-](\d\d)(?!\d)')
 # map % = 50 + X/s , 50 - Y/s   (s = world units per 1 % of map); refined from calibration pairs later
 # map % = cx + X/sx , cy - Y/sy  (fitted from 220 map opens: own arrow vs POS, Oct 2026)
@@ -19,6 +21,7 @@ CAL = {'WE': (914.2, 49.46, 885.1, 49.82), 'ED': (902.9, 49.03, 861.1, 50.39), '
 
 def white(s, lo=180):
     s = s.astype(np.int16)
+    if LOOSE: lo = min(lo, 165)
     return (s.min(2) > lo) & ((s.max(2) - s.min(2)) < 50)
 
 # ---------- ring clock ----------
@@ -29,8 +32,18 @@ def _glyph(m, T=RING_T, hmin=18, hmax=26):
     if not (hmin <= g.shape[0] <= hmax): return None
     g = np.array(Image.fromarray((g * 255).astype(np.uint8)).resize((12, 18), Image.BILINEAR)) / 255.0
     sc = sorted((float(np.abs(g - t).mean()), d) for d, t in T.items())
-    if sc[0][0] > 0.15 or sc[1][0] - sc[0][0] < 0.025: return None
+    if sc[0][0] > (0.2 if LOOSE else 0.15) or sc[1][0] - sc[0][0] < 0.025: return None
     return int(sc[0][1])
+
+def _runs(m, x0, x1, n):
+    """Digit columns found from the text itself (stretched HUDs sit a few px off the fixed slots); the colon is dropped."""
+    col = m[:, x0:x1].sum(0) > 0; runs = []; st = None
+    for i, v in enumerate(list(col) + [False]):
+        if v and st is None: st = i
+        elif not v and st is not None:
+            if i - st >= 5 and m[:, x0 + st:x0 + i].sum() >= 40: runs.append((x0 + st, x0 + i))
+            st = None
+    return runs if len(runs) == n else [(0, 0)] * n
 
 def read_ring(a):
     for off in (0, SPEC_OFF):
@@ -49,9 +62,11 @@ def read_ring(a):
     for off in (0, SPEC_OFF):               # before the ring is drawn: round icon (orange circle) + 'mm:ss'
         c = a[417 + off:465 + off, 131:179].astype(np.int16)
         orange = (c[..., 0] > 190) & (c[..., 1] > 90) & (c[..., 1] < 180) & (c[..., 2] < 90)
-        if orange.sum() < 30: continue
-        m = (a[422 + off:460 + off].astype(np.int16).min(2) > 190) & (np.ptp(a[422 + off:460 + off].astype(np.int16), axis=2) < 40)
-        d = [_glyph(m[:, x0:x1], PRE_T, 24, 34) for x0, x1 in PSLOTS]
+        reddish = (c[..., 0] > 110) & (c[..., 0] - c[..., 2] > 25) & (c[..., 0] - c[..., 1] > 25)   # later rounds: dull red ring
+        ring_w = ((c.min(2) > 190) & (np.ptp(c, axis=2) < 40)).sum()
+        if orange.sum() < 30 and not (reddish.sum() >= 30 and ring_w >= 40) and not (LOOSE and ring_w >= 150): continue
+        m = (a[422 + off:460 + off].astype(np.int16).min(2) > (165 if LOOSE else 190)) & (np.ptp(a[422 + off:460 + off].astype(np.int16), axis=2) < 40)
+        d = [_glyph(m[:, x0:x1], PRE_T, 24, 34) for x0, x1 in (_runs(m, 195, 345, 4) if LOOSE else PSLOTS)]
         if None in d or d[2] > 5: return None
         icon = (c.min(2) > 190) & (np.ptp(c, axis=2) < 40)
         return {'v': (d[0] * 10 + d[1]) * 60 + d[2] * 10 + d[3], 'fine': False, 'spec': off > 0, 'lab': icon, 'pre': True}
@@ -166,7 +181,8 @@ def landing(samples, t0):
 def _corner(path, a, b, W=2560, H=1440, cw=420, ch=570):
     """Every frame (60 fps) between a and b, top-left corner only (debug overlay + ring clock live there)."""
     cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{max(0, a):.3f}', '-i', path, '-t', f'{b - a:.3f}',
-           '-vf', f'scale={W}:{H},crop={cw}:{ch}:0:0', '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
+           '-vf', (f'scale={W}:{H},crop={cw}:{round(ch * 0.75)}:0:0,scale={cw}:{ch}:flags=neighbor' if STRETCH else f'scale={W}:{H},crop={cw}:{ch}:0:0'),
+           '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     raw = subprocess.run(cmd, capture_output=True, timeout=180).stdout
     n = cw * ch * 3
     for i in range(0, len(raw) - n + 1, n):

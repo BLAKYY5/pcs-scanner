@@ -19,11 +19,30 @@ from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
 
-VERSION = '1.7.2'
+VERSION = '1.7.3'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
 USE_HW = True
+LAYOUT = None   # None = detect per recording; False = 16:9; True = 4:3 stretched to 16:9 (forced with --layout)
+
+# ---------- 4:3 stretched recordings ----------
+# Apex in 4:3 stretched to 16:9 keeps every HUD element at its 16:9 left/right position but squashes it to 75 % height.
+# Top elements (ring clock, kill feed, ranked badge) stay anchored to the top; the drop-screen map panel keeps its
+# bottom edge; the full map is centred. These row maps rebuild the 16:9 layout so the normal readers work unchanged.
+_Y = np.arange(H)
+ROWS_TOP = np.clip(np.round(_Y * 0.75), 0, H - 1).astype(int)
+ROWS_MAP = np.clip(np.round(204 + (_Y[:1340] - 40) * 0.75), 0, H - 1).astype(int)        # map 204..1149 -> 40..1300
+ROWS_DROP = np.clip(np.round(337 + (_Y[88:1088] - 88) * 0.75), 0, H - 1).astype(int)     # panel 337..1087 -> 88..1088
+ST_MAP_M0 = np.array([[100 / 1264, 0], [0, 100 / 1264], [-648 * 100 / 1264, -40 * 100 / 1264]])
+
+def view_top(img): return img[ROWS_TOP]
+def view_map(img):
+    b = img.copy(); b[:1340] = img[ROWS_MAP]; return b
+def view_drop(img):
+    b = img.copy(); b[88:1088, 1520:2520] = img[ROWS_DROP, 1520:2520]
+    b[1125:1180, 1740:2075] = img[1140:1195, 1983:2318]    # legend ('Your / Enemy Drop Point') moves right
+    return b
 
 # ---------- image helpers ----------
 def blobs(mask, amin, amax):
@@ -35,7 +54,9 @@ def blobs(mask, amin, amax):
     k = np.nonzero((cnt >= amin) & (cnt <= amax))[0]
     return [(sx[i] / cnt[i], sy[i] / cnt[i], int(cnt[i])) for i in k]
 
-def lime_mask(r, g, b):  # respawn beacons
+def lime_mask(r, g, b, loose=False):  # respawn beacons
+    if loose:   # stretched recordings come out paler: lime = clearly greener than red, far greener than blue
+        return (g > 165) & (g - b > 55) & (r > 100) & (g - r >= 15)
     return (r > 150) & (r < 215) & (g > 205) & (b > 60) & (b < 130)
 
 def chev_mask(r, g, b):  # Evo harvesters (yellow)
@@ -85,7 +106,7 @@ def poi_at(mp, x, y):
     return p['id'], False
 
 # ---------- frame readers ----------
-def read_dropscreen(a):
+def read_dropscreen(a, loose=False):
     """Scrim/custom pre-game screen: drop map panel on the right with red/green markers."""
     q = a[88:1088:4, 1520:2520:4]            # cheap gate on a 1/16 sample: dark panel with red markers
     if ((q[..., 0] > 140) & (q[..., 1] < 50) & (q[..., 2] < 50)).sum() < 25: return None   # no brightness test: Storm Point is bright
@@ -96,7 +117,7 @@ def read_dropscreen(a):
     if len(red) < 5: return None
     grn = blobs(ndimage.binary_closing((g > 150) & (r < 120) & (b < 120), iterations=3), 60, 3000)
     if len(red) + len(grn) < 8: return None
-    lime = blobs(lime_mask(r, g, b), 5, 200)
+    lime = blobs(lime_mask(r, g, b, loose), 4 if loose else 5, 200)
     if len(lime) < 12: return None
     P = np.array([[x, y] for x, y, _ in lime]); best = None
     for mp, d in MAPS.items():
@@ -125,15 +146,19 @@ class MapReader:
     def __init__(self): self.cache = None; self.cool = 0
     @staticmethod
     def is_map(a):
-        """Cheap gate (<1 ms): full map = dark key-hint bar along the bottom + white 'M' keycap bottom-left."""
-        bar = a[1362:1430:2, ::4]; k = a[1375:1420, 80:120]
-        return (bar.max(2) < 40).mean() > 0.8 and (k.min(2) > 200).mean() > 0.3
-    def read(self, a):
+        """Cheap gate (<1 ms): full map = dark key-hint bar along the bottom + white 'M' keycap bottom-left
+        (or, on controller, a 'Close Map' button glyph and text in the same corner)."""
+        bar = a[1362:1430:2, ::4]
+        if (bar.max(2) < 40).mean() <= 0.8: return False
+        if (a[1375:1420, 80:120].min(2) > 200).mean() > 0.3: return True
+        wf = (a[1375:1420, 40:320].min(2) > 170).mean()
+        return 0.04 < wf < 0.5
+    def read(self, a, stretched=False):
         if not self.is_map(a): return None
         X0 = 560; c = a[0:1340, X0:1960]          # map area only (all image work on this crop)
         r, g, b = c[..., 0], c[..., 1], c[..., 2]
         sh = lambda L: [(x + X0, y, s_) for x, y, s_ in L]
-        lime = sh(blobs(lime_mask(r, g, b), 5, 300))
+        lime = sh(blobs(lime_mask(r, g, b, stretched), 4 if stretched else 5, 300))
         if not (10 <= len(lime) <= 80): return None
         P = np.array([[x, y] for x, y, _ in lime]); res = None
         if self.cache:
@@ -142,7 +167,7 @@ class MapReader:
             if not (res[0] < 0.12 and res[2] >= 0.6 * len(P) and sane(res[1])): res = None
             else: res = (mp,) + res
         if res is None:   # fast path: unzoomed full map always sits at the same place on screen
-            M0 = np.array([[0.0739, 0], [0, 0.0739], [-44.64, 0.27]])
+            M0 = ST_MAP_M0 if stretched else np.array([[0.0739, 0], [0, 0.0739], [-44.64, 0.27]])
             for mp, d in MAPS.items():
                 rr = fit(P, np.array(d['beacons']), M0)
                 if rr[0] < 0.12 and rr[2] >= 0.6 * len(P) and sane(rr[1]): res = (mp,) + rr; break
@@ -316,22 +341,34 @@ def duration(path):
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
     perf = perf if perf is not None else {}; tw = time.time()
+    mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
         tp = time.time(); perf['decode'] = perf.get('decode', 0) + tp - tw
-        a = img.astype(np.int16)
-        d = read_dropscreen(a)
-        if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d})
-        else:
-            d = mr.read(a)
-            if d: events.append({'t': round(t, 2), 'kind': 'map', 'data': d})
+        cands = [mode] if mode is not None else ([True, False] if votes[True] > votes[False] else [False, True])
+        d = None; hud = None
+        for st in cands:
+            HUD.LOOSE = st
+            d = read_dropscreen((view_drop(img) if st else img).astype(np.int16), st)
+            if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
+            d = mr.read((view_map(img) if st else img).astype(np.int16), st)
+            if d: events.append({'t': round(t, 2), 'kind': 'map', 'data': d}); votes[st] += 1; break
         if not d:   # normal HUD: ring clock + debug overlay + event feed
-            rg = HUD.read_ring(a); pos, vel = HUD.read_dbg(a)
-            if rg or pos: perf.setdefault('_rank', []).append((round(t, 2), HUD.ranked(a)))
-            try: feed.read(img, t)
-            except Exception: pass
-            if rg or pos:
+            for st in cands:
+                HUD.LOOSE = st
+                a = (view_top(img) if st else img).astype(np.int16)
+                rg = HUD.read_ring(a); pos, vel = HUD.read_dbg(a)
+                if rg or pos: hud = (st, a, rg, pos, vel); votes[st] += 1; break
+            st = hud[0] if hud else (mode if mode is not None else votes[True] > votes[False])
+            if hud:
+                _, a, rg, pos, vel = hud
+                perf.setdefault('_rank', []).append((round(t, 2), HUD.ranked(a)))
                 samples.append([round(t, 2), labels.id(rg['lab']) if rg else -1, rg['v'] if rg else None, bool(rg and rg['spec'])]
                                + (pos if pos else [None, None, None]) + [vel, bool(rg and rg['fine']), bool(rg and rg.get('pre'))])
+            try: feed.read(view_top(img) if st else img, t)
+            except Exception: pass
+        if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
+            mode = votes[True] > votes[False]
+            if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
         if d and snapdir: Image.fromarray(img).resize((1280, 720)).save(os.path.join(snapdir, f'{int(t):05d}_{events[-1]["kind"]}.jpg'), quality=80)
         perf['frames'] = perf.get('frames', 0) + 1
         if not quiet and time.time() - last > 5:
@@ -339,12 +376,13 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             print(f'  {int(t // 60):3d}:{int(t % 60):02d}{pct}  events: {len(events)}  HUD samples: {len(samples)}  [{time.time() - t0:.0f}s]', flush=True)
         tw = time.time(); perf['analysis'] = perf.get('analysis', 0) + tw - tp
     perf['feedLines'] = len(feed.lines); perf['_feed'] = feed.lines
+    perf['_votes43'] = votes[True]; perf['_votes169'] = votes[False]
     return events, samples, labels
 
 def _segment(args):
     """Worker: scan one chunk of the recording (runs in its own process)."""
-    path, start, end, snap, dec = args
-    global DECODER; DECODER = dec; HUD.DEC = dec[1]
+    path, start, end, snap, dec, layout = args
+    global DECODER, LAYOUT; DECODER = dec; HUD.DEC = dec[1]; LAYOUT = layout
     perf = {}
     ev, sm, lb = scan_frames(keyframes(path, start, end), snap, quiet=True, perf=perf)
     return start, ev, sm, [(r, n) for r, n in zip(lb.reps, lb.n)], perf
@@ -356,7 +394,7 @@ def scan_video(path, snap=None, workers=0):
     workers = workers or max(1, min(8, (os.cpu_count() or 2) // 2))
     if total < 300: workers = 1
     edges = [total * k / workers for k in range(workers + 1)]; edges[-1] = total + 5
-    jobs = [(path, edges[k], edges[k + 1], snap, dec) for k in range(workers)]
+    jobs = [(path, edges[k], edges[k + 1], snap, dec, LAYOUT) for k in range(workers)]
     print(f'  scanning {total / 60:.0f} min of video in {workers} parallel chunk(s) ...', flush=True)
     t0 = time.time(); out = []
     if workers == 1: out = [_segment(jobs[0])]
@@ -375,6 +413,10 @@ def scan_video(path, snap=None, workers=0):
             if s_[1] >= 0: s_[1] = remap.get(s_[1], -1)
         events += ev; samples += sm
         for k, v in pf.items(): perf[k] = perf.get(k, 0) + v
+    v43, v169 = perf.pop('_votes43', 0), perf.pop('_votes169', 0)
+    HUD.STRETCH = LAYOUT if LAYOUT is not None else v43 > v169; HUD.LOOSE = HUD.STRETCH
+    perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
+    print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank)
     return events, samples, labels, perf
 
@@ -423,8 +465,9 @@ def main():
     ap.add_argument('--cpu', action='store_true', help='do not try hardware decoding')
     ap.add_argument('--workers', type=int, default=0, help='parallel chunks (default: half your CPU threads, max 8)')
     ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
+    ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
     A = ap.parse_args(); os.makedirs(A.out, exist_ok=True)
-    global USE_HW; USE_HW = not A.cpu
+    global USE_HW, LAYOUT; USE_HW = not A.cpu; LAYOUT = {'auto': None, '16:9': False, '4:3': True}[A.layout]
     jobs = [(f, 'video') for f in A.files] + [(f, 'image') for f in A.image]
     if not jobs: ap.print_help(); return
     for path, kind in jobs:
