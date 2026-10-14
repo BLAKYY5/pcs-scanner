@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+client.json
+build.json
+ffmpeg/
+ffx/
+ffmpeg.zip
+pcs_scan/
+*.scan.json
+*.feed.json
