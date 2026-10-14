@@ -1,7 +1,8 @@
 name: Build PCS Scanner
 
-# Every push to main builds the app (download it from the run's "Artifacts").
-# Pushing a tag like v1.7.0 also publishes a release, which the app offers to players as an update.
+# Every push to main builds the app. The version comes from VERSION in scanner/pcs_scan.py:
+# if no release exists yet for that version, the build publishes one (tag v<version>),
+# and players' apps offer it as an update. Same version again = test build only (see the run's "Artifacts").
 on:
   push:
     branches: [main]
@@ -39,8 +40,14 @@ jobs:
         env:
           GOOGLE_OAUTH_CLIENT: ${{ secrets.GOOGLE_OAUTH_CLIENT }}
           COACH_EMAIL: ${{ vars.COACH_EMAIL }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart('v') } else { "dev-${{ github.run_number }}" }
+          $code = (Select-String -Path scanner/pcs_scan.py -Pattern "^VERSION = '(.+)'").Matches[0].Groups[1].Value
+          $exists = $true
+          try { Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -Uri "https://api.github.com/repos/${{ github.repository }}/releases/tags/v$code" | Out-Null } catch { $exists = $false }
+          $release = ((-not $exists) -and ("${{ github.ref_name }}" -eq "main")) -or ("${{ github.ref_type }}" -eq "tag")
+          $ver = if ($release) { $code } else { "dev-${{ github.run_number }}" }
+          "RELEASE=$release" | Out-File -FilePath $env:GITHUB_ENV -Append
           @{ version = $ver; repo = "${{ github.repository }}"; coach = $env:COACH_EMAIL } | ConvertTo-Json | Set-Content -Encoding utf8 build.json
           if ($env:GOOGLE_OAUTH_CLIENT) { $env:GOOGLE_OAUTH_CLIENT | Set-Content -Encoding utf8 client.json } else { Write-Warning "No GOOGLE_OAUTH_CLIENT secret: the app will scan but cannot upload." }
           "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -60,8 +67,11 @@ jobs:
           path: dist/PCS-Scanner.exe
 
       - name: Publish release
-        if: github.ref_type == 'tag'
+        if: env.RELEASE == 'True'
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: v${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: PCS Scanner ${{ env.VERSION }}
           files: dist/PCS-Scanner.exe
           generate_release_notes: true
