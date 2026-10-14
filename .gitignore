@@ -11,3 +11,4 @@ ffmpeg.zip
 pcs_scan/
 *.scan.json
 *.feed.json
+scanner/decoder.json
