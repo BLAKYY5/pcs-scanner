@@ -5,7 +5,11 @@ ranked/scrim mode and the kill feed. Results upload to the team's Google Drive a
 Conquerors Loot Book overnight.
 
 ## For players
-1. Download `PCS-Scanner.exe` from the latest release.
+
+> **Download the app here: [PCS-Scanner.exe](https://github.com/BLAKYY5/pcs-scanner/releases/latest/download/PCS-Scanner.exe)**
+> Do NOT use the green "Code → Download ZIP" button: that is the source code, not the app, and it will not work.
+
+1. Download `PCS-Scanner.exe` with the link above (always the newest version; the app updates itself afterwards).
 2. Open it, type your EEC name, pick your role, press **Sign in with Google** once.
 3. **Add recordings…** → **Scan and upload**.
 

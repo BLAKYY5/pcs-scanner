@@ -17,7 +17,21 @@ if os.name == 'nt':   # no console windows popping up for ffmpeg / ffprobe (also
     subprocess.Popen = _QuietPopen
 
 APP = 'PCS Scanner'
+EXE_URL = 'https://github.com/BLAKYY5/pcs-scanner/releases/latest/download/PCS-Scanner.exe'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+if not getattr(sys, 'frozen', False):   # run from the source code: find the scanner next to the app folder
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'scanner'))
+    try:
+        import numpy, scipy, PIL, google.oauth2   # noqa: F401  (all bundled in the .exe)
+    except ImportError:
+        try:
+            r = tk.Tk(); r.withdraw()
+            if messagebox.askyesno(APP, 'This is the source code of PCS Scanner, not the app.\n\n'
+                                        'Download PCS-Scanner.exe instead (it contains everything it needs).\n\nOpen the download now?'):
+                webbrowser.open(EXE_URL)
+        except Exception:
+            print('This is the source code, not the app. Download PCS-Scanner.exe: ' + EXE_URL)
+        sys.exit(1)
 DATA = os.path.join(os.environ.get('LOCALAPPDATA', os.path.expanduser('~')), 'PCS Scanner')
 OUT = os.path.join(DATA, 'scans')
 os.makedirs(OUT, exist_ok=True)
