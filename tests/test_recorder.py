@@ -131,7 +131,7 @@ def test_full_session_scan_and_upload():
     time.sleep(2.5); r.tick()
     assert r.scan_proc is not None and hub.uploads == []   # still suspended, nothing sent mid-game
     apex["on"] = False                                # closes again: 2nd session recorded, its scan waits in line
-    for _ in range(30):
+    for _ in range(120):                              # up to 60 s: process start-up is slow on Windows
         r.tick(); time.sleep(0.5)
         if len(hub.uploads) == 2:
             break
