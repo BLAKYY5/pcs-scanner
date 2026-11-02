@@ -50,6 +50,7 @@ class Recorder:
         self.scan_proc: subprocess.Popen | None = None
         self.scan_key: str | None = None
         self.paused = False
+        self.suspended: list = []                # processes this recorder paused (to resume exactly once)
         self.next_upload = 0.0
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
@@ -89,6 +90,10 @@ class Recorder:
             log.exception("start failed")
             return
         key = f"rec-{int(self.clock())}"
+        n = 2
+        while key in self.idx:                   # unique even if two sessions start within the same second
+            key = f"rec-{int(self.clock())}-{n}"
+            n += 1
         self.idx[key] = retention.Entry(path="", started=self.clock(), status="recording")
         self.current = key
         retention.save_index(self.idx)
@@ -166,26 +171,41 @@ class Recorder:
         if not self.scan_proc:
             return
         import psutil
-        try:
-            # the scanner splits a recording into parallel worker processes: pause/resume all of them
-            root = psutil.Process(self.scan_proc.pid)
-            tree = [root] + root.children(recursive=True)
-            if apex and not self.paused:
-                for p in tree:
-                    p.suspend()
-                self.paused = True
-                self.status = "Scan paused while Apex runs"
-            elif not apex and self.paused:
-                for p in tree:
-                    p.resume()
-                self.paused = False
-                self.status = "Scanning last session"
-        except psutil.Error:
-            pass
+        # The scanner splits a recording into parallel worker processes: pause/resume all of them.
+        # On Windows pauses stack (paused twice = must be resumed twice), so each process is paused at
+        # most once and exactly the processes that were paused get resumed. A worker that ends in the
+        # meantime is simply skipped.
+        if apex:
+            # pause the scanner first (then it can't start new workers), then its workers; on later checks,
+            # also catch a worker that was being started at that instant. Never the same process twice.
+            try:
+                root = psutil.Process(self.scan_proc.pid)
+                done = {p.pid for p in self.suspended}
+
+                def pause(p):
+                    if p.pid in done:
+                        return
+                    try:
+                        p.suspend()
+                        self.suspended.append(p)
+                        done.add(p.pid)
+                    except psutil.Error:
+                        pass                                         # ended in the meantime
+                pause(root)                                          # frozen first: it can't start new workers,
+                for p in root.children(recursive=True):              # so this list is complete
+                    pause(p)
+            except psutil.Error:
+                pass
+            self.paused = True
+            self.status = "Scan paused while Apex runs"
+        elif not apex and self.paused:
+            self._resume_all()
+            self.status = "Scanning last session"
         code = self.scan_proc.poll()
         if code is None:
             return
-        key, self.scan_proc, self.scan_key, self.paused = self.scan_key, None, None, False
+        self._resume_all()                      # nothing may stay paused once the scan is over
+        key, self.scan_proc, self.scan_key = self.scan_key, None, None
         e = self.idx.get(key)
         if e:
             e.status = "scanned" if code == 0 else "failed"
@@ -199,6 +219,16 @@ class Recorder:
         self.next_upload = 0
         self.status = "Waiting for Apex"
         self._next_in_queue(apex)
+
+    def _resume_all(self) -> None:
+        import psutil
+        for p in self.suspended:
+            try:
+                p.resume()
+            except psutil.Error:
+                pass
+        self.suspended = []
+        self.paused = False
 
     def _next_in_queue(self, apex: bool) -> None:
         while self.queue and self.scan_proc is None and not apex:

@@ -136,7 +136,9 @@ def test_full_session_scan_and_upload():
         if len(hub.uploads) == 2:
             break
     assert len(hub.uploads) == 2 and all(sorted(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
-                                         sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), hub.uploads
+                                         sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), (
+        hub.uploads, {k: vars(v) for k, v in r.idx.items()}, r.queue, r.scan_proc and r.scan_proc.poll(), r.paused,
+        [p.pid for p in r.suspended], r.status)
     assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
     titles = [n[0] for n in ui.notes]
     for t in ("Scanning your session", "Scan finished", "Results sent"):
@@ -156,6 +158,39 @@ def test_skip_and_offline_hub():
     assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
     hub2.down = False; r2.next_upload = 0; r2.tick()
     assert list(r2.idx.values())[0].status == "uploaded"
+
+
+def test_pause_never_stacks():
+    """Ticks while Apex runs must not pause the scanner again (on Windows pauses stack), and one that
+    finished while paused must not be resumed or crash anything."""
+    import subprocess, psutil
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load(); s.folder = str(TMP / "stack"); s.enabled = True
+    apex = {"on": False}
+    hub, ui = FakeHub(), FakeUI(True)
+    r = Recorder(s, FakeOBS(s.folder_path), hub, ui, fake_scan, is_apex_running=lambda: apex["on"])
+    r._final_file = lambda p, wait_s=0: p
+    apex["on"] = True; r.tick(); apex["on"] = False; r.tick()          # one session, scan starts
+    time.sleep(0.8)
+    calls = {"suspend": 0, "resume": 0}
+    real_s, real_r = psutil.Process.suspend, psutil.Process.resume
+    psutil.Process.suspend = lambda self: (calls.__setitem__("suspend", calls["suspend"] + 1), real_s(self))[1]
+    psutil.Process.resume = lambda self: (calls.__setitem__("resume", calls["resume"] + 1), real_r(self))[1]
+    try:
+        apex["on"] = True
+        for _ in range(5):
+            r.tick()                                                     # five checks while Apex runs
+        paused_once = calls["suspend"]
+        assert paused_once >= 1 and len(r.suspended) == paused_once
+        apex["on"] = False; r.tick()
+        assert calls["resume"] == paused_once and not r.suspended and not r.paused, calls
+    finally:
+        psutil.Process.suspend, psutil.Process.resume = real_s, real_r
+    for _ in range(60):
+        r.tick(); time.sleep(0.5)
+        if hub.uploads:
+            break
+    assert hub.uploads, "scan never finished after resume"
 
 
 def test_mkv_duplicate_removed():
