@@ -1,10 +1,18 @@
 """PCS Scanner app: scan Apex recordings and upload the results to the team's Google Drive.
 
+Since 1.8 it can also record Apex by itself (Auto-record): it runs in the tray from Windows start-up,
+records the Apex window while the game runs (through its own private copy of OBS), and scans the session
+after the game closes. See app/pcs_recorder/.
+
+Command line:  PCS-Scanner.exe                 the window (and the tray recorder if Auto-record is on)
+               PCS-Scanner.exe --background    tray only (used at Windows start-up)
+               PCS-Scanner.exe --scan FILE... [--out DIR]   scan without a window (used by the recorder)
+
 Players pick recordings, press Scan; results (.scan.json + .feed.json) go to a "PCS Scans" folder in the player's
 own Drive, shared with the coach. The app only asks for Google's drive.file permission: it can see and change only
 the files it created itself.
 """
-import os, sys, json, threading, queue, traceback, datetime, subprocess, multiprocessing, urllib.request, webbrowser
+import os, sys, json, threading, queue, traceback, datetime, subprocess, multiprocessing, urllib.request, webbrowser, logging
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -48,6 +56,7 @@ BUILD = load_json(os.path.join(HERE, 'build.json'), {'version': 'dev', 'repo': '
 SETTINGS_F = os.path.join(DATA, 'settings.json')
 SETTINGS = load_json(SETTINGS_F, {'player': '', 'role': '', 'uploaded': []})
 def save_settings(): json.dump(SETTINGS, open(SETTINGS_F, 'w', encoding='utf-8'), indent=1)
+logging.basicConfig(filename=os.path.join(DATA, 'app.log'), level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
 
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 TOKEN_F = os.path.join(DATA, 'google_token.json')
@@ -93,6 +102,15 @@ def upload(svc, folder, path, log):
     else: svc.files().create(body={'name': name, 'parents': [folder], **meta}, media_body=media, fields='id').execute()
     log(f'  uploaded {name}')
 
+def drive_upload_quiet(paths):
+    """Upload without any sign-in prompt (used by the recorder). False if the player isn't signed in."""
+    svc = drive_service(interactive=False)
+    if svc is None: return False
+    folder = scans_folder(svc)
+    for p in paths:
+        if p.endswith('.json'): upload(svc, folder, p, logging.info)
+    return True
+
 # ---------------- updates ----------------
 def vtuple(v):
     try: return tuple(int(x) for x in v.lstrip('v').split('.'))
@@ -124,11 +142,11 @@ def install_update(url, log):
     return True
 
 # ---------------- scanning ----------------
-def run_scan(files, log):
+def run_scan(files, log, out=OUT):
     import pcs_scan
     argv = sys.argv
     try:
-        sys.argv = ['pcs_scan'] + list(files) + ['--out', OUT]
+        sys.argv = ['pcs_scan'] + list(files) + ['--out', out]
         pcs_scan.main()
     finally:
         sys.argv = argv
@@ -136,7 +154,7 @@ def run_scan(files, log):
     for f in files:
         base = os.path.splitext(os.path.basename(f))[0]
         for ext in ('.scan.json', '.feed.json'):
-            p = os.path.join(OUT, base + ext)
+            p = os.path.join(out, base + ext)
             if os.path.exists(p): outs.append(p)
     return outs
 
@@ -182,11 +200,27 @@ class App(Base):
         self.log = tk.Text(self, height=14, wrap='word', state='disabled', font=('Consolas', 9)); self.log.pack(fill='both', expand=True, **pad)
         bot = ttk.Frame(self); bot.pack(fill='x', **pad)
         ttk.Button(bot, text='Open results folder', command=lambda: os.startfile(OUT) if os.name == 'nt' else None).pack(side='left')
+        self.recbtn = ttk.Button(bot, text='Auto-record…', command=self.autorec_settings); self.recbtn.pack(side='left', padx=6)
+        self.auto = None   # AutoRecorder, attached in main()
         self.status = ttk.Label(bot, text=''); self.status.pack(side='right')
         self.after(100, self.pump)
         self.after(400, self.startup)
 
     def say(self, s): self.q.put(s)
+    def autorec_settings(self):
+        if not self.auto: messagebox.showinfo(APP, 'Auto-record is not available in this build.'); return
+        self.auto.s.player = self.player.get().strip() or self.auto.s.player
+        self.auto.open_settings()
+    def show(self):
+        self.deiconify(); self.lift(); self.focus_force()
+    def hide_or_quit(self):
+        if self.auto and self.auto.s.enabled: self.withdraw()      # keeps recording from the tray
+        else: self.quit_app()
+    def quit_app(self):
+        try:
+            if self.auto and self.auto.ui.icon: self.auto.ui.icon.stop()
+        except Exception: pass
+        self.destroy()
     def pump(self):
         try:
             while True:
@@ -242,6 +276,7 @@ class App(Base):
         if not self.files: messagebox.showinfo(APP, 'Add one or more recordings first.'); return
         if not self.player.get().strip(): messagebox.showinfo(APP, 'Type your EEC name first (so your scans are labelled).'); return
         SETTINGS['player'] = self.player.get().strip(); SETTINGS['role'] = self.role.get(); save_settings()
+        if self.auto: self.auto.s.player = SETTINGS['player']
         self.busy = True; self.scanbtn.configure(state='disabled'); self.prog.start(12)
         threading.Thread(target=self.work, args=(list(self.files),), daemon=True).start()
 
@@ -273,11 +308,43 @@ if __name__ == '__main__':
         out = sys.argv[sys.argv.index('--selftest') + 1]
         try:
             import numpy, scipy.ndimage, PIL.Image, pcs_scan, pcs_hud, tkinterdnd2
+            import psutil, obsws_python, pystray, requests, pcs_recorder.runtime   # auto-record
             numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
             w = TkinterDnD.Tk(); w.withdraw(); w.drop_target_register(DND_FILES); w.destroy()   # loads the drag-and-drop Tk extension
             ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
-            msg = f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(HERE, "client.json"))} dragdrop {TkinterDnD is not None}'
+            msg = f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(HERE, "client.json"))} dragdrop {TkinterDnD is not None} autorecord ok'
         except Exception:
             msg = 'FAIL ' + traceback.format_exc()
         open(out, 'w').write(msg); sys.exit(0)
-    App().mainloop()
+    if '--scan' in sys.argv:           # headless scan, started by the recorder after a session
+        args = sys.argv[sys.argv.index('--scan') + 1:]
+        out = OUT
+        if '--out' in args:
+            i = args.index('--out'); out = args[i + 1]; args = args[:i] + args[i + 2:]
+        os.makedirs(out, exist_ok=True)
+        sys.stdout = sys.stderr = open(os.path.join(out, 'scan.log'), 'a', encoding='utf-8')
+        try:
+            res = run_scan(args, print, out)
+            print(f'done: {len(res)} result file(s)'); sys.exit(0 if res else 2)
+        except SystemExit: raise
+        except Exception:
+            traceback.print_exc(); sys.exit(1)
+    background = '--background' in sys.argv
+    try:
+        from pcs_recorder import runtime as autorec
+    except Exception:
+        autorec = None; logging.exception('auto-record unavailable')
+    if autorec and autorec.ask_running_instance_to_show():
+        sys.exit(0)                    # already running in the tray: it opens its window instead
+    app = App()
+    if autorec:
+        app.auto = autorec.AutoRecorder(app, drive_upload_quiet, app.say)
+        if not app.auto.s.player: app.auto.s.player = SETTINGS.get('player', '')
+        autorec.hold_guard(lambda: app.auto.ui.on_main(app.show))
+        app.auto.tray(app.show, app.quit_app)
+        if app.auto.s.enabled: app.auto.run_loop()
+        app.protocol('WM_DELETE_WINDOW', app.hide_or_quit)
+    if background:
+        if not (app.auto and app.auto.s.enabled): sys.exit(0)   # start-up link left over, recorder off
+        app.withdraw()
+    app.mainloop()

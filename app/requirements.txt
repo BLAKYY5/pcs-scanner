@@ -5,3 +5,7 @@ google-auth
 google-auth-oauthlib
 google-api-python-client
 tkinterdnd2==0.6.4
+psutil==7.2.2
+obsws-python==1.8.1
+pystray==0.19.5
+requests>=2.32
