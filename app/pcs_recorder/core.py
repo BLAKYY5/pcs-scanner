@@ -45,12 +45,17 @@ class Recorder:
         self.scan_proc: subprocess.Popen | None = None
         self.scan_key: str | None = None
         self.paused = False
+        self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.lock = threading.RLock()
-        # a recording left "recording" by a crash is just a finished recording
-        for e in self.idx.values():
+        # after a crash or restart: a "recording" is just finished; unfinished scans start again
+        for k in sorted(self.idx, key=lambda k: self.idx[k].started):
+            e = self.idx[k]
             if e.status == "recording":
                 e.status = "recorded"
+            elif e.status in ("scanning", "waiting"):
+                e.status = "waiting"
+                self.queue.append(k)
         retention.save_index(self.idx)
 
     # ---------------------------------------------------------- main loop step
@@ -62,6 +67,8 @@ class Recorder:
             elif not apex and self.current is not None:
                 self._stop_and_offer_scan()
             self._manage_scan(apex)
+            if self.scan_proc is None:
+                self._next_in_queue(apex)
             if not apex and self.scan_proc is None:
                 self._retry_uploads()
 
@@ -126,6 +133,12 @@ class Recorder:
     # ---------------------------------------------------------- scanning
     def _begin_scan(self, key: str) -> None:
         e = self.idx[key]
+        if self.scan_proc is not None:          # another session is being scanned: wait for it
+            e.status = "waiting"
+            if key not in self.queue:
+                self.queue.append(key)
+            retention.save_index(self.idx)
+            return
         out = Path(e.path).with_suffix(".scan")
         out.mkdir(exist_ok=True)
         try:
@@ -169,6 +182,13 @@ class Recorder:
             e.note = "" if code == 0 else f"scanner exit code {code}"
             retention.save_index(self.idx)
         self.status = "Waiting for Apex"
+        self._next_in_queue(apex)
+
+    def _next_in_queue(self, apex: bool) -> None:
+        while self.queue and self.scan_proc is None and not apex:
+            k = self.queue.pop(0)
+            if k in self.idx:
+                self._begin_scan(k)
 
     # ---------------------------------------------------------- upload
     def _retry_uploads(self) -> None:

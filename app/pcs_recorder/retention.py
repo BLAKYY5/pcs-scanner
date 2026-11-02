@@ -79,12 +79,12 @@ def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[s
 
     for k in sorted(idx, key=lambda k: idx[k].started):
         e = idx[k]
-        if k not in protect and e.status not in ("recording", "scanning") and now - e.started > keep_days * 86400:
+        if k not in protect and e.status not in ("recording", "scanning", "waiting") and now - e.started > keep_days * 86400:
             drop(k, f"older than {keep_days} days")
 
     cap = max_gb * 1024 ** 3
     total = sum(size_of(e) for e in idx.values())
-    order = sorted((k for k in idx if k not in protect and idx[k].status not in ("recording", "scanning")),
+    order = sorted((k for k in idx if k not in protect and idx[k].status not in ("recording", "scanning", "waiting")),
                    key=lambda k: (idx[k].status not in DONE, idx[k].started))
     for k in order:
         if total <= cap:

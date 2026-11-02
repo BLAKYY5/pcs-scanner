@@ -15,12 +15,13 @@ from pcs_recorder import retention, settings  # noqa: E402
 from pcs_recorder.core import Recorder  # noqa: E402
 
 GB = 1024 ** 3
+UNIT = 1024 ** 2      # tests use MB-sized files (Windows has no sparse files) and scale the limit to match
 
 
 def make_file(folder: Path, name: str, size: int, age_days: float = 0) -> Path:
     p = folder / name
     with open(p, "wb") as f:
-        f.truncate(size)            # sparse file: reports `size` without using disk
+        f.truncate(size)
     t = time.time() - age_days * 86400
     os.utime(p, (t, t))
     return p
@@ -32,16 +33,16 @@ def test_retention_rules():
     idx = {}
     for i, (age, status, size) in enumerate([(10, "uploaded", 1), (5, "uploaded", 30), (4, "recorded", 30),
                                               (2, "uploaded", 30), (1, "recorded", 30), (0, "recording", 30)]):
-        p = make_file(folder, f"rec{i}.mp4", size * GB)
+        p = make_file(folder, f"rec{i}.mp4", size * UNIT)
         idx[f"k{i}"] = retention.Entry(path=str(p), started=time.time() - age * 86400, status=status)
-    other = make_file(folder, "my own clip.mp4", 50 * GB)          # not ours: must survive
-    removed = retention.enforce(idx, keep_days=7, max_gb=100, protect={"k5"})
+    other = make_file(folder, "my own clip.mp4", 50 * UNIT)        # not ours: must survive
+    removed = retention.enforce(idx, keep_days=7, max_gb=100 * UNIT / GB, protect={"k5"})
     names = [n for n, _ in removed]
     assert names[0] == "rec0.mp4", removed                          # older than 7 days
-    # 150 GB left > 100 GB: oldest *uploaded* goes before older unscanned ones
+    # 150 units left > 100: oldest *uploaded* goes before older unscanned ones
     assert "rec1.mp4" in names and "rec3.mp4" in names and "rec2.mp4" not in names, removed
     assert "k5" in idx and other.exists()
-    assert retention.folder_usage(idx) <= 100 * GB
+    assert retention.folder_usage(idx) <= 100 * UNIT
 
 
 class FakeOBS:
@@ -57,7 +58,7 @@ class FakeOBS:
     def stop(self):
         self.rec = False
         self.n += 1
-        return str(make_file(self.folder, f"Apex Legends_{self.n}.mp4", 3 * GB))
+        return str(make_file(self.folder, f"Apex Legends_{self.n}.mp4", 3 * UNIT))
 
 
 class FakeHub:
@@ -127,13 +128,14 @@ def test_full_session_scan_and_upload():
     assert len(tree) >= 2 and all(p.status() == psutil.STATUS_STOPPED for p in tree), [p.status() for p in tree]
     time.sleep(2.5); r.tick()
     assert r.scan_proc is not None and hub.uploads == []   # still suspended, nothing sent mid-game
-    apex["on"] = False
-    for _ in range(10):
+    apex["on"] = False                                # closes again: 2nd session recorded, its scan waits in line
+    for _ in range(30):
         r.tick(); time.sleep(0.5)
-        if hub.uploads:
+        if len(hub.uploads) == 2:
             break
-    assert hub.uploads and sorted(hub.uploads[0]) == ["game1.feed.json", "session.scan.json"], hub.uploads
-    assert list(r.idx.values())[0].status == "uploaded"
+    assert len(hub.uploads) == 2 and all(sorted(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
+                                         sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), hub.uploads
+    assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
     assert hub.reports[:3] == ["recording", "recorded", "uploaded"] or "uploaded" in hub.reports
 
 
