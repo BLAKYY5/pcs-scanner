@@ -133,8 +133,8 @@ class Sender:
 
     def upload(self, files: list[Path]) -> None:
         if not files:
-            return
-        sent, errors = False, []
+            return []
+        sent, errors, where = False, [], []
         if self.s.hub_url:
             import requests
             handles = [("files", (f.name, open(f, "rb"))) for f in files]
@@ -143,17 +143,23 @@ class Sender:
                 r.raise_for_status()
                 sent = True
             except Exception as e:
-                errors.append(f"hub: {e}")
+                errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
             finally:
                 for _, (_, h) in handles:
                     h.close()
+            if sent:
+                where.append("the team hub")
         try:
             if self.drive_upload([str(f) for f in files]):
                 sent = True
+                where.append("Google Drive")
+            elif not self.s.hub_url:
+                errors.append("Not signed in with Google: open PCS Scanner and press Sign in with Google")
         except Exception as e:
-            errors.append(f"drive: {e}")
+            errors.append(f"Google Drive upload failed ({e})")
         if not sent:
-            raise ConnectionError("; ".join(errors) or "no hub address and not signed in with Google")
+            raise ConnectionError("; ".join(errors) or "No destination set")
+        return where
 
 
 def scan_process(video: str, out: str) -> subprocess.Popen:
@@ -171,10 +177,12 @@ def scan_process(video: str, out: str) -> subprocess.Popen:
 class UI:
     """Tray icon + small dialogs. Tk calls are passed to the main thread through a queue."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, log_line=None):
         self.root = root
         self.calls: queue.Queue = queue.Queue()
         self.icon = None
+        self.log_line = log_line        # the app window's log, when it exists
+        self.toast_win = None
         root.after(200, self._pump)
 
     def _pump(self):
@@ -188,13 +196,39 @@ class UI:
     def on_main(self, fn):
         self.calls.put(fn)
 
-    def notify(self, title: str, text: str) -> None:
+    def notify(self, title: str, text: str, sticky: bool = False) -> None:
+        """Tell the player what's happening: a small window in the corner (Windows notifications are
+        often hidden during and after games), plus the app's log. Errors stay until closed."""
         log.info("%s: %s", title, text)
-        if self.icon:
+        if self.log_line:
             try:
-                self.icon.notify(text, title)
+                self.log_line(f"[Auto-record] {title}: {text}")
             except Exception:
                 pass
+        self.on_main(lambda: self._toast(title, text, sticky))
+
+    def _toast(self, title: str, text: str, sticky: bool) -> None:
+        if self.toast_win is not None:
+            try:
+                self.toast_win.destroy()
+            except tk.TclError:
+                pass
+        w = tk.Toplevel(self.root)
+        self.toast_win = w
+        w.overrideredirect(True)
+        w.configure(bg=PANEL, highlightthickness=1, highlightbackground=RED if sticky else "#302e2a")
+        w.attributes("-topmost", True)
+        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        w.geometry(f"390x+{sw - 410}+{sh - 240}")
+        head = tk.Frame(w, bg=PANEL)
+        head.pack(fill="x", padx=14, pady=(10, 0))
+        tk.Label(head, text=title.upper(), bg=PANEL, fg=RED, font=("Segoe UI", 10, "bold")).pack(side="left")
+        tk.Button(head, text="✕", command=w.destroy, bg=PANEL, fg=MUTED, relief="flat", bd=0,
+                  activebackground=PANEL).pack(side="right")
+        tk.Label(w, text=text, bg=PANEL, fg=INK, font=("Segoe UI", 10), wraplength=360, justify="left").pack(
+            anchor="w", padx=14, pady=(2, 12))
+        if not sticky:
+            w.after(12000, lambda: w.winfo_exists() and w.destroy())
 
     def ask_scan(self, minutes: float, gb: float, auto: bool, delay: int) -> bool:
         done = threading.Event()
@@ -320,7 +354,7 @@ class AutoRecorder:
     def __init__(self, root: tk.Tk, drive_upload, say=print):
         self.root, self.say = root, say
         self.s = st.load()
-        self.ui = UI(root)
+        self.ui = UI(root, say)
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
         self.thread = None

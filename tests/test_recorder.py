@@ -72,6 +72,7 @@ class FakeHub:
         if self.down:
             raise ConnectionError("hub offline")
         self.uploads.append([f.name for f in files])
+        return ["the team hub"]
 
 
 class FakeUI:
@@ -82,8 +83,8 @@ class FakeUI:
         self.asked += 1
         return self.answer
 
-    def notify(self, t, m):
-        self.notes.append(m)
+    def notify(self, t, m, sticky=False):
+        self.notes.append((t, m, sticky))
 
 
 def fake_scan(video, out):
@@ -136,6 +137,9 @@ def test_full_session_scan_and_upload():
     assert len(hub.uploads) == 2 and all(sorted(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
                                          sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), hub.uploads
     assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
+    titles = [t for t, _, _ in ui.notes]
+    for t in ("Scanning your session", "Scan finished", "Results sent"):
+        assert any(x.startswith(t) for x in titles), titles      # the player is told at every step
     assert hub.reports[:3] == ["recording", "recorded", "uploaded"] or "uploaded" in hub.reports
 
 
@@ -146,7 +150,9 @@ def test_skip_and_offline_hub():
     for _ in range(8):
         r2.tick(); time.sleep(0.5)
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
-    hub2.down = False; r2.tick()
+    fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
+    assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
+    hub2.down = False; r2.next_upload = 0; r2.tick()
     assert list(r2.idx.values())[0].status == "uploaded"
 
 

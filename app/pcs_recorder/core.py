@@ -45,6 +45,7 @@ class Recorder:
         self.scan_proc: subprocess.Popen | None = None
         self.scan_key: str | None = None
         self.paused = False
+        self.next_upload = 0.0
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.lock = threading.RLock()
@@ -151,6 +152,9 @@ class Recorder:
         e.status = "scanning"
         retention.save_index(self.idx)
         self.status = "Scanning last session"
+        waiting = f" ({len(self.queue)} more after this one)" if self.queue else ""
+        self.ui.notify("Scanning your session" + waiting,
+                       "Usually a few minutes. You can keep using your PC; it pauses by itself if you start Apex.")
 
     def _manage_scan(self, apex: bool) -> None:
         if not self.scan_proc:
@@ -181,6 +185,12 @@ class Recorder:
             e.status = "scanned" if code == 0 else "failed"
             e.note = "" if code == 0 else f"scanner exit code {code}"
             retention.save_index(self.idx)
+            if code == 0:
+                self.ui.notify("Scan finished", f"{summary(e)}. Sending the results…")
+            else:
+                self.ui.notify("Scan failed", f"The scanner stopped with an error (code {code}). The recording is kept; "
+                               f"details in {Path(e.path).with_suffix('.scan') / 'scan.log'}", sticky=True)
+        self.next_upload = 0
         self.status = "Waiting for Apex"
         self._next_in_queue(apex)
 
@@ -192,20 +202,29 @@ class Recorder:
 
     # ---------------------------------------------------------- upload
     def _retry_uploads(self) -> None:
+        if self.clock() < self.next_upload:          # after a failure, try again once a minute
+            return
         for key, e in list(self.idx.items()):
             if e.status != "scanned":
                 continue
             out = Path(e.path).with_suffix(".scan")
             files = sorted(p for p in out.rglob("*") if p.is_file()) if out.exists() else []
             try:
-                self.hub.upload(files)
+                where = self.hub.upload(files)
             except Exception as ex:
-                log.info("hub not reachable, will retry: %s", ex)
+                log.info("results not sent, will retry: %s", ex)
+                self.next_upload = self.clock() + 60
+                if not e.note.startswith("not sent"):    # tell the player once, not every minute
+                    e.note = f"not sent yet: {ex}"
+                    retention.save_index(self.idx)
+                    self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon as "
+                                   "it works.", sticky=True)
                 return
-            e.status = "uploaded"
+            e.status, e.note = "uploaded", ""
             retention.save_index(self.idx)
             self.hub.report(self._report(key))
-            self.ui.notify("PCS Recorder", f"Scan sent to the hub ({len(files)} files).")
+            to = " and ".join(where) if where else "the team"
+            self.ui.notify("Results sent", f"{summary(e)}: sent to {to}. Nothing else to do.")
 
     # ---------------------------------------------------------- housekeeping
     def cleanup(self) -> list[tuple[str, str]]:
@@ -225,6 +244,24 @@ class Recorder:
         return {"id": f"{self.s.player or 'player'}-{key}", "player": self.s.player, "file": Path(e.path).name if e.path else "",
                 "started": e.started, "status": e.status, "note": e.note,
                 "size": retention.size_of(e) if e.path else 0, "keep_days": self.s.keep_days, "max_gb": self.s.max_gb}
+
+
+MAP_NAMES = {"WE": "World's Edge", "SP": "Storm Point", "ED": "E-District", "OL": "Olympus",
+             "BM": "Broken Moon", "KC": "Kings Canyon"}
+
+
+def summary(e) -> str:
+    """'2 games: Olympus, World's Edge' from the scanner's result file, or a plain fallback."""
+    import json
+    try:
+        f = Path(e.path).with_suffix(".scan") / (Path(e.path).stem + ".scan.json")
+        games = json.loads(f.read_text(encoding="utf-8")).get("games", [])
+        maps = [MAP_NAMES.get(g.get("map"), g.get("map") or "?") for g in games]
+        if not games:
+            return "No game found in this recording"
+        return f"{len(games)} game{'s' if len(games) > 1 else ''}: {', '.join(maps)}"
+    except Exception:
+        return "Your session"
 
 
 def _low_priority() -> int:
