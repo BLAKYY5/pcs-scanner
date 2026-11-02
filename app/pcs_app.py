@@ -119,7 +119,7 @@ def vtuple(v):
 def check_update():
     """Latest GitHub release of the app repo; returns (version, exe_url, page) or None."""
     repo = BUILD.get('repo')
-    if not repo or BUILD.get('version') == 'dev': return None
+    if not repo or str(BUILD.get('version', 'dev')).startswith('dev'): return None   # test builds: never "update" back
     try:
         req = urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/latest', headers={'Accept': 'application/vnd.github+json', 'User-Agent': APP})
         rel = json.load(urllib.request.urlopen(req, timeout=8))
@@ -229,8 +229,13 @@ class App(Base):
         self.after(150, self.pump)
 
     def startup(self):
-        signed = os.path.exists(TOKEN_F)
-        self.gbtn.configure(text='Google: signed in' if signed else 'Sign in with Google')
+        self.gbtn.configure(text='Google: checking…')
+        def check_google():
+            try: ok = drive_service(interactive=False) is not None
+            except Exception: ok = False
+            self.after(0, lambda: self.gbtn.configure(text='Google: signed in' if ok else
+                ('Sign in with Google (expired)' if os.path.exists(TOKEN_F) else 'Sign in with Google')))
+        threading.Thread(target=check_google, daemon=True).start()
         self.say(f'{APP} {BUILD.get("version")} — results are saved in {OUT}')
         def upd():
             u = check_update()
@@ -243,7 +248,10 @@ class App(Base):
 
     def signin(self):
         def go():
-            try: drive_service(True); self.say('Signed in with Google.'); self.gbtn.configure(text='Google: signed in')
+            try:
+                if os.path.exists(TOKEN_F) and drive_service(interactive=False) is None: os.remove(TOKEN_F)   # expired: ask again
+                drive_service(True); self.say('Signed in with Google.'); self.gbtn.configure(text='Google: signed in')
+                if self.auto: self.auto.rec.next_upload = 0      # send any waiting results right away
             except Exception as e: self.say(f'Google sign-in failed: {e}')
         threading.Thread(target=go, daemon=True).start()
 
@@ -338,7 +346,7 @@ if __name__ == '__main__':
         sys.exit(0)                    # already running in the tray: it opens its window instead
     app = App()
     if autorec:
-        app.auto = autorec.AutoRecorder(app, drive_upload_quiet, app.say)
+        app.auto = autorec.AutoRecorder(app, drive_upload_quiet, app.say, signin=lambda: (app.show(), app.signin()))
         if not app.auto.s.player: app.auto.s.player = SETTINGS.get('player', '')
         autorec.hold_guard(lambda: app.auto.ui.on_main(app.show))
         app.auto.tray(app.show, app.quit_app)

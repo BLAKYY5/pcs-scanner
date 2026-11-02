@@ -34,6 +34,11 @@ def apex_running() -> bool:
     return False
 
 
+class NeedsSignIn(ConnectionError):
+    """Results couldn't be sent because the Google sign-in is missing or expired (message shows a Sign in button)."""
+    action = "signin"
+
+
 class Recorder:
     def __init__(self, s: Settings, obs, hub, ui, start_scan, is_apex_running=apex_running, clock=time.time):
         """start_scan(video_path, out_dir) -> subprocess.Popen running the scanner on that file."""
@@ -218,7 +223,7 @@ class Recorder:
                     e.note = f"not sent yet: {ex}"
                     retention.save_index(self.idx)
                     self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon as "
-                                   "it works.", sticky=True)
+                                   "it works.", sticky=True, action=getattr(ex, "action", None))
                 return
             e.status, e.note = "uploaded", ""
             retention.save_index(self.idx)

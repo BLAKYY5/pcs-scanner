@@ -17,7 +17,7 @@ from tkinter import filedialog, ttk
 
 from . import obs as obsmod
 from . import settings as st
-from .core import Recorder
+from .core import NeedsSignIn, Recorder
 
 log = logging.getLogger("recorder")
 PANEL, INK, MUTED, RED = "#1b1a18", "#f1efea", "#a39f96", "#ba1c14"
@@ -163,7 +163,8 @@ class Sender:
                 sent = True
                 where.append("Google Drive")
             elif not self.s.hub_url:
-                errors.append("Not signed in with Google: open PCS Scanner and press Sign in with Google")
+                raise NeedsSignIn("Your Google sign-in has expired or is missing, so the results couldn't go to "
+                                  "Drive")
         except Exception as e:
             errors.append(f"Google Drive upload failed ({e})")
         if not sent:
@@ -205,7 +206,7 @@ class UI:
     def on_main(self, fn):
         self.calls.put(fn)
 
-    def notify(self, title: str, text: str, sticky: bool = False) -> None:
+    def notify(self, title: str, text: str, sticky: bool = False, action: str | None = None) -> None:
         """Tell the player what's happening: a small window in the corner (Windows notifications are
         often hidden during and after games), plus the app's log. Errors stay until closed."""
         log.info("%s: %s", title, text)
@@ -214,9 +215,11 @@ class UI:
                 self.log_line(f"[Auto-record] {title}: {text}")
             except Exception:
                 pass
-        self.on_main(lambda: self._toast(title, text, sticky))
+        self.on_main(lambda: self._toast(title, text, sticky, action))
 
-    def _toast(self, title: str, text: str, sticky: bool) -> None:
+    actions: dict = {}          # name -> (button label, callback), e.g. "signin" -> ("Sign in with Google", fn)
+
+    def _toast(self, title: str, text: str, sticky: bool, action: str | None = None) -> None:
         if self.toast_win is not None:
             try:
                 self.toast_win.destroy()
@@ -227,15 +230,25 @@ class UI:
         w.overrideredirect(True)
         w.configure(bg=PANEL, highlightthickness=1, highlightbackground=RED if sticky else "#302e2a")
         w.attributes("-topmost", True)
-        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
-        w.geometry(f"390x+{sw - 410}+{sh - 240}")
+        w.withdraw()                                  # build it first, place it once its size is known
         head = tk.Frame(w, bg=PANEL)
         head.pack(fill="x", padx=14, pady=(10, 0))
         tk.Label(head, text=title.upper(), bg=PANEL, fg=RED, font=("Segoe UI", 10, "bold")).pack(side="left")
         tk.Button(head, text="✕", command=w.destroy, bg=PANEL, fg=MUTED, relief="flat", bd=0,
                   activebackground=PANEL).pack(side="right")
-        tk.Label(w, text=text, bg=PANEL, fg=INK, font=("Segoe UI", 10), wraplength=360, justify="left").pack(
-            anchor="w", padx=14, pady=(2, 12))
+        body = tk.Label(w, text=text, bg=PANEL, fg=INK, font=("Segoe UI", 10), wraplength=360, justify="left")
+        body.pack(anchor="w", padx=14, pady=(2, 12))
+        if action in self.actions:
+            label, fn = self.actions[action]
+            tk.Button(w, text=label, command=lambda: (w.destroy(), fn()), bg=RED, fg="white", relief="flat",
+                      padx=12).pack(anchor="e", padx=14, pady=(0, 12))
+        else:
+            body.bind("<Button-1>", lambda _e: w.destroy())      # click the message to close it
+        w.update_idletasks()
+        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        ww, wh = max(390, w.winfo_reqwidth()), w.winfo_reqheight()
+        w.geometry(f"{ww}x{wh}+{sw - ww - 20}+{sh - wh - 80}")
+        w.deiconify()
         if not sticky:
             w.after(12000, lambda: w.winfo_exists() and w.destroy())
 
@@ -378,10 +391,12 @@ def first_time_setup(s: st.Settings, say) -> None:
 class AutoRecorder:
     """Owns the Recorder and its loop; created once per app process."""
 
-    def __init__(self, root: tk.Tk, drive_upload, say=print):
+    def __init__(self, root: tk.Tk, drive_upload, say=print, signin=None):
         self.root, self.say = root, say
         self.s = st.load()
         self.ui = UI(root, say)
+        if signin:
+            self.ui.actions["signin"] = ("Sign in with Google", signin)
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
         self.thread = None

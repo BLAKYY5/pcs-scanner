@@ -70,7 +70,8 @@ class FakeHub:
 
     def upload(self, files):
         if self.down:
-            raise ConnectionError("hub offline")
+            from pcs_recorder.core import NeedsSignIn
+            raise NeedsSignIn("Your Google sign-in has expired")
         self.uploads.append([f.name for f in files])
         return ["the team hub"]
 
@@ -83,8 +84,8 @@ class FakeUI:
         self.asked += 1
         return self.answer
 
-    def notify(self, t, m, sticky=False):
-        self.notes.append((t, m, sticky))
+    def notify(self, t, m, sticky=False, action=None):
+        self.notes.append((t, m, sticky, action))
 
 
 def fake_scan(video, out):
@@ -137,7 +138,7 @@ def test_full_session_scan_and_upload():
     assert len(hub.uploads) == 2 and all(sorted(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
                                          sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), hub.uploads
     assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
-    titles = [t for t, _, _ in ui.notes]
+    titles = [n[0] for n in ui.notes]
     for t in ("Scanning your session", "Scan finished", "Results sent"):
         assert any(x.startswith(t) for x in titles), titles      # the player is told at every step
     assert hub.reports[:3] == ["recording", "recorded", "uploaded"] or "uploaded" in hub.reports
@@ -152,6 +153,7 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
+    assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
     hub2.down = False; r2.next_upload = 0; r2.tick()
     assert list(r2.idx.values())[0].status == "uploaded"
 
@@ -175,6 +177,33 @@ def test_quality_setting():
     assert "RecEncoder=av1_texture_amf" in ini and "FPSInt=60" in ini and "BaseCX=2560" in ini
     s.bitrate_mbps = 16
     assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
+
+
+def test_message_window_placement():
+    """Runs where a screen exists (the Windows build machine); skipped elsewhere."""
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:
+        print("  (no display: message window test skipped)")
+        return
+    root.withdraw()
+    from pcs_recorder.runtime import UI
+    ui = UI(root)
+    ui.actions["signin"] = ("Sign in with Google", lambda: None)
+    for sticky, action in ((False, None), (True, "signin")):
+        ui._toast("Results not sent yet", "Your Google sign-in has expired. They are kept and sent later.", sticky, action)
+        w = ui.toast_win
+        root.update()
+        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
+        x, y, ww, wh = w.winfo_rootx(), w.winfo_rooty(), w.winfo_width(), w.winfo_height()
+        assert ww >= 390 and wh >= 60, (ww, wh)                        # a real window, not an empty box
+        assert x > sw / 2 and y > sh / 2, (x, y, sw, sh)                # bottom-right corner, not top-left
+        assert x + ww <= sw and y + wh <= sh, (x, y, ww, wh, sw, sh)    # fully on screen
+        texts = [c.cget("text") for c in w.winfo_children() if isinstance(c, (tk.Label, tk.Button))]
+        assert any("expired" in t for t in texts), texts
+        assert (action is None) or any(t == "Sign in with Google" for t in texts), texts
+    root.destroy()
 
 
 if __name__ == "__main__":
