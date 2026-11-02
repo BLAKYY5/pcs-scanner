@@ -131,6 +131,7 @@ class Recorder:
             if mp4.exists():
                 size = mp4.stat().st_size
                 if size == last and size > 0:
+                    drop_original(mp4)
                     return str(mp4)
                 last = size
             time.sleep(2)
@@ -234,6 +235,9 @@ class Recorder:
     # ---------------------------------------------------------- housekeeping
     def cleanup(self) -> list[tuple[str, str]]:
         with self.lock:
+            for e in self.idx.values():              # .mkv originals left by an earlier version or a locked file
+                if e.path.lower().endswith(".mp4"):
+                    drop_original(Path(e.path))
             protect = {k for k in (self.current, self.scan_key) if k}
             removed = retention.enforce(self.idx, self.s.keep_days, self.s.max_gb, protect)
             retention.save_index(self.idx)
@@ -249,6 +253,19 @@ class Recorder:
         return {"id": f"{self.s.player or 'player'}-{key}", "player": self.s.player, "file": Path(e.path).name if e.path else "",
                 "started": e.started, "status": e.status, "note": e.note,
                 "size": retention.size_of(e) if e.path else 0, "keep_days": self.s.keep_days, "max_gb": self.s.max_gb}
+
+
+def drop_original(mp4: Path) -> bool:
+    """OBS remuxes the .mkv it records into an .mp4 and keeps both. Once the .mp4 is complete
+    (at least as large as the .mkv, give or take container overhead) the .mkv is just a duplicate."""
+    mkv = mp4.with_suffix(".mkv")
+    try:
+        if mkv.exists() and mp4.exists() and mp4.stat().st_size >= 0.98 * mkv.stat().st_size:
+            mkv.unlink()
+            return True
+    except OSError:
+        pass                                          # still open somewhere: try again at the next clean-up
+    return False
 
 
 MAP_NAMES = {"WE": "World's Edge", "SP": "Storm Point", "ED": "E-District", "OL": "Olympus",

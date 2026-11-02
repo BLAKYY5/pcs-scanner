@@ -158,6 +158,16 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "uploaded"
 
 
+def test_mkv_duplicate_removed():
+    from pcs_recorder.core import drop_original
+    d = TMP / "remux"; d.mkdir()
+    mkv = make_file(d, "Apex Legends_x.mkv", 10 * UNIT)
+    part = make_file(d, "Apex Legends_x.mp4", 4 * UNIT)            # remux still running: keep the original
+    assert not drop_original(part) and mkv.exists()
+    make_file(d, "Apex Legends_x.mp4", 10 * UNIT + 1000)           # remux done: the .mkv is a duplicate
+    assert drop_original(d / "Apex Legends_x.mp4") and not mkv.exists()
+
+
 def test_settings_limits():
     s = settings.Settings(keep_days=0, max_gb=5, capture="weird").clamp()
     assert (s.keep_days, s.max_gb, s.capture) == (1, settings.MIN_MAX_GB, "window")
