@@ -24,6 +24,8 @@ From then on PCS Scanner starts with Windows in the tray (red dot, bottom right)
   low priority and pauses by itself if you start Apex again. Only the results are sent, never the video.
 - **Your limits** (Auto-record… window): keep recordings N days (default 7) and a maximum folder size
   (default 100 GB, oldest deleted first). Only recordings the app made are ever deleted.
+- **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
+  8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 
 The app only has Google's `drive.file` permission: it can see and change only the files it creates
 (a "PCS Scans" folder in your Drive, shared read-only with the coach).

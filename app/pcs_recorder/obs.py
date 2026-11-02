@@ -100,9 +100,12 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
         f"RecEncoder={encoder}", "RecTracks=1", "",
         "[Video]", f"BaseCX={width}", f"BaseCY={height}", f"OutputCX={width}", f"OutputCY={height}",
         "FPSType=1", "FPSInt=60", "AutoRemux=true", ""]), encoding="utf-8")
-    # constant quality, keyframe every second (the scanner seeks on keyframes)
+    # constant bitrate (predictable file sizes for the folder limit), keyframe every second
+    # (the scanner seeks on keyframes). CBR and these keys are understood by AMD, NVIDIA and Intel encoders.
+    kbps = s.bitrate_mbps * 1000
     (prof / "recordEncoder.json").write_text(json.dumps({
-        "rate_control": "CQP", "cqp": 22, "qp": 22, "keyint_sec": 1, "preset": "quality", "bf": 0}))
+        "rate_control": "CBR", "bitrate": kbps, "max_bitrate": kbps, "buffer_size": kbps,
+        "keyint_sec": 1, "preset": "quality", "bf": 0}))
     gl = CONFIG / "global.ini"
     gl.write_text("\n".join([
         "[General]", "FirstRun=true", "EnableAutoUpdates=false", "",
@@ -122,6 +125,23 @@ def is_running() -> bool:
         except (psutil.Error, OSError):
             pass
     return False
+
+
+def config_signature(s: Settings) -> str:
+    """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up)."""
+    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}"
+
+
+def close() -> None:
+    """Close the private OBS (only between games, never while it records)."""
+    import psutil
+    for p in psutil.process_iter(["exe"]):
+        try:
+            if p.info["exe"] and Path(p.info["exe"]) == OBS_EXE:
+                p.terminate()
+                p.wait(15)
+        except (psutil.Error, OSError):
+            pass
 
 
 def launch() -> None:

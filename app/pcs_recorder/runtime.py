@@ -99,9 +99,18 @@ class ObsAdapter:
     def ensure_ready(self) -> None:
         if not obsmod.installed():
             raise RuntimeError("OBS isn't set up yet: open PCS Scanner and turn on Auto-record")
+        sig = obsmod.config_signature(self.s)
+        if obsmod.is_running() and getattr(self, "sig", None) != sig:
+            # settings changed, or OBS was left running by an older start: restart it with the current
+            # settings (this happens as Apex starts, before recording, and takes a few seconds)
+            obsmod.close()
+            self.ready = False
         if not obsmod.is_running():
             self.ready = False
+            w, h = screen_size()
+            obsmod.write_config(self.s, self.s.encoder or "av1_texture_amf", w, h)
             obsmod.launch()
+            self.sig = sig
         if not self.ready:
             self.obs.connect()
             w, h = screen_size()
@@ -312,6 +321,23 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     mg = ttk.Spinbox(f, from_=st.MIN_MAX_GB, to=4000, increment=10, width=6)
     mg.set(s.max_gb)
     row("Maximum folder size (GB)", mg, "oldest deleted first")
+    br = ttk.Spinbox(f, from_=st.MIN_MBPS, to=st.MAX_MBPS, increment=1, width=6)
+    br.set(s.bitrate_mbps)
+    hint = ttk.Label(f, foreground="#888")
+    row("Video quality (Mbit/s)", br)
+    hint.grid(row=r[0] - 1, column=2, sticky="w", padx=8)
+
+    def update_hint(*_):
+        try:
+            mbps = max(st.MIN_MBPS, min(st.MAX_MBPS, int(br.get())))
+            gb_h = mbps * 3600 / 8 / 1000 * 1.02
+            hint.config(text=f"~{gb_h:.1f} GB per hour · ~{int(mg.get()) / gb_h:.0f} h fit in the folder")
+        except (ValueError, ZeroDivisionError):
+            hint.config(text="")
+    for wdg in (br, mg):
+        wdg.config(command=update_hint)
+        wdg.bind("<KeyRelease>", update_hint)
+    update_hint()
     ga = tk.BooleanVar(value=s.game_audio)
     row("Record game sound", ttk.Checkbutton(f, variable=ga), "never the microphone")
     au = tk.BooleanVar(value=s.auto_scan)
@@ -323,6 +349,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     def save():
         s.enabled, s.hub_url, s.folder = en.get(), hub.get(), folder.get()
         s.keep_days, s.max_gb = int(kd.get() or 7), int(mg.get() or 100)
+        s.bitrate_mbps = int(br.get() or 12)
         s.game_audio, s.auto_scan, s.capture = ga.get(), au.get(), cap.get()
         st.save(s)
         w.destroy()

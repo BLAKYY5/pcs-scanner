@@ -161,6 +161,22 @@ def test_settings_limits():
     assert (s.keep_days, s.max_gb, s.capture) == (1, settings.MIN_MAX_GB, "window")
 
 
+def test_quality_setting():
+    import json
+    from pcs_recorder import obs as obsmod
+    assert settings.Settings(bitrate_mbps=4).clamp().bitrate_mbps == settings.MIN_MBPS == 8
+    assert settings.Settings(bitrate_mbps=500).clamp().bitrate_mbps == settings.MAX_MBPS
+    s = settings.Settings(folder=str(TMP / "q"))
+    assert s.bitrate_mbps == 12 and 5 < s.gb_per_hour < 6
+    obsmod.write_config(s, "av1_texture_amf", 2560, 1440)
+    enc = json.loads((obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json").read_text())
+    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 12000 and enc["keyint_sec"] == 1, enc
+    ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
+    assert "RecEncoder=av1_texture_amf" in ini and "FPSInt=60" in ini and "BaseCX=2560" in ini
+    s.bitrate_mbps = 16
+    assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
