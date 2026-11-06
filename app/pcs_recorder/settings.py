@@ -19,6 +19,7 @@ MIN_MBPS, MAX_MBPS = 8, 60   # 8 = the floor that keeps HUD text readable (Twitc
 @dataclass
 class Settings:
     enabled: bool = False                              # auto-record on/off (turned on from the app window)
+    start_with_windows: bool = True                    # app starts in the tray when Windows starts
     player: str = ""                                   # same EEC name as in the app
     hub_url: str = ""                                  # team hub, e.g. http://pcs-hub:8420 (empty = Drive only)
     folder: str = str(Path.home() / "Videos" / "PCS Recordings")

@@ -384,7 +384,7 @@ def first_time_setup(s: st.Settings, say) -> None:
         s.encoder = obsmod.pick_encoder(s, w, h, say)
         obsmod.write_config(s, s.encoder, w, h)
     st.save(s)
-    set_start_with_windows(True)
+    set_start_with_windows(s.start_with_windows)
     say(f"Auto-record is on. Recordings go to {s.folder_path} (kept {s.keep_days} days, max {s.max_gb} GB).")
 
 
@@ -417,7 +417,7 @@ class AutoRecorder:
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
 
-    def tray(self, show_window, quit_app) -> None:
+    def tray(self, show_window, quit_app, open_settings=None) -> None:
         try:
             import pystray
             from PIL import Image, ImageDraw
@@ -431,7 +431,7 @@ class AutoRecorder:
         menu = pystray.Menu(
             pystray.MenuItem(lambda _: ("● " if self.s.enabled else "○ ") + self.rec.status, None, enabled=False),
             pystray.MenuItem("Open PCS Scanner", lambda: self.ui.on_main(show_window), default=True),
-            pystray.MenuItem("Auto-record settings…", lambda: self.ui.on_main(self.open_settings)),
+            pystray.MenuItem("Settings…", lambda: self.ui.on_main(open_settings or self.open_settings)),
             pystray.MenuItem("Open recordings folder", lambda: os.startfile(self.s.folder_path) if os.name == "nt" else None),
             pystray.MenuItem("Quit", lambda: (self.ui.icon.stop(), self.ui.on_main(quit_app))),
         )
@@ -448,7 +448,6 @@ class AutoRecorder:
             if self.s.enabled and not was:
                 self.enable()
             elif was and not self.s.enabled:
-                set_start_with_windows(False)
                 self.say("Auto-record is off.")
         settings_window(self.root, self.s, self.rec.usage(), saved)
 

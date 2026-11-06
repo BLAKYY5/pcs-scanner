@@ -28,7 +28,9 @@ jobs:
           pip install -r app/requirements.txt pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
       - name: Test auto-record logic (fake OBS and game, real process pausing on Windows)
-        run: python tests/test_recorder.py
+        run: |
+          python tests/test_recorder.py
+          python tests/test_ui.py
 
       - name: Get ffmpeg
         shell: pwsh
@@ -58,9 +60,9 @@ jobs:
       - name: Build the .exe
         shell: pwsh
         run: |
-          $data = @("scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
+          $data = @("app/web;web", "scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "tkinterdnd2", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--paths", "app")
+          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--paths", "app")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
 

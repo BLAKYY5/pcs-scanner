@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PCS Scanner</title>
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="top">
+  <a class="brand" href="#home" aria-label="PCS Scanner home">
+    <svg viewBox="0 0 40 40" aria-hidden="true"><rect x="1" y="1" width="38" height="38" rx="8" fill="#ba1c14"/><circle cx="20" cy="20" r="9" fill="none" stroke="#fff" stroke-width="3"/><circle cx="20" cy="20" r="3.5" fill="#fff"/></svg>
+    <span><small>PCS Esports</small><b>Scan<em>ner</em></b></span>
+  </a>
+  <nav id="nav">
+    <a href="#home" data-page="home">Home</a>
+    <a href="#recordings" data-page="recordings">Recordings</a>
+    <a href="#settings" data-page="settings">Settings</a>
+  </nav>
+  <button id="updateBtn" class="btn small brand" hidden>Update</button>
+  <div id="pill" class="live"><i></i><span>Starting…</span></div>
+</header>
+<main id="main" class="wrap"></main>
+<div id="toast" class="toast" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
