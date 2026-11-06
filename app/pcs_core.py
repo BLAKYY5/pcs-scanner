@@ -57,6 +57,28 @@ def drive_service(interactive=True):
         open(TOKEN_F, 'w').write(creds.to_json())
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
+YT_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+YT_TOKEN_F = os.path.join(DATA, 'youtube_token.json')
+
+def youtube_service(interactive=True):
+    """YouTube upload, signed in separately from Drive (the player picks the team channel at sign-in)."""
+    from google.oauth2.credentials import Credentials
+    from google.auth.transport.requests import Request
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from googleapiclient.discovery import build
+    creds = Credentials.from_authorized_user_file(YT_TOKEN_F, YT_SCOPES) if os.path.exists(YT_TOKEN_F) else None
+    if creds and creds.expired and creds.refresh_token:
+        try: creds.refresh(Request())
+        except Exception: creds = None
+    if not creds or not creds.valid:
+        if not interactive: return None
+        client = os.path.join(HERE, 'client.json')
+        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask Blakey for a new build.')
+        creds = InstalledAppFlow.from_client_secrets_file(client, YT_SCOPES).run_local_server(port=0, open_browser=True,
+            success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
+        open(YT_TOKEN_F, 'w').write(creds.to_json())
+    return build('youtube', 'v3', credentials=creds, cache_discovery=False)
+
 def scans_folder(svc):
     q = f"name = '{FOLDER}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     r = svc.files().list(q=q, fields='files(id,name)', spaces='drive').execute().get('files', [])

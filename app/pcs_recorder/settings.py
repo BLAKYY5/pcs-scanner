@@ -36,6 +36,12 @@ class Settings:
     hk_mute_mic: str = "ctrl+alt+3"
     hk_mark: str = "ctrl+alt+m"                        # "mark this moment" for the review
     hk_sounds: bool = True                             # short beep when a hotkey is used
+    yt_enabled: bool = False                           # one YouTube video per scrim block, to the team channel
+    yt_privacy: str = "unlisted"                       # unlisted | private
+    yt_audio: str = "game"                             # game | mix (game + Discord + mic, needs comms_consent)
+    yt_scrims_only: bool = True                        # skip blocks without a scrim game (ranked, pubs)
+    yt_gap_min: int = 45                               # recordings closer than this belong to the same block
+    yt_since: float = 0.0                              # only blocks recorded after upload was turned on
     auto_scan: bool = True                             # scan after Apex closes unless the player clicks Skip
     scan_delay_s: int = 60                             # countdown before the scan starts on its own
     capture: str = "window"                            # window | game | display
@@ -54,6 +60,9 @@ class Settings:
         for k in ("hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark"):
             v = (getattr(self, k) or "").strip().lower().replace(" ", "")
             setattr(self, k, v if v == "" or parse_hotkey(v) else "")
+        self.yt_privacy = self.yt_privacy if self.yt_privacy in ("unlisted", "private") else "unlisted"
+        self.yt_audio = self.yt_audio if self.yt_audio in ("game", "mix") else "game"
+        self.yt_gap_min = max(10, min(240, int(self.yt_gap_min)))
         if self.capture not in ("window", "game", "display"):
             self.capture = "window"
         return self

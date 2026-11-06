@@ -133,6 +133,7 @@ class _S:            # recorder settings stand-in
     encoder, gb_per_hour = "av1_texture_amf", 5.5
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
+    yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
 
     def __init__(self, folder):
         self.folder = folder

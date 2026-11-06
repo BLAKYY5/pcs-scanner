@@ -40,6 +40,11 @@ and tests your graphics card for a few seconds. From then on:
   results for the comms review (can be turned off).
 - **Hotkeys while recording** (only active while Apex is recorded): Ctrl+Alt+M marks a moment for the review,
   Ctrl+Alt+1/2/3 mute or unmute game / Discord / mic. A short beep confirms. All can be changed in Settings.
+- **YouTube (optional)**: one video per scrim block per player, uploaded to the team channel (Settings → YouTube,
+  sign in once and pick the team channel). Recordings less than 45 min apart are one block (an Apex restart
+  mid-block stays one video); chapters for each game, marked moments in the description; unlisted or private;
+  game sound only, or game + comms when the team agreed. Uploads only while Apex is closed. Older recordings
+  only when you press "YouTube" on them.
 - **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
   8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 

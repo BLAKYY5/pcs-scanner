@@ -28,7 +28,8 @@ WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
-              "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds")
+              "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
+              "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 
 
@@ -89,6 +90,7 @@ class Backend:
         self.auto = auto                                   # pcs_recorder.runtime.AutoRecorder or None
         self.messages = collections.deque(maxlen=200)      # shown on the Home page
         self.google = "checking"                           # ok | expired | none | checking
+        self.youtube = "checking"                          # same, for the YouTube upload sign-in
         self.update = None                                 # (tag, exe_url, page) when a new version exists
         self.scan_queue: list[str] = []
         self.scan_now: str | None = None
@@ -111,6 +113,38 @@ class Backend:
         except Exception:
             ok = False
         self.google = "ok" if ok else ("expired" if os.path.exists(core.TOKEN_F) else "none")
+
+    def check_youtube(self) -> None:
+        try:
+            ok = core.youtube_service(interactive=False) is not None
+        except Exception:
+            ok = False
+        self.youtube = "ok" if ok else ("expired" if os.path.exists(core.YT_TOKEN_F) else "none")
+
+    def yt_signin(self) -> None:
+        def go():
+            try:
+                if os.path.exists(core.YT_TOKEN_F) and core.youtube_service(interactive=False) is None:
+                    os.remove(core.YT_TOKEN_F)
+                core.youtube_service(True)
+                self.youtube = "ok"
+                self.say("Signed in to YouTube. Scrim blocks will be uploaded to the channel you picked.")
+            except Exception as e:
+                self.say(f"YouTube sign-in failed: {e}")
+        threading.Thread(target=go, daemon=True).start()
+
+    def yt_upload(self, item_id: str) -> int:
+        a = self.auto
+        if not a or not a.rec.youtube:
+            raise RuntimeError("YouTube upload isn't available in this build")
+        it = self.find(item_id)
+        key = next((k for k, e in a.rec.idx.items() if it and e.path and
+                    os.path.normcase(os.path.abspath(e.path)) == os.path.normcase(os.path.abspath(it["path"]))), None)
+        if not key:
+            raise RuntimeError("Only recordings made by auto-record can be uploaded as a block")
+        keys = a.rec.youtube.request(key) or []
+        self.say(f"Block of {len(keys)} recording(s) queued for YouTube. It uploads once Apex is closed.")
+        return len(keys)
 
     def signin(self) -> None:
         def go():
@@ -167,8 +201,13 @@ class Backend:
                 status = "scanning"
             elif p in self.scan_queue:
                 status = "waiting"
+            yt = None
+            if norm in rec_index and self.auto and getattr(self.auto.rec, "youtube", None):
+                b = self.auto.rec.youtube.block_of(rec_index[norm][0])
+                if b:
+                    yt = {k: b.get(k) for k in ("status", "url", "title", "why", "error")}
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
-                        "status": status, "scan": summary, "auto": norm in rec_index}
+                        "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt}
         return sorted(items.values(), key=lambda x: -x["mtime"])
 
     def find(self, item_id: str) -> dict | None:
@@ -297,7 +336,9 @@ class Backend:
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder}
+        up = getattr(a.rec, "youtube", None) if a else None
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
+                "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google,
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
@@ -315,11 +356,15 @@ class Backend:
         if a:
             a.s.player = core.SETTINGS.get("player", "")
             before = (a.s.start_with_windows,)
+            yt_before = getattr(a.s, "yt_enabled", False)
             for k in REC_FIELDS:
                 if k in body:
                     setattr(a.s, k, body[k])
             from pcs_recorder import settings as st
             st.save(a.s)
+            if getattr(a.s, "yt_enabled", False) and not yt_before:
+                a.s.yt_since = time.time()                 # only blocks recorded from now on
+                st.save(a.s)
             if (a.s.start_with_windows,) != before:
                 self.set_start_with_windows(a.s.start_with_windows)
             removed = a.rec.cleanup()
@@ -515,6 +560,11 @@ class Server:
                     if path == "/api/autorecord":
                         b.set_autorecord(bool(body.get("enabled")))
                         return self._json(b.state())
+                    if path == "/api/youtube/signin":
+                        b.yt_signin()
+                        return self._json({"ok": True})
+                    if path == "/api/youtube/upload":
+                        return self._json({"queued": b.yt_upload(body.get("id", ""))})
                     if path == "/api/signin":
                         b.signin()
                         return self._json({"ok": True})

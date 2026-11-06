@@ -217,7 +217,9 @@ def main():
         if not autorec:
             return
         b.auto = autorec.AutoRecorder(root, core.drive_upload_quiet, b.say,
-                                      signin=lambda: (win.show(), b.signin()))
+                                      signin=lambda: (win.show(), b.signin()),
+                                      youtube_service=lambda: core.youtube_service(interactive=False),
+                                      yt_signin=lambda: (win.show('settings'), b.yt_signin()))
         if not b.auto.s.player:
             b.auto.s.player = SETTINGS.get('player', '')
         autorec.hold_guard(lambda: win.show())
@@ -258,6 +260,7 @@ def main():
 
     def background_checks():
         b.check_google()
+        b.check_youtube()
         u = core.check_update()
         if u:
             b.update = u

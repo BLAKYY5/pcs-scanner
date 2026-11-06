@@ -459,7 +459,7 @@ def first_time_setup(s: st.Settings, say) -> None:
 class AutoRecorder:
     """Owns the Recorder and its loop; created once per app process."""
 
-    def __init__(self, root: tk.Tk, drive_upload, say=print, signin=None):
+    def __init__(self, root: tk.Tk, drive_upload, say=print, signin=None, youtube_service=None, yt_signin=None):
         self.root, self.say = root, say
         self.s = st.load()
         self.ui = UI(root, say)
@@ -469,6 +469,12 @@ class AutoRecorder:
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
         self.thread = None
         self.hotkeys = Hotkeys(self.s, self.rec)
+        if youtube_service:
+            from .youtube import Uploader
+            from .core import apex_running
+            self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, apex_running)
+        if yt_signin:
+            self.ui.actions["ytsignin"] = ("Sign in to YouTube", yt_signin)
 
     def run_loop(self) -> None:
         if self.thread:

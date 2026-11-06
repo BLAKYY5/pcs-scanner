@@ -205,9 +205,10 @@ function drawList() {
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
-        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}</span>
+        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
+          ${it.auto && S && S.youtube && S.youtube.available && !(it.yt && ['done', 'waiting', 'uploading'].includes(it.yt.status)) ? '<button class="btn small ghost" data-a="yt" title="Upload this recording\'s scrim block to the team YouTube channel">YouTube</button>' : ''}
           <button class="btn small ghost" data-a="show" title="Open the file">Open</button>
           ${!it.auto ? '<button class="btn small ghost" data-a="forget" title="Remove from this list (the file stays)">✕</button>' : ''}</div></div>`).join('');
   }
@@ -217,10 +218,19 @@ function drawList() {
     $$('[data-a]', row).forEach(b => b.onclick = async () => {
       if (b.dataset.a === 'scan') scan([id]);
       if (b.dataset.a === 'show') api('/api/open', {what: 'file', id});
+      if (b.dataset.a === 'yt') { try { const r = await api('/api/youtube/upload', {id}); toast(`Block of ${r.queued} recording(s) queued for YouTube.`); loadLibrary(); } catch (e) { toast(e.message, true); } }
       if (b.dataset.a === 'forget') { await api('/api/library/forget', {id}); loadLibrary(); }
     });
   });
   syncSel();
+}
+function ytPill(it) {
+  const y = it.yt; if (!y) return '';
+  if (y.status === 'done') return ` <a class="pill good" href="${esc(y.url)}" target="_blank" rel="noopener" title="${esc(y.title || '')}">YouTube ↗</a>`;
+  if (y.status === 'uploading' || y.status === 'waiting') return ' <span class="pill info">YouTube…</span>';
+  if (y.status === 'requested' || y.status === 'waiting-retry') return ' <span class="pill info">YouTube soon</span>';
+  if (y.status === 'failed') return ` <span class="pill bad" title="${esc(y.error || '')}">YouTube failed</span>`;
+  return '';
 }
 function syncSel() { const b = $('#scanSel'); if (b) { b.disabled = !selected.size; b.textContent = selected.size ? `Scan selected (${selected.size})` : 'Scan selected'; } }
 async function scan(ids) {
@@ -524,6 +534,20 @@ function renderSettings() {
         ${hotkeyField('f-hk_mute_mic', s.hk_mute_mic, 'Mute / unmute microphone')}
         <div class="field">${switchHTML('f-hk_sounds', s.hk_sounds, 'Beep on hotkeys', 'Only you hear it; it isn\'t recorded')}</div>
       </div></section>
+    ${S.youtube && S.youtube.available ? `<section class="card section"><h2>YouTube</h2>
+      <p class="muted" style="margin:0">One video per scrim block: your recordings of the block joined together, with a chapter for each game and your marked moments in the description. Uploads only while Apex is closed. Old recordings are not uploaded unless you press “YouTube” on them.</p>
+      <div class="row">${{ok: '<span class="pill good">Signed in</span>', expired: '<span class="pill bad">Sign-in expired</span>'}[S.youtube.signin] || '<span class="pill warn">Not signed in</span>'}
+        <button class="btn small" id="f-ytsignin">${S.youtube.signin === 'ok' ? 'Sign in again' : 'Sign in to the team channel'}</button>
+        <span class="faint" style="font-size:12px">At sign-in, pick the team channel (you need to be a manager of it).</span>
+        ${S.youtube.status ? `<span class="pill info">${esc(S.youtube.status)}</span>` : ''}</div>
+      ${switchHTML('f-yt_enabled', s.yt_enabled, 'Upload my scrim blocks', 'After the block, once every recording in it is scanned')}
+      <div class="form">
+        <label class="field"><span>Who can watch</span><select id="f-yt_privacy">${[['unlisted', 'Unlisted (anyone with the link)'], ['private', 'Private (accounts you share it with)']].map(([v, l]) => `<option value="${v}" ${v === s.yt_privacy ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <label class="field"><span>Sound on YouTube</span><select id="f-yt_audio">${[['game', 'Game only'], ['mix', 'Game + comms (Discord and mic)']].map(([v, l]) => `<option value="${v}" ${v === s.yt_audio ? 'selected' : ''} ${v === 'mix' && !s.comms_consent ? 'disabled' : ''}>${l}</option>`).join('')}</select>
+          <small>${s.comms_consent ? 'Comms on YouTube means your team\'s voices are on the channel too.' : 'Comms need the team agreement above.'}</small></label>
+        <label class="field"><span>Same block if less than (minutes) apart</span><input id="f-yt_gap_min" type="number" min="10" max="240" value="${s.yt_gap_min}"><small>Restarting Apex mid-block stays one video.</small></label>
+        <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks with only ranked or pubs')}</div>
+      </div></section>` : ''}
     <section class="card section"><h2>After a session</h2>
       <div class="form">
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, 'Scan automatically', 'Starts after a countdown unless you press Skip')}</div>
@@ -541,6 +565,7 @@ function renderSettings() {
   $('#f-quit').onclick = () => { if (confirmBox('Quit PCS Scanner? Auto-record stops until you open it again.')) api('/api/quit', {}); };
   $('#save').onclick = saveSettings;
   wireHotkeys();
+  const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
   const cc = $('#f-comms_consent'), box = $('#commsBox');
   const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
@@ -552,9 +577,9 @@ function renderSettings() {
 async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
-    for (const k of ['folder', 'hub_url', 'capture']) body[k] = $('#f-' + k).value.trim();
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s']) body[k] = parseInt($('#f-' + k).value, 10);
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds']) body[k] = $('#f-' + k).checked;
+    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }
   try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }

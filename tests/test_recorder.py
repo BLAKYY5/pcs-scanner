@@ -187,6 +187,118 @@ def test_hotkeys_marks_and_mutes():
     assert settings.Settings(hk_mark="shift+x").clamp().hk_mark == ""
 
 
+def test_youtube_blocks():
+    """Recordings close together form one block -> one video with chapters; uploads wait for Apex to close."""
+    import json
+    import shutil
+    import subprocess
+    from pcs_recorder import youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    folder = TMP / f"yt-{time.time_ns()}"
+    folder.mkdir()
+    base = time.time() - 4 * 3600
+    have_ffmpeg = shutil.which("ffmpeg") is not None
+    idx = {}
+    # block 1: two recordings (Apex restarted after 10 min), block 2: one recording 2 h later
+    for key, start, length, mode in (("a", 0, 40, "scrim"), ("b", 30 * 60, 40, "scrim"), ("c", 2 * 3600, 40, "ranked")):
+        v = folder / f"Apex Legends_{key}.mp4"
+        if have_ffmpeg:
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s=160x90:d={length}",
+                            "-f", "lavfi", "-i", f"sine=440:d={length}", "-f", "lavfi", "-i", f"sine=880:d={length}",
+                            "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "mpeg4", "-g", "30", "-c:a", "aac",
+                            "-shortest", str(v)], check=True)
+        else:
+            v.write_bytes(b"x")
+        end = base + start + 10 * 60
+        os.utime(v, (end, end))
+        scan = v.with_suffix(".scan")
+        scan.mkdir()
+        (scan / (v.stem + ".scan.json")).write_text(json.dumps({"games": [{"map": "BM", "mode": mode, "tStart": 2.0},
+                                                                          {"map": "WE", "mode": mode, "tStart": 20.0}]}))
+        v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "mic"],
+                                                             "events": [{"t": 5.0, "kind": "mark"}]}))
+        idx[key] = retention.Entry(path=str(v), started=base + start, status="scanned")
+    assert youtube.blocks(idx, 45) == [["a", "b"], ["c"]]
+    assert youtube.blocks(idx, 10) == [["a"], ["b"], ["c"]]
+
+    s = settings.Settings(player="Blakey", folder=str(folder), yt_enabled=True)
+    title, desc, n = youtube.describe(s, idx, ["a", "b"], [0.0, 40.0])
+    assert n == 4 and title.startswith("Scrims ") and "Blakey POV" in title and "Broken Moon, World's Edge" in title, title
+    assert "0:00 Game 1 · Broken Moon\n0:20 Game 2 · World's Edge\n0:42 Game 3 · Broken Moon\n1:00 Game 4" in desc, desc
+    assert "Marked moments: 0:05, 0:45" in desc
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    ui = FakeUI()
+    apex = {"on": True}
+    sent = []
+
+    class Req:
+        def __init__(self, body, media):
+            self.body, self.media, self.n = body, media, 0
+
+        def next_chunk(self, num_retries=0):
+            self.n += 1
+            if self.n < 2:
+                class P:
+                    def progress(self):
+                        return 0.5
+                return P(), None
+            sent.append((self.body, Path(self.media._filename).stat().st_size))
+            return None, {"id": f"vid{len(sent)}"}
+
+    class YT:
+        def videos(self):
+            return self
+
+        def insert(self, part, body, media_body):
+            return Req(body, media_body)
+    service = {"yt": None}
+    up = youtube.Uploader(s, rec, ui, lambda: service["yt"], lambda: apex["on"])
+    up.tick()
+    assert up.thread is None                                   # Apex running: nothing happens
+    apex["on"] = False
+    s.yt_since = base + 3 * 3600                               # turned on after these blocks: not uploaded
+    assert up.ready_blocks() == []
+    s.yt_since = 0
+    up.tick()                                                  # not signed in: told once, with a button
+    assert ui.notes[-1][0] == "YouTube upload waiting" and ui.notes[-1][3] == "ytsignin"
+    up.tick()
+    assert len([x for x in ui.notes if x[0] == "YouTube upload waiting"]) == 1
+    assert up.state["c"]["status"] == "skipped"                # ranked only: skipped
+    service["yt"] = YT()
+    up.tick()
+    assert up.protected() == {"a", "b"}                        # kept until uploaded
+    up.thread.join(120)
+    if not have_ffmpeg:
+        print("  (no ffmpeg: video building not tested)")
+        return
+    assert up.state["a"]["status"] == "done" and up.state["a"]["url"] == "https://youtu.be/vid1", up.state
+    body, size = sent[0]
+    assert body["status"]["privacyStatus"] == "unlisted" and body["snippet"]["categoryId"] == "20"
+    assert size > 0 and not list(folder.glob("youtube-*"))     # the joined file is deleted after the upload
+    assert ui.notes[-1][0] == "Scrim block on YouTube"
+    up.tick()
+    assert len(sent) == 1                                      # never twice
+    # the joined video: both recordings, one sound track (game only)
+    out = folder / "check.mp4"
+    youtube.build_video([idx["a"].path, idx["b"].path], [["game", "mic"]] * 2, "game", out)
+    probe = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type:format=duration", "-of",
+                            "json", str(out)], capture_output=True, text=True).stdout
+    info = json.loads(probe)
+    assert [x["codec_type"] for x in info["streams"]] == ["video", "audio"], info
+    assert 79 < float(info["format"]["duration"]) < 81.5, info
+    youtube.build_video([idx["a"].path], [["game", "mic"]], "mix", out)
+    assert json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json",
+                                      str(out)], capture_output=True, text=True).stdout)["streams"][1]["codec_type"] == "audio"
+    # by hand: the ranked block can still be uploaded
+    assert up.request("c") == ["c"] and up.state["c"]["status"] == "requested"
+    up.tick(); up.thread.join(120)
+    assert up.state["c"]["status"] == "done"
+
+
 def test_skip_and_offline_hub():
     r, apex, hub, ui = run_session(scan_answer=False)
     assert r.scan_proc is None and list(r.idx.values())[0].status == "skipped"

@@ -55,6 +55,7 @@ class Recorder:
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.lock = threading.RLock()
+        self.youtube = None                      # youtube.Uploader, attached by the app
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
@@ -80,6 +81,11 @@ class Recorder:
                 self._next_in_queue(apex)
             if not apex and self.scan_proc is None:
                 self._retry_uploads()
+                if self.youtube:
+                    try:
+                        self.youtube.tick()
+                    except Exception:
+                        log.exception("youtube tick failed")
 
     # ---------------------------------------------------------- recording
     def _start(self) -> None:
@@ -333,6 +339,8 @@ class Recorder:
                 if e.path.lower().endswith(".mp4"):
                     drop_original(Path(e.path))
             protect = {k for k in (self.current, self.scan_key) if k}
+            if self.youtube:
+                protect |= self.youtube.protected()       # blocks still going to YouTube
             removed = retention.enforce(self.idx, self.s.keep_days, self.s.max_gb, protect)
             retention.save_index(self.idx)
         if removed:
