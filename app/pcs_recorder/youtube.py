@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import retention
+from . import eec, retention
 from .settings import APP_DIR, Settings
 
 log = logging.getLogger("recorder.youtube")
@@ -83,6 +83,12 @@ def duration(path: str) -> float:
     return float(r.stdout.strip() or 0)
 
 
+def pl(n: int, word: str) -> str:
+    """'1 kill', '3 kills', '1 pt', '5 pts'."""
+    plural = {"pt": "pts", "point": "points", "kill": "kills", "game": "games"}[word]
+    return f"{n} {word if n == 1 else plural}"
+
+
 def fmt(t: float) -> str:
     t = int(max(0, t))
     h, m, s = t // 3600, t // 60 % 60, t % 60
@@ -115,14 +121,14 @@ def tags_for(s: Settings, desc: str) -> list[str]:
 
 
 def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: list[str] | None = None,
-             audio: str = "game") -> tuple[str, str, int]:
+             audio: str = "game", results: dict | None = None) -> tuple[str, str, int]:
     """Title, description with chapters, and the number of games."""
     games, marks = [], []
     for k, off in zip(keys, offsets):
         for g in scan_of(idx[k]).get("games", []):
             if g.get("tStart") is not None:
                 games.append((off + g["tStart"], g.get("map"), g.get("mode"), our_drop(g),
-                              (g.get("landing") or {}).get("landedAtExact")))
+                              idx[k].started + g["tStart"]))
         for m in events_of(idx[k]).get("events", []):
             if m.get("kind") == "mark":
                 marks.append(off + m["t"])
@@ -132,11 +138,21 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
     player = s.player or "Player"
     maps = ", ".join(dict.fromkeys(MAP_NAMES.get(g[1], g[1] or "?") for g in games)) or "no game found"
     scrim = any(g[2] == "scrim" for g in games)
-    title = (f"{'Scrims' if scrim else 'Session'} {start:%d.%m.%Y %H:%M} · {team} · {player} POV · "
+    standing = f" · {eec.ordinal(results['standing'])}/{results['teams']}, {pl(results['pts'], 'pt')}" if results else ""
+    title = (f"{'Scrims' if scrim else 'Session'} {start:%d.%m.%Y %H:%M} · {team} · {player} POV{standing} · "
              f"{len(games)} game{'s' if len(games) != 1 else ''} ({maps})")[:100]
 
+    per_game = {}
+    if results:
+        for i, g in enumerate(games):
+            r = eec.match_game(results, g[4], i)
+            if r:
+                per_game[i + 1] = r
+
     def label(i, g):
-        return f"Game {i} · {MAP_NAMES.get(g[1], g[1] or '?')}" + (f" · {g[3]}" if g[3] else "")
+        r = per_game.get(i)
+        return (f"Game {i} · {MAP_NAMES.get(g[1], g[1] or '?')}" + (f" · {g[3]}" if g[3] else "") +
+                (f" · {eec.ordinal(r['place'])}, {pl(r['pts'], 'pt')}" if r else ""))
     # YouTube chapters: start at 0:00, ascending, at least 10 s apart, at least 3 of them
     chapters = [(0.0, "Lobby")]
     for i, g in enumerate(games, 1):
@@ -145,6 +161,13 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
         elif len(chapters) == 1:
             chapters[0] = (0.0, label(i, g))               # the recording starts right at the game
     lines = [f"{team} · {player} POV · {'EEC scrims' if scrim else 'Apex session'} · {start:%A %d %B %Y, %H:%M}"]
+    if results:
+        n = len(results.get("games", []))
+        lines.append(f"Result: {eec.ordinal(results['standing'])}{' (tied)' if results.get('tied') else ''} of "
+                     f"{results['teams']} · {pl(results['pts'], 'point')} · "
+                     f"{pl(results['kills'], 'kill')} · {pl(n, 'game')} (ALGS scoring)")
+        if results.get("standing", 1) > 1 and results.get("leader"):
+            lines.append(f"Lobby winner: {results['leader']['team']}, {pl(results['leader']['pts'], 'point')}")
     if links:
         lines += [("EEC lobby: " if len(links) == 1 else "EEC lobbies: ") + "  ".join(links)]
     lines.append("")
@@ -152,6 +175,9 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
         lines += [f"{fmt(t)} {name}" for t, name in chapters] + [""]
     elif games:
         lines += [f"{fmt(g[0])} {label(i, g)}" for i, g in enumerate(games, 1)] + [""]
+    if results and results.get("games"):
+        lines += ["Games: " + " · ".join(f"G{r['game']} {eec.ordinal(r['place'])} ({pl(r['pts'], 'pt')}, {pl(r['kills'], 'kill')})"
+                                         for r in results["games"]), ""]
     if marks:
         lines += ["Marked moments: " + ", ".join(fmt(t) for t in sorted(marks)), ""]
     lines.append("Sound: " + ("game + team comms" if audio == "mix" else "game only") + ".")
@@ -205,7 +231,7 @@ class Uploader:
 
     def _set(self, bid: str, **kw) -> dict:
         """Update a block's state, keeping what the player added (EEC links) and what was already asked."""
-        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "asked")}
+        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "eec_res", "asked", "hub_tried")}
         self.state[bid] = {**keep, **kw}
         return self.state[bid]
 
@@ -223,6 +249,51 @@ class Uploader:
                 save_state(self.state)
                 return good
         raise RuntimeError("Recording not found")
+
+    def add_results(self, lobby: dict) -> dict:
+        """EEC lobby results (export file or hub): attached to the block played at that time."""
+        res = eec.results(lobby, self.s.yt_team)
+        if not res:
+            raise RuntimeError(f"Team \"{self.s.yt_team}\" isn't in this lobby (check the team name in Settings → YouTube)")
+        starts = [g["start"] for g in lobby["games"] if g.get("start")]
+        idx = self.rec.idx
+        for keys in blocks(idx, self.s.yt_gap_min):
+            b0, b1 = idx[keys[0]].started, end_of(idx[keys[-1]])
+            if not starts or b0 - 1800 <= min(starts) <= b1 + 600:
+                st = self.state.setdefault(keys[0], {"keys": keys})
+                if st.get("status") in ("uploading", "done"):
+                    raise RuntimeError("That block is already on YouTube")
+                st["eec_res"] = res
+                if res.get("url") and res["url"] not in st.get("eec", []):
+                    st["eec"] = st.get("eec", []) + [res["url"]]
+                save_state(self.state)
+                return {"block": keys, **res}
+        raise RuntimeError("None of your recordings was made while this lobby was played")
+
+    def results_of(self, key: str) -> dict | None:
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if key in keys:
+                return self.state.get(keys[0], {}).get("eec_res")
+        return None
+
+    def _try_hub(self, keys: list[str]) -> None:
+        """The coach may already have imported the lobby on the team hub: take the results from there."""
+        st = self.state.get(keys[0], {})
+        if not self.s.hub_url or st.get("eec_res") or self.clock() - st.get("hub_tried", 0) < 600:
+            return
+        self.state.setdefault(keys[0], {"keys": keys})["hub_tried"] = self.clock()
+        try:
+            res = eec.from_hub(self.s.hub_url, self.s.yt_team, self.rec.idx[keys[0]].started,
+                               end_of(self.rec.idx[keys[-1]]))
+        except Exception as e:
+            log.info("hub results not available: %s", e)
+            return
+        if res:
+            st = self.state[keys[0]]
+            st["eec_res"] = res
+            if res.get("url") and res["url"] not in st.get("eec", []):
+                st["eec"] = st.get("eec", []) + [res["url"]]
+        save_state(self.state)
 
     def links_of(self, key: str) -> list[str]:
         for keys in blocks(self.rec.idx, self.s.yt_gap_min):
@@ -258,15 +329,18 @@ class Uploader:
                 if all(idx[k].status in ("skipped", "failed") for k in keys):
                     self._set(bid, keys=keys, status="skipped", why="not scanned")
                 continue                                   # wait for the scans (they give the chapters)
-            if self.s.yt_wait_eec and not st.get("eec") and not requested:
+            self._try_hub(keys)
+            st = self.state.get(bid, {})
+            if self.s.yt_wait_eec and not (st.get("eec") or st.get("eec_res")) and not requested:
                 waited = self.clock() - end_of(idx[keys[-1]])
                 if waited < self.s.yt_wait_eec_h * 3600:
                     if not st.get("asked"):
                         self._set(bid, keys=keys, status=st.get("status"), asked=True)
                         save_state(self.state)
-                        self.ui.notify("EEC lobby link for YouTube", "Paste the EEC lobby link of your last scrim block "
-                                       "(Recordings → EEC link). It goes in the video description; the upload waits "
-                                       f"for it up to {self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
+                        self.ui.notify("EEC lobby link for YouTube", "Add your last scrim block's EEC results: drop the "
+                                       "lobby's export file (Download button on the EEC lobby page) on the app, or "
+                                       "paste the lobby link (Recordings → EEC). The upload waits for it up to "
+                                       f"{self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
                     continue                               # waiting for the link (at most yt_wait_eec_h)
             if not requested and self.s.yt_scrims_only and not any(g.get("mode") == "scrim" for k in keys
                                                  for g in scan_of(idx[k]).get("games", [])):
@@ -313,7 +387,8 @@ class Uploader:
             for p in paths:
                 offsets.append(t)
                 t += duration(p)
-            title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio)
+            title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio,
+                                            results=st.get("eec_res"))
             build_video(paths, tracks, audio, out)
             st.update(status="uploading", title=title)
             save_state(self.state)

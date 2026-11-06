@@ -178,15 +178,20 @@ function renderRecordings() {
       <div class="toolbar">
         <div class="seg" id="filt">${['all', 'scanned', 'not scanned'].map(f => `<button data-f="${f}" class="${f === filter ? 'on' : ''}">${f}</button>`).join('')}</div>
         <button class="btn" id="add">Add recordings…</button>
+        ${S && S.youtube && S.youtube.available ? '<button class="btn" id="eecRes" title="The lobby export from EEC (Download button on the lobby page): standing, points and kills go in the YouTube description">EEC results…</button>' : ''}
         <button class="btn brand" id="scanSel" disabled>Scan selected</button>
       </div></div>
-    <div class="drop" id="dropzone">Drop recordings or folders here to add them</div>
+    <div class="drop" id="dropzone">Drop recordings or folders here to add them${S && S.youtube && S.youtube.available ? ' · or an EEC lobby export (.json) for the YouTube description' : ''}</div>
     <section class="card" style="padding:6px 12px"><div class="list" id="list"><div class="empty">Loading…</div></div></section>
     <div class="row muted" style="font-size:13px"><button class="btn small ghost" id="openRes">Open results folder</button>
       ${S && S.recorder ? '<button class="btn small ghost" id="openRec">Open recordings folder</button>' : ''}</div>`;
   $$('#filt button').forEach(b => b.onclick = () => { filter = b.dataset.f; $$('#filt button').forEach(x => x.classList.toggle('on', x === b)); drawList(); });
   $('#add').onclick = async () => { const r = await api('/api/library/pick', {}).catch(e => toast(e.message, true)); if (r) { toast(r.added ? `Added ${r.added} recording(s).` : 'Nothing added.'); loadLibrary(); } };
   $('#scanSel').onclick = () => scan([...selected]);
+  const er = $('#eecRes'); if (er) er.onclick = async () => {
+    try { const r = await api('/api/youtube/results', {}); if (r.added.length) toast('EEC results added: ' + r.added.join(' · ')); loadLibrary(); }
+    catch (e) { toast(e.message, true); }
+  };
   $('#openRes').onclick = () => api('/api/open', {what: 'results'});
   const orc = $('#openRec'); if (orc) orc.onclick = () => api('/api/open', {what: 'recordings'});
   const dz = $('#dropzone');
@@ -208,7 +213,7 @@ function drawList() {
         <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
-          ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
+          ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.res ? `EEC ✓ ${ordinal(it.yt.res.standing)}/${it.yt.res.teams}` : it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
           ${it.auto && S && S.youtube && S.youtube.available && !(it.yt && ['done', 'waiting', 'uploading'].includes(it.yt.status)) ? '<button class="btn small ghost" data-a="yt" title="Upload this recording\'s scrim block to the team YouTube channel">YouTube</button>' : ''}
           <button class="btn small ghost" data-a="show" title="Open the file">Open</button>
           ${!it.auto ? '<button class="btn small ghost" data-a="forget" title="Remove from this list (the file stays)">✕</button>' : ''}</div></div>`).join('');
@@ -232,6 +237,7 @@ function drawList() {
   });
   syncSel();
 }
+function ordinal(n) { return n + ((n % 100 >= 11 && n % 100 <= 13) ? 'th' : ({1: 'st', 2: 'nd', 3: 'rd'}[n % 10] || 'th')); }
 function ytPill(it) {
   const y = it.yt; if (!y || !y.status) return '';
   if (y.status === 'done') return ` <a class="pill good" href="${esc(y.url)}" target="_blank" rel="noopener" title="${esc(y.title || '')}">YouTube ↗</a>`;

@@ -44,7 +44,10 @@ and tests your graphics card for a few seconds. From then on:
   sign in once and pick the team channel). Recordings less than 45 min apart are one block (an Apex restart
   mid-block stays one video); chapters for each game, marked moments in the description; unlisted or private;
   game sound only, or game + comms when the team agreed. The EEC lobby link (pasted in Recordings → "EEC link";
-  the upload waits up to 12 h for it) goes in the description, with the drop POI of each game. Uploads only
+  the upload waits up to 12 h for it) goes in the description. Better: drop the lobby's EEC export file
+  (Download button on the EEC lobby page) on the app, or let the coach import it once on the team hub: the title
+  and description then carry the standing (e.g. 7th of 20), total points (ALGS scoring) and kills, plus each
+  game's placement and points in its chapter. The app never reads the EEC site itself (EEC's terms forbid bots), with the drop POI of each game. Uploads only
   while Apex is closed. Older recordings
   only when you press "YouTube" on them.
 - **Night uploads (optional)**: YouTube uploads wait for the night (default 01:00-07:00) and 20 min without

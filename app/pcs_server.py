@@ -99,7 +99,7 @@ class Backend:
         self.scan_lock = threading.Lock()
         self.scan_started = 0.0
         self._worker_running = False
-        self.pick_files = lambda: []                       # native "open files" dialog
+        self.pick_files = lambda kind="video": []          # native "open files" dialog
         self.open_path = lambda p: os.startfile(p) if os.name == "nt" else None
         self.set_start_with_windows = lambda on: None
         self.quit = lambda: None
@@ -155,6 +155,20 @@ class Backend:
         good = self.auto.rec.youtube.set_links(key, links)
         self.say("EEC lobby link saved for this block." if good else "EEC lobby link removed.")
         return good
+
+    def add_eec_files(self, paths: list[str]) -> list[str]:
+        """EEC lobby export files (Download button on the lobby page) -> results for the matching block."""
+        a = self.auto
+        if not a or not getattr(a.rec, "youtube", None):
+            raise RuntimeError("YouTube upload isn't available in this build")
+        from pcs_recorder import eec
+        done = []
+        for p in paths:
+            lobby = eec.read_file(p)
+            r = a.rec.youtube.add_results(lobby)
+            done.append(f"{eec.ordinal(r['standing'])} of {r['teams']}, {r['pts']} points, {r['kills']} kills")
+            self.say(f"EEC results added ({Path(p).name}): {done[-1]}. They go in the YouTube description.")
+        return done
 
     def yt_upload(self, item_id: str) -> int:
         a = self.auto
@@ -230,6 +244,9 @@ class Backend:
                 b = up.block_of(rec_index[norm][0])
                 yt = {k: b.get(k) for k in ("status", "url", "title", "why", "error")} if b else {}
                 yt["eec"] = up.links_of(rec_index[norm][0])
+                r = up.results_of(rec_index[norm][0])
+                if r:
+                    yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt}
         return sorted(items.values(), key=lambda x: -x["mtime"])
@@ -589,6 +606,9 @@ class Server:
                         return self._json({"ok": True})
                     if path == "/api/youtube/eec":
                         return self._json({"eec": b.set_eec(body.get("id", ""), body.get("links", []))})
+                    if path == "/api/youtube/results":
+                        paths = body.get("paths") or b.pick_files("eec") or []
+                        return self._json({"added": b.add_eec_files(paths)})
                     if path == "/api/youtube/upload":
                         return self._json({"queued": b.yt_upload(body.get("id", ""))})
                     if path == "/api/signin":
@@ -599,7 +619,7 @@ class Server:
                             threading.Timer(1.0, b.quit).start()
                         return self._json({"ok": True})
                     if path == "/api/library/pick":
-                        n = b.add_paths(b.pick_files() or [])
+                        n = b.add_paths(b.pick_files("video") or [])
                         return self._json({"added": n})
                     if path == "/api/library/add":
                         return self._json({"added": b.add_paths(body.get("paths", []))})

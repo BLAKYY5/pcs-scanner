@@ -136,12 +136,13 @@ class Window:
         except Exception:
             logging.exception('drag and drop unavailable')
 
-    def pick_files(self):
+    def pick_files(self, kind='video'):
         if self.w is not None:
             try:
                 import webview
-                r = self.w.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True,
-                                              file_types=('Recordings (*.mp4;*.mkv;*.mov)', 'All files (*.*)'))
+                types = (('EEC lobby export (*.json)', 'All files (*.*)') if kind == 'eec' else
+                         ('Recordings (*.mp4;*.mkv;*.mov)', 'All files (*.*)'))
+                r = self.w.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=True, file_types=types)
                 return list(r or [])
             except Exception:
                 logging.exception('file dialog failed')
@@ -190,10 +191,11 @@ class TkThread:
         done.wait(timeout)
         return box[0] if box else None
 
-    def pick_files(self):
+    def pick_files(self, kind='video'):
         from tkinter import filedialog
-        return list(self.call(lambda: filedialog.askopenfilenames(
-            title='Pick Apex recordings', filetypes=[('Recordings', '*.mp4 *.mkv *.mov'), ('All files', '*.*')])) or [])
+        types = ([('EEC lobby export', '*.json'), ('All files', '*.*')] if kind == 'eec' else
+                 [('Recordings', '*.mp4 *.mkv *.mov'), ('All files', '*.*')])
+        return list(self.call(lambda: filedialog.askopenfilenames(title='Pick files', filetypes=types)) or [])
 
 
 def main():
@@ -244,11 +246,22 @@ def main():
 
     b.quit = quit_app
 
-    def pick():
-        r = win.pick_files()
-        return tk_thread.pick_files() if r is None else r
+    def pick(kind='video'):
+        r = win.pick_files(kind)
+        return tk_thread.pick_files(kind) if r is None else r
     b.pick_files = pick
-    win.on_drop = lambda paths: b.say(f'Added {b.add_paths(paths)} recording(s).')
+
+    def dropped(paths):
+        jsons = [p for p in paths if p.lower().endswith('.json')]
+        if jsons:                                          # EEC lobby export files
+            try:
+                b.add_eec_files(jsons)
+            except Exception as e:
+                b.say(f'EEC results not added: {e}')
+        others = [p for p in paths if p not in jsons]
+        if others:
+            b.say(f'Added {b.add_paths(others)} recording(s).')
+    win.on_drop = dropped
 
     if autorec and os.name == 'nt':
         def apply_start_with_windows(on):

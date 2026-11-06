@@ -328,6 +328,74 @@ def test_youtube_blocks():
     assert up.state["c"]["status"] == "done"
 
 
+def test_eec_results():
+    """EEC lobby export -> standing, points (ALGS), kills; attached to the block played then; in the description."""
+    import json
+    from pcs_recorder import eec, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    t0 = time.time() - 5 * 3600
+
+    def row(team, player, place, kills):
+        return {"team_name": team, "player_name": player, "team_placement": place, "kills": kills}
+    export = {"matches": [
+        {"map_name": "mp_rr_divided_moon_mu1", "match_start": t0 + 300, "data": [
+            row("PCS", "a", 2, 3), row("PCS", "b", 2, 1), row("Other", "c", 1, 2), row("Third", "d", 3, 0)]},
+        {"map_name": "mp_rr_desertlands_hu", "match_start": t0 + 2400, "data": [
+            row("PCS", "a", 1, 5), row("Other", "c", 3, 0), row("Third", "d", 2, 4)]}]}
+    f = TMP / "lobbies_4_e9483b_scores.json"
+    f.write_text(json.dumps(export))
+    lobby = eec.read_file(str(f))
+    assert lobby["url"] == "https://eternalesports.club/lobbies/4/e9483b" and lobby["games"][0]["map"] == "BM"
+    r = eec.results(lobby, "pcs")
+    # game 1: 2nd = 9 + 4 kills = 13; game 2: 1st = 12 + 5 = 17 -> 30 pts, 9 kills, 1st of 3
+    assert (r["standing"], r["teams"], r["pts"], r["kills"], r["tied"]) == (1, 3, 30, 9, False), r
+    assert [(g["place"], g["pts"]) for g in r["games"]] == [(2, 13), (1, 17)]
+    assert eec.results(lobby, "Nobody") is None
+    try:
+        eec.from_export({"nope": 1})
+        raise AssertionError("bad file accepted")
+    except ValueError:
+        pass
+    assert [eec.ordinal(n) for n in (1, 2, 3, 4, 11, 12, 13, 21, 22)] == ["1st", "2nd", "3rd", "4th", "11th", "12th",
+                                                                          "13th", "21st", "22nd"]
+    # attach to the block recorded at that time
+    folder = TMP / f"eec-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "Apex Legends_x.mp4"
+    v.write_bytes(b"x")
+    os.utime(v, (t0 + 3600, t0 + 3600))
+    sc = v.with_suffix(".scan")
+    sc.mkdir()
+    (sc / "Apex Legends_x.scan.json").write_text(json.dumps({"games": [
+        {"map": "BM", "mode": "scrim", "tStart": 290.0, "drop": {"spots": [{"poi": "bm-stasis-array", "kind": "ours"}]}},
+        {"map": "WE", "mode": "scrim", "tStart": 2390.0}]}))
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = {"x": retention.Entry(path=str(v), started=t0, status="scanned")}
+    s = settings.Settings(player="Blakey", yt_team="PCS")
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    got = up.add_results(lobby)
+    assert got["block"] == ["x"] and up.results_of("x")["pts"] == 30
+    assert up.links_of("x") == ["https://eternalesports.club/lobbies/4/e9483b"]      # the link comes with the file
+    st = up.state["x"]
+    title, desc, n = youtube.describe(s, rec.idx, ["x"], [0.0], links=st["eec"], results=st["eec_res"])
+    assert "POV · 1st/3, 30 pts ·" in title, title
+    assert "Result: 1st of 3 · 30 points · 9 kills · 2 games (ALGS scoring)" in desc, desc
+    assert "4:50 Game 1 · Broken Moon · Stasis Array · 2nd, 13 pts" in desc and "39:50 Game 2 · World's Edge · 1st, 17 pts" in desc, desc
+    assert "Games: G1 2nd (13 pts, 4 kills) · G2 1st (17 pts, 5 kills)" in desc
+    # a lobby played at another time is refused
+    late = json.loads(json.dumps(export))
+    for g in late["matches"]:
+        g["match_start"] += 3 * 86400
+    try:
+        up.add_results(eec.from_export(late))
+        raise AssertionError("lobby from another day attached")
+    except RuntimeError:
+        pass
+
+
 def test_night_uploads_and_shutdown():
     """Night mode: uploads only at night when idle; PC turned off only after a night upload with nothing left."""
     import datetime as dt

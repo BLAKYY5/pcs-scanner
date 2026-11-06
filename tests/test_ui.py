@@ -135,6 +135,7 @@ class _S:            # recorder settings stand-in
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
+    yt_team, yt_wait_eec, yt_wait_eec_h = "PCS", True, 12
 
     def __init__(self, folder):
         self.folder = folder
