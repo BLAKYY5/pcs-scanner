@@ -229,7 +229,8 @@ async function scan(ids) {
 }
 
 /* ------------------------------------------------------------------ review */
-const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed']};
+const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute']};
+const TRACKN = {game: 'Game sound', discord: 'Discord', mic: 'Microphone'};
 function buildEvents(d) {
   const ev = [];
   (d.games || []).forEach((g, gi) => {
@@ -252,6 +253,10 @@ function buildEvents(d) {
   const groups = new Map();
   (d.feed || []).forEach(l => { const k = l.t.toFixed(2); groups.set(k, (groups.get(k) || 0) + 1); });
   groups.forEach((n, k) => ev.push({t: +k, k: 'feed', title: 'Kill feed', sub: n > 1 ? n + ' lines' : ''}));
+  (d.marks || []).forEach(m => {
+    if (m.kind === 'mark') ev.push({t: m.t, k: 'mark', title: 'Marked moment', sub: 'hotkey pressed in game'});
+    else if (m.kind === 'mute') ev.push({t: m.t, k: 'mute', title: `${TRACKN[m.track] || m.track} ${m.muted ? 'muted' : 'back on'}`});
+  });
   ev.sort((a, b) => a.t - b.t);
   return ev;
 }
@@ -285,11 +290,13 @@ async function renderReview(id) {
             <div class="lane games" id="laneG"><span class="lane-label">Games</span></div>
             <div class="lane" id="laneE"><span class="lane-label">Drop · jump · landing · rings</span></div>
             <div class="lane" id="laneF"><span class="lane-label">Kill feed</span></div>
+            ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
             <div class="legend"><span><i style="background:#e6ad45"></i>Drop map</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select></div>
           </div>
+          <div id="mixer"></div>
           <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>F</kbd> full screen · <kbd>M</kbd> mute</div>
         </div>
       </div>
@@ -302,6 +309,7 @@ async function renderReview(id) {
   $('#rvOpen').onclick = $('#vidOpen').onclick = () => api('/api/open', {what: 'file', id: d.id});
   const rs = $('#rvScan'); if (rs) rs.onclick = () => scan([d.id]);
   v.addEventListener('error', () => { $('#vidErr').hidden = false; });
+  setupAudio(d, v);
   v.addEventListener('loadedmetadata', () => { RV.dur = v.duration; drawTimeline(); });
   v.addEventListener('timeupdate', onTime);
   $('#speed').onchange = e => v.playbackRate = +e.target.value;
@@ -328,8 +336,17 @@ function drawTimeline() {
   $('#laneG').innerHTML = '<span class="lane-label">Games</span>' + (RV.spans.length ? RV.spans.map(s =>
     `<div class="segm" data-t="${s.from}" style="left:${pct(s.from)};width:calc(${pct(Math.max(1, s.to - s.from))})" title="${esc(mapName(s.map))} · ${fmtT(s.from)}–${fmtT(s.to)}">${esc(mapName(s.map))}${s.mode ? ' · ' + esc(s.mode) : ''}</div>`).join('') :
     `<span class="faint" style="position:absolute;left:8px;top:4px;font-size:12px">${RV.d.scan ? 'No game found in this recording' : 'Not scanned yet: scan it to see games and events here'}</span>`);
-  $('#laneE').innerHTML = '<span class="lane-label">Drop · jump · landing · rings</span>' + RV.ev.filter(e => e.k !== 'feed').map(e =>
+  $('#laneE').innerHTML = '<span class="lane-label">Drop · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute'].includes(e.k)).map(e =>
     `<button class="mk ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
+  const lm = $('#laneM');
+  if (lm) {
+    const marks = RV.d.marks || [], spans = [], open = {};
+    marks.filter(m => m.kind === 'mute').forEach(m => { if (m.muted) open[m.track] = m.t; else if (open[m.track] != null) { spans.push([m.track, open[m.track], m.t]); delete open[m.track]; } });
+    Object.entries(open).forEach(([tr, t]) => spans.push([tr, t, D]));
+    lm.innerHTML = '<span class="lane-label">Your marks · muted sound</span>' +
+      spans.map(([tr, a, b]) => `<div class="muted-span ${tr}" data-t="${a}" style="left:${pct(a)};width:${pct(b - a)}" title="${esc(TRACKN[tr] || tr)} muted ${fmtT(a)}–${fmtT(b)}"></div>`).join('') +
+      marks.filter(m => m.kind === 'mark').map(m => `<button class="mk mark" data-t="${m.t}" style="left:${pct(m.t)}" title="${fmtT(m.t)} · marked moment">★</button>`).join('');
+  }
   $('#laneF').innerHTML = '<span class="lane-label">Kill feed</span>' + RV.ev.filter(e => e.k === 'feed').map(e =>
     `<div class="tick" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · kill feed${e.sub ? ' (' + e.sub + ')' : ''}"></div>`).join('');
 }
@@ -342,7 +359,7 @@ function drawSide() {
     RV.ev.forEach((e, i) => {
       if (e.k === 'feed') return;                     // kill feed lines have their own tab
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
-      const col = {drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)'}[e.k];
+      const col = {drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63'}[e.k];
       html += `<div class="ev" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';
@@ -396,10 +413,67 @@ document.addEventListener('keydown', e => {
   else if (k === ']') { const n = times.find(t => t > v.currentTime + 0.3); if (n != null) seek(n); }
   else if (k === '[') { const p = times.filter(t => t < v.currentTime - 1).pop(); seek(p != null ? p : 0); }
   else if (k === 'f' || k === 'F') { document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen(); }
-  else if (k === 'm' || k === 'M') { v.muted = !v.muted; }
+  else if (k === 'm' || k === 'M') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
   else return;
   e.preventDefault();
 });
+
+/* ------------------------------------------------------------------ separate sound tracks in review */
+function setupAudio(d, v) {
+  clearInterval(setupAudio.h); RV.aud = null;
+  const tracks = d.audio || [];
+  if (tracks.length < 2) return;                       // one track: the video plays it itself
+  v.muted = true;
+  RV.aud = tracks.map(t => ({t, a: new Audio(`/audio/${d.id}/${t.n}?t=${encodeURIComponent(TOKEN)}`), vol: 1, mute: false}));
+  RV.aud.forEach(x => { x.a.preload = 'auto'; x.a.addEventListener('error', () => { x.err = true; drawMixer(); }); });
+  const all = f => RV.aud.forEach(x => { try { f(x.a); } catch (e) {} });
+  v.addEventListener('play', () => all(a => { a.currentTime = v.currentTime; a.playbackRate = v.playbackRate; a.play().catch(() => {}); }));
+  v.addEventListener('pause', () => all(a => a.pause()));
+  v.addEventListener('seeking', () => all(a => a.currentTime = v.currentTime));
+  v.addEventListener('ratechange', () => all(a => a.playbackRate = v.playbackRate));
+  v.addEventListener('volumechange', () => { if (!v.muted) v.muted = true; });   // sound comes from the tracks
+  setupAudio.h = setInterval(() => {
+    if (page !== 'review' || !RV || !RV.aud) { clearInterval(setupAudio.h); all(a => a.pause()); return; }
+    if (!v.paused) all(a => { if (Math.abs(a.currentTime - v.currentTime) > 0.2) a.currentTime = v.currentTime; });
+  }, 500);
+  applyMix(); drawMixer();
+}
+function applyMix() { (RV.aud || []).forEach(x => { x.a.volume = x.vol; x.a.muted = x.mute; }); }
+function drawMixer() {
+  const m = $('#mixer'); if (!m || !RV.aud) return;
+  m.innerHTML = '<div class="mixer">' + RV.aud.map((x, i) => `<div class="trk ${x.mute ? 'off' : ''}">
+      <button class="btn small ${x.mute ? '' : 'brand'}" data-i="${i}" data-a="mute" title="Mute / unmute">${esc(x.t.label)}</button>
+      <input type="range" min="0" max="1" step="0.05" value="${x.vol}" data-i="${i}" aria-label="${esc(x.t.label)} volume">
+      ${x.err ? '<span class="pill bad">not available</span>' : ''}</div>`).join('') + '</div>';
+  $$('[data-a=mute]', m).forEach(b => b.onclick = () => { const x = RV.aud[+b.dataset.i]; x.mute = !x.mute; applyMix(); drawMixer(); });
+  $$('input[type=range]', m).forEach(r => r.oninput = () => { RV.aud[+r.dataset.i].vol = +r.value; applyMix(); });
+}
+
+/* ------------------------------------------------------------------ hotkey fields */
+function hotkeyText(v) { return v ? v.split('+').map(p => p.length <= 2 || /^f\d/.test(p) ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)).join(' + ') : 'none'; }
+function hotkeyField(id, value, label) {
+  return `<label class="field"><span>${esc(label)}</span><input class="hk" id="${id}" type="text" readonly data-v="${esc(value)}" value="${esc(hotkeyText(value))}">
+    <small>Click, then press the keys. Backspace = none.</small></label>`;
+}
+function wireHotkeys() {
+  $$('input.hk').forEach(inp => {
+    inp.onfocus = () => { inp.value = 'Press keys…'; };
+    inp.onblur = () => { inp.value = hotkeyText(inp.dataset.v); };
+    inp.onkeydown = e => {
+      e.preventDefault();
+      if (e.key === 'Backspace' || e.key === 'Delete') { inp.dataset.v = ''; inp.blur(); return; }
+      let key = '';
+      if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
+      else if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
+      else if (/^F\d{1,2}$/.test(e.code)) key = e.code.toLowerCase();
+      else if (/^Numpad\d$/.test(e.code)) key = 'num' + e.code.slice(6);
+      if (!key) return;
+      if (!(e.ctrlKey || e.altKey || e.metaKey)) { toast('Use Ctrl, Alt or Win with the key, so it never takes a game key.', true); return; }
+      inp.dataset.v = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'win', key].filter(Boolean).join('+');
+      inp.blur();
+    };
+  });
+}
 
 /* ------------------------------------------------------------------ settings */
 function renderSettings() {
@@ -428,7 +502,27 @@ function renderSettings() {
         <label class="field wide"><span>Quality: <b id="q-val">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
           <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
         <label class="field"><span>Capture</span><select id="f-capture">${[['window', 'Apex window (recommended)'], ['game', 'Game capture'], ['display', 'Whole screen']].map(([v, l]) => `<option value="${v}" ${v === s.capture ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-        <div class="field">${switchHTML('f-game_audio', s.game_audio, 'Game sound', 'Apex audio in the recording')}</div>
+      </div></section>
+    <section class="card section"><h2>Sound and comms</h2>
+      <p class="muted" style="margin:0">Each sound is recorded on its own track, so the review can play the game, Discord and your voice separately.</p>
+      ${switchHTML('f-game_audio', s.game_audio, 'Game sound', 'Apex only, never other programs')}
+      <div class="notice ${s.comms_consent ? 'info' : ''}">
+        ${switchHTML('f-comms_consent', s.comms_consent, 'My team agreed that our voice comms are recorded',
+          'Recording Discord records your teammates too. Turn this on only once everyone in your calls agreed (in Switzerland and many other countries, recording a private conversation needs everyone\'s consent).')}
+      </div>
+      <div class="form" id="commsBox">
+        <div class="field">${switchHTML('f-discord_audio', s.discord_audio, 'Discord', 'Discord\'s sound only')}</div>
+        <div class="field">${switchHTML('f-mic_audio', s.mic_audio, 'My microphone', 'Your default Windows microphone')}</div>
+        <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
+      </div>
+      <h3>Hotkeys while recording</h3>
+      <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).</p>
+      <div class="form">
+        ${hotkeyField('f-hk_mark', s.hk_mark, 'Mark this moment')}
+        ${hotkeyField('f-hk_mute_game', s.hk_mute_game, 'Mute / unmute game sound')}
+        ${hotkeyField('f-hk_mute_discord', s.hk_mute_discord, 'Mute / unmute Discord')}
+        ${hotkeyField('f-hk_mute_mic', s.hk_mute_mic, 'Mute / unmute microphone')}
+        <div class="field">${switchHTML('f-hk_sounds', s.hk_sounds, 'Beep on hotkeys', 'Only you hear it; it isn\'t recorded')}</div>
       </div></section>
     <section class="card section"><h2>After a session</h2>
       <div class="form">
@@ -440,12 +534,16 @@ function renderSettings() {
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
         <span class="row"><button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
-  const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + (q.value * 3600 / 8 / 1000 * 1.02).toFixed(1) + ' GB per hour'; };
+  const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + ((q.value * 1000 + 480) * 3600 / 8 / 1e6).toFixed(1) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
   $('#f-signin').onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
   $('#f-quit').onclick = () => { if (confirmBox('Quit PCS Scanner? Auto-record stops until you open it again.')) api('/api/quit', {}); };
   $('#save').onclick = saveSettings;
+  wireHotkeys();
+  const cc = $('#f-comms_consent'), box = $('#commsBox');
+  const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input', box).forEach(i => i.disabled = !cc.checked); } };
+  if (cc) { cc.onchange = syncComms; syncComms(); }
   const en = $('#f-enabled'); if (en) en.onchange = async () => {
     try { S = await api('/api/autorecord', {enabled: en.checked}); toast(en.checked ? 'Auto-record on.' : 'Auto-record off.'); renderTop(); }
     catch (e) { toast(e.message, true); en.checked = !en.checked; }
@@ -456,7 +554,8 @@ async function saveSettings() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture']) body[k] = $('#f-' + k).value.trim();
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s']) body[k] = parseInt($('#f-' + k).value, 10);
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan']) body[k] = $('#f-' + k).checked;
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds']) body[k] = $('#f-' + k).checked;
+    for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }
   try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }
   catch (e) { toast('Not saved: ' + e.message, true); }

@@ -72,7 +72,8 @@ def upload(svc, folder, path, log):
     name = (SETTINGS.get('player') or 'player') + '__' + os.path.basename(path)
     q = f"name = '{name}' and '{folder}' in parents and trashed = false"
     old = svc.files().list(q=q, fields='files(id)').execute().get('files', [])
-    media = MediaFileUpload(path, mimetype='application/json', resumable=True)
+    mime = 'audio/mp4' if path.lower().endswith('.m4a') else 'text/plain' if path.lower().endswith('.log') else 'application/json'
+    media = MediaFileUpload(path, mimetype=mime, resumable=True, chunksize=8 * 1024 * 1024)
     meta = {'appProperties': {'player': SETTINGS.get('player', ''), 'role': SETTINGS.get('role', ''), 'app': BUILD.get('version', '')}}
     if old: svc.files().update(fileId=old[0]['id'], media_body=media, body=meta).execute()
     else: svc.files().create(body={'name': name, 'parents': [folder], **meta}, media_body=media, fields='id').execute()

@@ -135,8 +135,10 @@ def test_full_session_scan_and_upload():
         r.tick(); time.sleep(0.5)
         if len(hub.uploads) == 2:
             break
-    assert len(hub.uploads) == 2 and all(sorted(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
-                                         sorted(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), (
+    def core_files(u):
+        return sorted(x for x in u if not x.endswith(".events.json"))
+    assert len(hub.uploads) == 2 and all(core_files(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
+                                         core_files(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), (
         hub.uploads, {k: vars(v) for k, v in r.idx.items()}, r.queue, r.scan_proc and r.scan_proc.poll(), r.paused,
         [p.pid for p in r.suspended], r.status)
     assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
@@ -144,6 +146,45 @@ def test_full_session_scan_and_upload():
     for t in ("Scanning your session", "Scan finished", "Results sent"):
         assert any(x.startswith(t) for x in titles), titles      # the player is told at every step
     assert hub.reports[:3] == ["recording", "recorded", "uploaded"] or "uploaded" in hub.reports
+
+
+def test_hotkeys_marks_and_mutes():
+    """Marks and mutes during a recording are saved with exact times; mutes reach OBS; nothing outside a recording."""
+    import json
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"vids-{time.time_ns()}")
+    s.enabled, s.comms_consent = True, True
+    assert s.tracks() == ["game", "discord", "mic"]
+    apex = {"on": False}
+    obs = FakeOBS(s.folder_path)
+    calls = []
+    obs.mute = lambda track, m: (calls.append((track, m)), track in s.tracks())[1]
+    clock = {"t": 0.0}
+    obs.elapsed = lambda: clock["t"]
+    r = Recorder(s, obs, FakeHub(), FakeUI(False), fake_scan, is_apex_running=lambda: apex["on"])
+    r._final_file = lambda p, wait_s=0: p
+    assert r.hotkey("mark") is None                    # not recording: hotkeys do nothing
+    apex["on"] = True; r.tick()
+    clock["t"] = 61.5; assert r.hotkey("mark") == "mark"
+    clock["t"] = 70.0; assert r.hotkey("mute_mic") == "muted"
+    clock["t"] = 75.25; assert r.hotkey("mute_mic") == "unmuted"
+    assert r.hotkey("mute_nothing") is None
+    apex["on"] = False; r.tick()
+    e = list(r.idx.values())[0]
+    data = json.loads(Path(e.path).with_suffix(".events.json").read_text())
+    assert data["tracks"] == ["game", "discord", "mic"]
+    assert data["events"] == [{"t": 61.5, "kind": "mark"}, {"t": 70.0, "kind": "mute", "track": "mic", "muted": True},
+                              {"t": 75.25, "kind": "mute", "track": "mic", "muted": False}], data
+    assert calls[:2] == [("mic", True), ("mic", False)]
+    apex["on"] = True; r.tick()                        # next recording starts clean
+    assert r.events == [] and r.muted == {}
+    # without the team's agreement only the game is recorded
+    s.comms_consent = False
+    assert s.tracks() == ["game"]
+    assert settings.parse_hotkey("ctrl+alt+m") and settings.parse_hotkey("m") is None
+    assert settings.parse_hotkey("shift+1") is None   # needs ctrl, alt or win
+    assert settings.Settings(hk_mark="shift+x").clamp().hk_mark == ""
 
 
 def test_skip_and_offline_hub():

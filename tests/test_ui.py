@@ -131,6 +131,8 @@ class _S:            # recorder settings stand-in
     enabled, start_with_windows, player, hub_url = True, True, "", ""
     keep_days, max_gb, bitrate_mbps, game_audio, auto_scan, scan_delay_s, capture = 7, 100, 12, True, True, 60, "window"
     encoder, gb_per_hour = "av1_texture_amf", 5.5
+    comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
+    hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
 
     def __init__(self, folder):
         self.folder = folder
@@ -211,6 +213,41 @@ def test_scan_queue_waits_for_apex():
         assert any("done, sent to Google Drive" in m["text"] for m in b.messages), list(b.messages)
     finally:
         rcore.apex_running, runtime.scan_process, core.drive_upload_quiet = real_running, real_proc, core_upload
+
+
+def test_audio_tracks():
+    """A 3-track recording: the review gets each track as its own file, named from the recorder's layout."""
+    import subprocess
+    if not shutil.which("ffmpeg"):
+        print("  (no ffmpeg: audio track test skipped)")
+        return
+    v = TMP / "multi" / "Apex Legends_2026.11.06-21.00.mp4"
+    v.parent.mkdir(parents=True, exist_ok=True)
+    tones = []
+    for f in (440, 660, 880):
+        tones += ["-f", "lavfi", "-i", f"sine=frequency={f}:duration=3"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=black:s=160x90:d=3", *tones,
+                    "-map", "0:v", "-map", "1:a", "-map", "2:a", "-map", "3:a", "-c:v", "mpeg4", "-c:a", "aac",
+                    "-shortest", str(v)], check=True)
+    v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"],
+                                                         "events": [{"t": 1.5, "kind": "mark"}]}))
+    b = pcs_server.Backend()
+    b.add_paths([str(v)])
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        it = next(x for x in b.library() if x["path"] == str(v))
+        d = call(srv, f"/api/library/{it['id']}")[1]
+        assert [a["label"] for a in d["audio"]] == ["Game", "Discord", "Microphone"], d["audio"]
+        assert d["marks"] == [{"t": 1.5, "kind": "mark"}]
+        code, body, h = call(srv, f"/audio/{it['id']}/2", raw=True)
+        assert code == 200 and h["Content-Type"] == "audio/mp4" and len(body) > 1000
+        assert v.with_name(v.stem + ".track3.m4a").exists()          # kept next to the recording, deleted with it
+        code, body, h = call(srv, f"/audio/{it['id']}/1", headers={"Range": "bytes=0-99"}, raw=True)
+        assert code == 206 and len(body) == 100
+        assert call(srv, f"/audio/{it['id']}/7", raw=True)[0] == 404
+    finally:
+        srv.stop()
 
 
 if __name__ == "__main__":

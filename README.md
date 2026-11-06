@@ -34,6 +34,12 @@ and tests your graphics card for a few seconds. From then on:
   low priority and pauses by itself if you start Apex again. Only the results are sent, never the video.
 - **Your limits** (Settings): keep recordings N days (default 7) and a maximum folder size
   (default 100 GB, oldest deleted first). Only recordings the app made are ever deleted.
+- **Sound on separate tracks**: track 1 = Apex only, track 2 = Discord only, track 3 = your microphone. Discord
+  and mic are recorded only after you confirm in Settings that your team agreed (recording a call records
+  everyone in it). Review plays each track with its own volume and mute. Your mic track is sent with the scan
+  results for the comms review (can be turned off).
+- **Hotkeys while recording** (only active while Apex is recorded): Ctrl+Alt+M marks a moment for the review,
+  Ctrl+Alt+1/2/3 mute or unmute game / Discord / mic. A short beep confirms. All can be changed in Settings.
 - **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
   8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 

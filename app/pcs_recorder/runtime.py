@@ -123,6 +123,74 @@ class ObsAdapter:
     def stop(self):
         return self.obs.stop()
 
+    def mute(self, track: str, muted: bool) -> bool:
+        return self.obs.mute(track, muted)
+
+    def elapsed(self):
+        return self.obs.elapsed()
+
+
+class Hotkeys:
+    """Global hotkeys, registered only while a recording runs (so they never take a key away otherwise).
+    Uses Windows RegisterHotKey, the same mechanism as Discord's keybinds: no keyboard hook, nothing
+    injected into the game."""
+
+    ACTIONS = (("hk_mute_game", "mute_game"), ("hk_mute_discord", "mute_discord"), ("hk_mute_mic", "mute_mic"),
+               ("hk_mark", "mark"))
+    SOUNDS = {"mark": (1320, 90), "muted": (440, 140), "unmuted": (880, 90)}
+
+    def __init__(self, s: st.Settings, rec: Recorder):
+        self.s, self.rec = s, rec
+        self.thread = None
+
+    def start(self) -> None:
+        if os.name != "nt" or self.thread:
+            return
+        self.thread = threading.Thread(target=self._loop, daemon=True, name="hotkeys")
+        self.thread.start()
+
+    def _loop(self) -> None:
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        msg = wintypes.MSG()
+        active: dict[int, str] = {}          # hotkey id -> action
+        signature = None
+        while True:
+            want = None
+            if self.s.enabled and self.rec.current is not None:
+                want = tuple((getattr(self.s, k), a) for k, a in self.ACTIONS if getattr(self.s, k))
+            if want != signature:
+                for i in active:
+                    user32.UnregisterHotKey(None, i)
+                active = {}
+                for n, (combo, action) in enumerate(want or (), 1):
+                    parsed = st.parse_hotkey(combo)
+                    if parsed and user32.RegisterHotKey(None, n, parsed[0], parsed[1]):
+                        active[n] = action
+                    elif parsed:
+                        log.info("hotkey %s is used by another program", combo)
+                signature = want
+            while user32.PeekMessageW(ctypes.byref(msg), None, 0x0312, 0x0312, 1):   # WM_HOTKEY
+                action = active.get(msg.wParam)
+                if action:
+                    threading.Thread(target=self._fire, args=(action,), daemon=True).start()
+            time.sleep(0.05)
+
+    def _fire(self, action: str) -> None:
+        try:
+            what = self.rec.hotkey(action)
+        except Exception:
+            log.exception("hotkey failed")
+            return
+        if what and self.s.hk_sounds:
+            try:
+                import winsound
+                winsound.Beep(*self.SOUNDS[what])
+                if what == "muted":
+                    winsound.Beep(330, 140)                   # two low tones = muted
+            except Exception:
+                pass
+
 
 class Sender:
     """Results go to the team hub when one is set, and to Google Drive when the player is signed in.
@@ -400,11 +468,13 @@ class AutoRecorder:
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
         self.thread = None
+        self.hotkeys = Hotkeys(self.s, self.rec)
 
     def run_loop(self) -> None:
         if self.thread:
             return
         self.rec.cleanup()
+        self.hotkeys.start()
 
         def loop():
             while True:

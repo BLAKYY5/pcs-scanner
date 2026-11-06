@@ -27,11 +27,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
-      - name: Test auto-record logic (fake OBS and game, real process pausing on Windows)
-        run: |
-          python tests/test_recorder.py
-          python tests/test_ui.py
-
       - name: Get ffmpeg
         shell: pwsh
         run: |
@@ -39,6 +34,15 @@ jobs:
           Expand-Archive ffmpeg.zip -DestinationPath ffx
           New-Item -ItemType Directory -Force -Path ffmpeg | Out-Null
           Get-ChildItem -Recurse ffx -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination ffmpeg
+
+      - name: Test auto-record logic and the window's server (fake OBS and game, real process pausing on Windows)
+        shell: pwsh
+        run: |
+          $env:PATH = "$PWD\ffmpeg;$env:PATH"
+          python tests/test_recorder.py
+          if ($LASTEXITCODE) { exit 1 }
+          python tests/test_ui.py
+          if ($LASTEXITCODE) { exit 1 }
 
       - name: Write build settings (version, Google sign-in ID, coach)
         shell: pwsh

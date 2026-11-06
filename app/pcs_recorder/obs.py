@@ -23,6 +23,9 @@ OBS_EXE = OBS_ROOT / "bin" / "64bit" / "obs64.exe"
 CONFIG = OBS_ROOT / "config" / "obs-studio"
 APEX_WINDOW = "Apex Legends:Respawn001:r5apex_dx12.exe"   # matched by executable (priority 2)
 SCENE, SOURCE, AUDIO = "PCS Apex", "Apex", "Apex audio"
+DISCORD_WINDOW = "Discord:Chrome_WidgetWin_1:Discord.exe"  # matched by executable (priority 2)
+TRACK_INPUTS = {"game": "PCS Game", "discord": "PCS Discord", "mic": "PCS Mic"}   # one source per track
+TRACK_NAMES = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 FILENAME = "Apex Legends_%CCYY.%MM.%DD-%hh.%mm"           # same naming the scanner already uses
 
 # Hardware encoders, best first, per GPU vendor. CPU (x264) is deliberately not used: it costs FPS.
@@ -84,6 +87,11 @@ def encoder_candidates(vendor: str) -> list[str]:
     return ENCODERS.get(vendor, []) + [e for v, l in ENCODERS.items() if v != vendor for e in l]
 
 
+def rec_tracks(s: Settings) -> int:
+    """OBS's track bitmask: one track per recorded source (track 1 = first of s.tracks())."""
+    return (1 << max(1, len(s.tracks()))) - 1
+
+
 def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
     ws = CONFIG / "plugin_config" / "obs-websocket"
     ws.mkdir(parents=True, exist_ok=True)
@@ -97,7 +105,9 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
         "[General]", "Name=PCS", "",
         "[Output]", "Mode=Advanced", f"FilenameFormatting={FILENAME}", "",
         "[AdvOut]", "RecType=Standard", f"RecFilePath={folder}", "RecFormat2=mkv",
-        f"RecEncoder={encoder}", "RecTracks=1", "",
+        f"RecEncoder={encoder}", f"RecTracks={rec_tracks(s)}",
+        *[f"Track{i}Name={TRACK_NAMES[t]}" for i, t in enumerate(s.tracks(), 1)],
+        *[f"Track{i}Bitrate=160" for i in range(1, 4)], "",
         "[Video]", f"BaseCX={width}", f"BaseCY={height}", f"OutputCX={width}", f"OutputCY={height}",
         "FPSType=1", "FPSInt=60", "AutoRemux=true", ""]), encoding="utf-8")
     # constant bitrate (predictable file sizes for the folder limit), keyframe every second
@@ -129,7 +139,7 @@ def is_running() -> bool:
 
 def config_signature(s: Settings) -> str:
     """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up)."""
-    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}"
+    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}"
 
 
 def close() -> None:
@@ -188,20 +198,32 @@ class OBS:
             c.create_scene(SCENE)
         c.set_current_program_scene(SCENE)
         names = {i["inputName"] for i in c.get_input_list().inputs}
-        for n in (SOURCE, AUDIO):
+        for n in (SOURCE, AUDIO, *TRACK_INPUTS.values()):
             if n in names:
                 c.remove_input(n)
         kind, settings = {
             "window": ("window_capture", {"window": APEX_WINDOW, "priority": 2, "method": 2, "cursor": False,
-                                          "capture_audio": s.game_audio}),
+                                          "capture_audio": False}),
             "game": ("game_capture", {"capture_mode": "window", "window": APEX_WINDOW, "priority": 2,
-                                      "capture_cursor": False, "capture_audio": s.game_audio}),
+                                      "capture_cursor": False, "capture_audio": False}),
             "display": ("monitor_capture", {"capture_cursor": False}),
         }[s.capture]
         c.create_input(SCENE, SOURCE, kind, settings, True)
-        if s.capture == "display" and s.game_audio:
-            c.create_input(SCENE, AUDIO, "wasapi_process_output_capture", {"window": APEX_WINDOW, "priority": 2}, True)
-        # never record the microphone or the rest of the PC's sound
+        # sound: one source per track, each recorded on its own track only
+        #   game    = Apex's sound only (application audio capture), never the rest of the PC
+        #   discord = Discord's sound only;  mic = the default microphone
+        sources = {
+            "game": ("wasapi_process_output_capture", {"window": APEX_WINDOW, "priority": 2}),
+            "discord": ("wasapi_process_output_capture", {"window": DISCORD_WINDOW, "priority": 2}),
+            "mic": ("wasapi_input_capture", {"device_id": "default"}),
+        }
+        tracks = s.tracks()
+        for i, t in enumerate(tracks, 1):
+            name = TRACK_INPUTS[t]
+            c.create_input(SCENE, name, *sources[t], True)
+            c.set_input_audio_tracks(name, {str(n): n == i for n in range(1, 7)})
+            c.set_input_mute(name, False)
+        # OBS's own default sources (whole-PC sound, default mic) are never used
         special = c.get_special_inputs()
         for attr in ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4"):
             name = getattr(special, attr, None)
@@ -210,6 +232,22 @@ class OBS:
                     c.set_input_mute(name, True)
                 except Exception:
                     pass
+        c.set_profile_parameter("AdvOut", "RecTracks", str(rec_tracks(s)))
+        self.tracks = tracks
+
+    def mute(self, track: str, muted: bool) -> bool:
+        if track not in getattr(self, "tracks", []):
+            return False
+        self.c.set_input_mute(TRACK_INPUTS[track], muted)
+        return True
+
+    def elapsed(self) -> float | None:
+        """Seconds into the current recording (exact, from OBS)."""
+        try:
+            st = self.c.get_record_status()
+            return st.output_duration / 1000 if st.output_active else None
+        except Exception:
+            return None
 
     def start(self) -> None:
         if not self.c.get_record_status().output_active:

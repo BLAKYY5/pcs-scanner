@@ -55,6 +55,8 @@ class Recorder:
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.lock = threading.RLock()
+        self.events: list[dict] = []             # marks and mutes in the recording in progress
+        self.muted: dict[str, bool] = {}
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
         for k in sorted(self.idx, key=lambda k: self.idx[k].started):
             e = self.idx[k]
@@ -96,6 +98,7 @@ class Recorder:
             n += 1
         self.idx[key] = retention.Entry(path="", started=self.clock(), status="recording")
         self.current = key
+        self.events, self.muted = [], {}
         retention.save_index(self.idx)
         self.status = "Recording Apex"
         self.hub.report(self._report(key))
@@ -109,6 +112,8 @@ class Recorder:
             path = None
             log.warning("stop failed: %s", ex)
         e.path = self._final_file(path) if path else ""
+        if e.path:
+            self._write_events(key)
         e.status = "recorded" if e.path else "failed"
         e.note = "" if e.path else "OBS didn't return a file"
         retention.save_index(self.idx)
@@ -141,6 +146,48 @@ class Recorder:
                 last = size
             time.sleep(2)
         return str(mp4 if mp4.exists() else mkv)
+
+    # ---------------------------------------------------------- hotkeys during a recording
+    def hotkey(self, action: str) -> str | None:
+        """'mark' or 'mute_game' / 'mute_discord' / 'mute_mic'. Returns what happened (for the beep), or None."""
+        with self.lock:
+            if self.current is None:
+                return None
+            e = self.idx[self.current]
+            t = None
+            try:
+                t = self.obs.elapsed()
+            except Exception:
+                pass
+            if t is None:
+                t = self.clock() - e.started
+            t = round(t, 2)
+            if action == "mark":
+                self.events.append({"t": t, "kind": "mark"})
+                return "mark"
+            if action.startswith("mute_"):
+                track = action[5:]
+                now = not self.muted.get(track, False)
+                try:
+                    if not self.obs.mute(track, now):
+                        return None                      # that track isn't recorded
+                except Exception as ex:
+                    log.warning("mute failed: %s", ex)
+                    return None
+                self.muted[track] = now
+                self.events.append({"t": t, "kind": "mute", "track": track, "muted": now})
+                return "muted" if now else "unmuted"
+            return None
+
+    def _write_events(self, key: str) -> None:
+        """Marks, mutes and the track layout, next to the recording (and sent with the scan results)."""
+        import json
+        e = self.idx[key]
+        data = {"tracks": self.s.tracks(), "events": self.events, "player": self.s.player}
+        try:
+            Path(e.path).with_suffix(".events.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
+        except OSError as ex:
+            log.warning("events not saved: %s", ex)
 
     # ---------------------------------------------------------- scanning
     def _begin_scan(self, key: str) -> None:
@@ -212,6 +259,7 @@ class Recorder:
             e.note = "" if code == 0 else f"scanner exit code {code}"
             retention.save_index(self.idx)
             if code == 0:
+                self._add_extras(e)
                 self.ui.notify("Scan finished", f"{summary(e)}. Sending the results…")
             else:
                 self.ui.notify("Scan failed", f"The scanner stopped with an error (code {code}). The recording is kept; "
@@ -219,6 +267,22 @@ class Recorder:
         self.next_upload = 0
         self.status = "Waiting for Apex"
         self._next_in_queue(apex)
+
+    def _add_extras(self, e) -> None:
+        """What goes to the team with the scan results besides the scanner's files: the marks/mutes and,
+        when the team agreed and the player allows it, the microphone track (for the comms review)."""
+        import json
+        import shutil
+        out = Path(e.path).with_suffix(".scan")
+        ev = Path(e.path).with_suffix(".events.json")
+        try:
+            if ev.exists():
+                shutil.copy(ev, out / ev.name)
+                tracks = json.loads(ev.read_text(encoding="utf-8")).get("tracks", [])
+                if self.s.comms_consent and self.s.send_mic and "mic" in tracks:
+                    extract_track(e.path, tracks.index("mic"), out / (Path(e.path).stem + ".mic.m4a"))
+        except Exception as ex:
+            log.warning("extras not added: %s", ex)
 
     def _resume_all(self) -> None:
         import psutil
@@ -296,6 +360,14 @@ def drop_original(mp4: Path) -> bool:
     except OSError:
         pass                                          # still open somewhere: try again at the next clean-up
     return False
+
+
+def extract_track(video: str, index: int, out: Path) -> Path:
+    """Copy one audio track out of a recording (no re-encoding: a few seconds for an hour)."""
+    cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", str(video), "-map", f"0:a:{index}", "-vn",
+           "-c:a", "copy", str(out)]
+    subprocess.run(cmd, check=True, timeout=600, capture_output=True, creationflags=_low_priority())
+    return out
 
 
 MAP_NAMES = {"WE": "World's Edge", "SP": "Storm Point", "ED": "E-District", "OL": "Olympus",

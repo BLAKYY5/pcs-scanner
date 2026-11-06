@@ -27,7 +27,45 @@ import pcs_core as core
 WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
-              "capture", "hub_url", "start_with_windows")
+              "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
+              "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds")
+TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
+
+
+def audio_tracks(video: str) -> list[dict]:
+    """The recording's audio tracks: names from the recorder's .events.json, count from ffprobe."""
+    import subprocess
+    try:
+        r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                            "-of", "csv=p=0", video], capture_output=True, text=True, timeout=20,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        n = len([x for x in r.stdout.split() if x.strip()])
+    except Exception:
+        n = 1
+    names = []
+    ev = Path(video).with_suffix(".events.json")
+    if ev.exists():
+        try:
+            names = json.loads(ev.read_text(encoding="utf-8")).get("tracks", [])
+        except Exception:
+            pass
+    return [{"n": i, "key": names[i] if i < len(names) else f"track{i + 1}",
+             "label": TRACK_LABEL.get(names[i], names[i]) if i < len(names) else f"Audio {i + 1}"} for i in range(n)]
+
+
+def track_file(video: str, n: int) -> Path:
+    """One audio track as its own file (made once, then reused). Next to the recording for the app's own
+    recordings (so it's deleted with it); in the app's cache for files added by hand."""
+    v = Path(video)
+    folder = v.parent if v.with_suffix(".events.json").exists() else Path(core.DATA) / "audio-cache"
+    folder.mkdir(parents=True, exist_ok=True)
+    out = folder / (f"{v.stem}.track{n + 1}.m4a" if folder == v.parent else f"{vid(video)}.track{n + 1}.m4a")
+    if not out.exists() or out.stat().st_mtime < v.stat().st_mtime:
+        from pcs_recorder.core import extract_track
+        tmp = out.with_name(out.stem + ".part.m4a")
+        extract_track(video, n, tmp)
+        os.replace(tmp, out)
+    return out
 
 
 def vid(path: str) -> str:
@@ -167,6 +205,13 @@ class Backend:
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
             it["feed"] = [{"t": l.get("t"), "jpg": l.get("jpg")} for l in f.get("lines", [])]
+        ev = Path(it["path"]).with_suffix(".events.json")
+        if ev.exists():
+            try:
+                it["marks"] = json.loads(ev.read_text(encoding="utf-8")).get("events", [])
+            except Exception:
+                pass
+        it["audio"] = audio_tracks(it["path"])
         return it
 
     # ------------------------------------------------------------- scanning by hand
@@ -368,11 +413,21 @@ class Server:
                 self.wfile.write(data)
 
             # -- video with seeking
-            def _video(self, item_id):
+            def _audio(self, item_id, n):
                 it = b.find(item_id)
                 if not it:
                     return self._json({"error": "not found"}, 404)
-                p = it["path"]
+                try:
+                    p = str(track_file(it["path"], int(n)))
+                except Exception as e:
+                    return self._json({"error": f"audio track not available: {e}"}, 404)
+                return self._video(item_id, p)
+
+            def _video(self, item_id, p=None):
+                it = b.find(item_id)
+                if not it:
+                    return self._json({"error": "not found"}, 404)
+                p = p or it["path"]
                 size = os.path.getsize(p)
                 start, end = 0, size - 1
                 rng = self.headers.get("Range")
@@ -394,7 +449,8 @@ class Server:
                     self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
                 else:
                     self.send_response(200)
-                ctype = "video/mp4" if p.lower().endswith((".mp4", ".mov")) else "video/x-matroska"
+                ctype = ("audio/mp4" if p.lower().endswith(".m4a") else
+                         "video/mp4" if p.lower().endswith((".mp4", ".mov")) else "video/x-matroska")
                 self.send_header("Content-Type", ctype)
                 self.send_header("Accept-Ranges", "bytes")
                 self.send_header("Content-Length", str(end - start + 1))
@@ -422,13 +478,16 @@ class Server:
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
                 path = unquote(u.path)
-                if not path.startswith(("/api/", "/video/")):
+                if not path.startswith(("/api/", "/video/", "/audio/")):
                     if not self._ok_origin():
                         return self._json({"error": "forbidden"}, 403)
                     return self._static(path)
                 if not self._authed(q):
                     return self._json({"error": "forbidden"}, 403)
                 try:
+                    if path.startswith("/audio/"):
+                        parts = path.split("/")
+                        return self._audio(parts[2], parts[3])
                     if path.startswith("/video/"):
                         return self._video(path.split("/")[2])
                     if path == "/api/state":
