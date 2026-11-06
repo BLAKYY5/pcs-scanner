@@ -222,6 +222,7 @@ def main():
                                       yt_signin=lambda: (win.show('settings'), b.yt_signin()))
         if not b.auto.s.player:
             b.auto.s.player = SETTINGS.get('player', '')
+        b.auto.ui.actions["eeclink"] = ("Paste the link", lambda: win.show('recordings'))
         autorec.hold_guard(lambda: win.show())
         b.auto.tray(lambda: win.show(), lambda: b.quit(), open_settings=lambda: win.show('settings'))
         if b.auto.s.enabled:

@@ -14,6 +14,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -88,36 +89,72 @@ def fmt(t: float) -> str:
     return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
 
 
-def describe(s: Settings, idx, keys: list[str], offsets: list[float]) -> tuple[str, str, int]:
+EEC_RE = re.compile(r"^(?:https?://)?(?:www\.)?eternalesports\.club(/[\w\-./?=&%#]*)?$", re.I)
+
+
+def normalize_eec(link: str) -> str | None:
+    """An EEC page link (lobby, usually https://eternalesports.club/lobbies/<n>/<code>), or None."""
+    link = (link or "").strip()
+    m = EEC_RE.match(link)
+    if not m:
+        return None
+    return "https://eternalesports.club" + (m.group(1) or "/")
+
+
+def our_drop(g: dict) -> str | None:
+    spot = next((x for x in (g.get("drop") or {}).get("spots", []) if x.get("kind") == "ours"), None)
+    if not spot or not spot.get("poi"):
+        return None
+    words = spot["poi"].split("-")[1:] or spot["poi"].split("-")
+    return " ".join(w.capitalize() for w in words)
+
+
+def tags_for(s: Settings, desc: str) -> list[str]:
+    tags = ["Apex Legends", "scrims", "EEC", s.yt_team or "PCS", s.player] + [m for m in MAP_NAMES.values() if m in desc]
+    return [t for t in dict.fromkeys(tags) if t][:15]
+
+
+def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: list[str] | None = None,
+             audio: str = "game") -> tuple[str, str, int]:
     """Title, description with chapters, and the number of games."""
     games, marks = [], []
     for k, off in zip(keys, offsets):
         for g in scan_of(idx[k]).get("games", []):
             if g.get("tStart") is not None:
-                games.append((off + g["tStart"], g.get("map"), g.get("mode")))
+                games.append((off + g["tStart"], g.get("map"), g.get("mode"), our_drop(g),
+                              (g.get("landing") or {}).get("landedAtExact")))
         for m in events_of(idx[k]).get("events", []):
             if m.get("kind") == "mark":
                 marks.append(off + m["t"])
+    games.sort(key=lambda x: x[0])
     start = dt.datetime.fromtimestamp(idx[keys[0]].started)
-    maps = ", ".join(dict.fromkeys(MAP_NAMES.get(m, m or "?") for _, m, _ in games)) or "no game found"
-    scrim = any(mode == "scrim" for _, _, mode in games)
-    title = (f"{'Scrims' if scrim else 'Session'} {start:%d.%m.%Y %H:%M} · {s.player or 'Player'} POV · "
+    team = s.yt_team or "PCS"
+    player = s.player or "Player"
+    maps = ", ".join(dict.fromkeys(MAP_NAMES.get(g[1], g[1] or "?") for g in games)) or "no game found"
+    scrim = any(g[2] == "scrim" for g in games)
+    title = (f"{'Scrims' if scrim else 'Session'} {start:%d.%m.%Y %H:%M} · {team} · {player} POV · "
              f"{len(games)} game{'s' if len(games) != 1 else ''} ({maps})")[:100]
+
+    def label(i, g):
+        return f"Game {i} · {MAP_NAMES.get(g[1], g[1] or '?')}" + (f" · {g[3]}" if g[3] else "")
     # YouTube chapters: start at 0:00, ascending, at least 10 s apart, at least 3 of them
     chapters = [(0.0, "Lobby")]
-    for i, (t, m, _) in enumerate(sorted(games), 1):
-        name = f"Game {i} · {MAP_NAMES.get(m, m or '?')}"
-        if t - chapters[-1][0] >= 10:
-            chapters.append((t, name))
+    for i, g in enumerate(games, 1):
+        if g[0] - chapters[-1][0] >= 10:
+            chapters.append((g[0], label(i, g)))
         elif len(chapters) == 1:
-            chapters[0] = (0.0, name)                      # the recording starts right at the game
-    lines = [f"{s.player or 'Player'} POV · recorded {start:%A %d %B %Y, %H:%M}", ""]
+            chapters[0] = (0.0, label(i, g))               # the recording starts right at the game
+    lines = [f"{team} · {player} POV · {'EEC scrims' if scrim else 'Apex session'} · {start:%A %d %B %Y, %H:%M}"]
+    if links:
+        lines += [("EEC lobby: " if len(links) == 1 else "EEC lobbies: ") + "  ".join(links)]
+    lines.append("")
     if len(chapters) >= 3:
         lines += [f"{fmt(t)} {name}" for t, name in chapters] + [""]
     elif games:
-        lines += [f"Game {i} ({MAP_NAMES.get(m, m or '?')}): {fmt(t)}" for i, (t, m, _) in enumerate(sorted(games), 1)] + [""]
+        lines += [f"{fmt(g[0])} {label(i, g)}" for i, g in enumerate(games, 1)] + [""]
     if marks:
         lines += ["Marked moments: " + ", ".join(fmt(t) for t in sorted(marks)), ""]
+    lines.append("Sound: " + ("game + team comms" if audio == "mix" else "game only") + ".")
     lines.append("Recorded and uploaded by PCS Scanner.")
     return title, "\n".join(lines), len(games)
 
@@ -166,6 +203,33 @@ class Uploader:
         self.status = ""
         self.night = None                          # night.Night: when uploads may run, keeps the PC awake
 
+    def _set(self, bid: str, **kw) -> dict:
+        """Update a block's state, keeping what the player added (EEC links) and what was already asked."""
+        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "asked")}
+        self.state[bid] = {**keep, **kw}
+        return self.state[bid]
+
+    # ---------------------------------------------------------- EEC lobby links
+    def set_links(self, key: str, links: list[str]) -> list[str]:
+        """The EEC lobby link(s) of the block this recording belongs to (shown in the video description)."""
+        good = [normalize_eec(l) for l in links]
+        good = [l for l in dict.fromkeys(good) if l]
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if key in keys:
+                st = self.state.setdefault(keys[0], {"keys": keys})
+                if st.get("status") in ("uploading", "done"):
+                    raise RuntimeError("This block is already on YouTube; the link can't be added any more")
+                st["eec"] = good
+                save_state(self.state)
+                return good
+        raise RuntimeError("Recording not found")
+
+    def links_of(self, key: str) -> list[str]:
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if key in keys:
+                return self.state.get(keys[0], {}).get("eec", [])
+        return []
+
     # blocks still waiting for YouTube: their recordings must not be cleaned up yet
     def protected(self) -> set[str]:
         return {k for b in self.state.values() if b.get("status") in ("waiting", "uploading", "waiting-retry", "requested")
@@ -192,11 +256,21 @@ class Uploader:
             ok_states = DONE_STATES + (("skipped",) if requested else ())
             if any(idx[k].status not in ok_states for k in keys):
                 if all(idx[k].status in ("skipped", "failed") for k in keys):
-                    self.state[bid] = {"keys": keys, "status": "skipped", "why": "not scanned"}
+                    self._set(bid, keys=keys, status="skipped", why="not scanned")
                 continue                                   # wait for the scans (they give the chapters)
+            if self.s.yt_wait_eec and not st.get("eec") and not requested:
+                waited = self.clock() - end_of(idx[keys[-1]])
+                if waited < self.s.yt_wait_eec_h * 3600:
+                    if not st.get("asked"):
+                        self._set(bid, keys=keys, status=st.get("status"), asked=True)
+                        save_state(self.state)
+                        self.ui.notify("EEC lobby link for YouTube", "Paste the EEC lobby link of your last scrim block "
+                                       "(Recordings → EEC link). It goes in the video description; the upload waits "
+                                       f"for it up to {self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
+                    continue                               # waiting for the link (at most yt_wait_eec_h)
             if not requested and self.s.yt_scrims_only and not any(g.get("mode") == "scrim" for k in keys
                                                  for g in scan_of(idx[k]).get("games", [])):
-                self.state[bid] = {"keys": keys, "status": "skipped", "why": "no scrim game"}
+                self._set(bid, keys=keys, status="skipped", why="no scrim game")
                 save_state(self.state)
                 continue
             out.append(keys)
@@ -218,7 +292,7 @@ class Uploader:
             return
         self.told_signin = False
         keys = ready[0]
-        self.state[keys[0]] = {"keys": keys, "status": "waiting"}
+        self._set(keys[0], keys=keys, status="waiting")
         save_state(self.state)
         self.thread = threading.Thread(target=self._upload_block, args=(keys,), daemon=True, name="youtube")
         self.thread.start()
@@ -239,7 +313,7 @@ class Uploader:
             for p in paths:
                 offsets.append(t)
                 t += duration(p)
-            title, desc, n_games = describe(self.s, idx, keys, offsets)
+            title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio)
             build_video(paths, tracks, audio, out)
             st.update(status="uploading", title=title)
             save_state(self.state)
@@ -268,7 +342,8 @@ class Uploader:
         yt = self.service()
         if yt is None:
             raise ConnectionError("not signed in to YouTube")
-        body = {"snippet": {"title": title, "description": desc, "categoryId": "20"},          # 20 = Gaming
+        body = {"snippet": {"title": title, "description": desc, "categoryId": "20",           # 20 = Gaming
+                            "tags": tags_for(self.s, desc)},
                 "status": {"privacyStatus": self.s.yt_privacy, "selfDeclaredMadeForKids": False}}
         media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=16 * 1024 * 1024, resumable=True)
         req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
@@ -288,7 +363,7 @@ class Uploader:
             if key in keys:
                 if self.state.get(keys[0], {}).get("status") in ("waiting", "uploading"):
                     return keys
-                self.state[keys[0]] = {"keys": keys, "status": "requested"}
+                self._set(keys[0], keys=keys, status="requested")
                 save_state(self.state)
                 return keys
         return None

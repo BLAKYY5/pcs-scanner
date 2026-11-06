@@ -30,7 +30,8 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
-              "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown")
+              "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
+              "yt_team", "yt_wait_eec", "yt_wait_eec_h")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 
 
@@ -134,6 +135,27 @@ class Backend:
                 self.say(f"YouTube sign-in failed: {e}")
         threading.Thread(target=go, daemon=True).start()
 
+    def _rec_key(self, item_id: str) -> str:
+        a = self.auto
+        if not a or not getattr(a.rec, "youtube", None):
+            raise RuntimeError("YouTube upload isn't available in this build")
+        it = self.find(item_id)
+        key = next((k for k, e in a.rec.idx.items() if it and e.path and
+                    os.path.normcase(os.path.abspath(e.path)) == os.path.normcase(os.path.abspath(it["path"]))), None)
+        if not key:
+            raise RuntimeError("Only recordings made by auto-record belong to a scrim block")
+        return key
+
+    def set_eec(self, item_id: str, links: list[str]) -> list[str]:
+        key = self._rec_key(item_id)
+        from pcs_recorder.youtube import normalize_eec
+        bad = [l for l in links if l.strip() and not normalize_eec(l)]
+        if bad:
+            raise RuntimeError("That isn't an EEC link (it should start with https://eternalesports.club/)")
+        good = self.auto.rec.youtube.set_links(key, links)
+        self.say("EEC lobby link saved for this block." if good else "EEC lobby link removed.")
+        return good
+
     def yt_upload(self, item_id: str) -> int:
         a = self.auto
         if not a or not a.rec.youtube:
@@ -204,9 +226,10 @@ class Backend:
                 status = "waiting"
             yt = None
             if norm in rec_index and self.auto and getattr(self.auto.rec, "youtube", None):
-                b = self.auto.rec.youtube.block_of(rec_index[norm][0])
-                if b:
-                    yt = {k: b.get(k) for k in ("status", "url", "title", "why", "error")}
+                up = self.auto.rec.youtube
+                b = up.block_of(rec_index[norm][0])
+                yt = {k: b.get(k) for k in ("status", "url", "title", "why", "error")} if b else {}
+                yt["eec"] = up.links_of(rec_index[norm][0])
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt}
         return sorted(items.values(), key=lambda x: -x["mtime"])
@@ -564,6 +587,8 @@ class Server:
                     if path == "/api/youtube/signin":
                         b.yt_signin()
                         return self._json({"ok": True})
+                    if path == "/api/youtube/eec":
+                        return self._json({"eec": b.set_eec(body.get("id", ""), body.get("links", []))})
                     if path == "/api/youtube/upload":
                         return self._json({"queued": b.yt_upload(body.get("id", ""))})
                     if path == "/api/signin":

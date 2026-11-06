@@ -208,6 +208,7 @@ function drawList() {
         <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
+          ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
           ${it.auto && S && S.youtube && S.youtube.available && !(it.yt && ['done', 'waiting', 'uploading'].includes(it.yt.status)) ? '<button class="btn small ghost" data-a="yt" title="Upload this recording\'s scrim block to the team YouTube channel">YouTube</button>' : ''}
           <button class="btn small ghost" data-a="show" title="Open the file">Open</button>
           ${!it.auto ? '<button class="btn small ghost" data-a="forget" title="Remove from this list (the file stays)">✕</button>' : ''}</div></div>`).join('');
@@ -218,6 +219,13 @@ function drawList() {
     $$('[data-a]', row).forEach(b => b.onclick = async () => {
       if (b.dataset.a === 'scan') scan([id]);
       if (b.dataset.a === 'show') api('/api/open', {what: 'file', id});
+      if (b.dataset.a === 'eec') {
+        const it = LIB.find(x => x.id === id), cur = (it && it.yt && it.yt.eec || []).join(' ');
+        const v = window.prompt('EEC lobby link of this scrim block (e.g. https://eternalesports.club/lobbies/4/e9483b).\nSeveral lobbies: separate with spaces. Empty = remove.', cur);
+        if (v === null) return;
+        try { const r = await api('/api/youtube/eec', {id, links: v.split(/\s+/).filter(Boolean)}); toast(r.eec.length ? 'EEC link saved: it goes in the YouTube description.' : 'EEC link removed.'); loadLibrary(); }
+        catch (e) { toast(e.message, true); }
+      }
       if (b.dataset.a === 'yt') { try { const r = await api('/api/youtube/upload', {id}); toast(`Block of ${r.queued} recording(s) queued for YouTube.`); loadLibrary(); } catch (e) { toast(e.message, true); } }
       if (b.dataset.a === 'forget') { await api('/api/library/forget', {id}); loadLibrary(); }
     });
@@ -225,7 +233,7 @@ function drawList() {
   syncSel();
 }
 function ytPill(it) {
-  const y = it.yt; if (!y) return '';
+  const y = it.yt; if (!y || !y.status) return '';
   if (y.status === 'done') return ` <a class="pill good" href="${esc(y.url)}" target="_blank" rel="noopener" title="${esc(y.title || '')}">YouTube ↗</a>`;
   if (y.status === 'uploading' || y.status === 'waiting') return ' <span class="pill info">YouTube…</span>';
   if (y.status === 'requested' || y.status === 'waiting-retry') return ' <span class="pill info">YouTube soon</span>';
@@ -547,6 +555,9 @@ function renderSettings() {
           <small>${s.comms_consent ? 'Comms on YouTube means your team\'s voices are on the channel too.' : 'Comms need the team agreement above.'}</small></label>
         <label class="field"><span>Same block if less than (minutes) apart</span><input id="f-yt_gap_min" type="number" min="10" max="240" value="${s.yt_gap_min}"><small>Restarting Apex mid-block stays one video.</small></label>
         <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks with only ranked or pubs')}</div>
+        <label class="field"><span>Team name (titles)</span><input id="f-yt_team" type="text" value="${esc(s.yt_team)}" maxlength="30"></label>
+        <div class="field">${switchHTML('f-yt_wait_eec', s.yt_wait_eec, 'Wait for the EEC lobby link', 'You get a message after the block; paste the link in Recordings')}</div>
+        <label class="field"><span>…but at most (hours)</span><input id="f-yt_wait_eec_h" type="number" min="1" max="72" value="${s.yt_wait_eec_h}"><small>Then it uploads without the link.</small></label>
       </div>
       <h3>Night uploads</h3>
       <div class="form">
@@ -587,9 +598,9 @@ function renderSettings() {
 async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
-    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }
   try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }

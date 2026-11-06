@@ -43,7 +43,9 @@ and tests your graphics card for a few seconds. From then on:
 - **YouTube (optional)**: one video per scrim block per player, uploaded to the team channel (Settings → YouTube,
   sign in once and pick the team channel). Recordings less than 45 min apart are one block (an Apex restart
   mid-block stays one video); chapters for each game, marked moments in the description; unlisted or private;
-  game sound only, or game + comms when the team agreed. Uploads only while Apex is closed. Older recordings
+  game sound only, or game + comms when the team agreed. The EEC lobby link (pasted in Recordings → "EEC link";
+  the upload waits up to 12 h for it) goes in the description, with the drop POI of each game. Uploads only
+  while Apex is closed. Older recordings
   only when you press "YouTube" on them.
 - **Night uploads (optional)**: YouTube uploads wait for the night (default 01:00-07:00) and 20 min without
   mouse or keyboard. Meanwhile the PC is kept from sleeping, so leave it on after the scrims. Separate switch:

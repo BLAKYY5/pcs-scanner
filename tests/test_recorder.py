@@ -221,8 +221,13 @@ def test_youtube_blocks():
     assert youtube.blocks(idx, 45) == [["a", "b"], ["c"]]
     assert youtube.blocks(idx, 10) == [["a"], ["b"], ["c"]]
 
-    s = settings.Settings(player="Blakey", folder=str(folder), yt_enabled=True)
-    title, desc, n = youtube.describe(s, idx, ["a", "b"], [0.0, 40.0])
+    s = settings.Settings(player="Blakey", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    title, desc, n = youtube.describe(s, idx, ["a", "b"], [0.0, 40.0], links=["https://eternalesports.club/lobbies/4/e9483b"])
+    assert "EEC lobby: https://eternalesports.club/lobbies/4/e9483b" in desc and "Sound: game only." in desc
+    assert youtube.normalize_eec("eternalesports.club/lobbies/4/e9483b") == "https://eternalesports.club/lobbies/4/e9483b"
+    assert youtube.normalize_eec("https://evil.example/eternalesports.club") is None
+    g = {"drop": {"spots": [{"poi": "bm-stasis-array", "kind": "ours"}, {"poi": "bm-the-foundry", "kind": "enemy"}]}}
+    assert youtube.our_drop(g) == "Stasis Array"
     assert n == 4 and title.startswith("Scrims ") and "Blakey POV" in title and "Broken Moon, World's Edge" in title, title
     assert "0:00 Game 1 · Broken Moon\n0:20 Game 2 · World's Edge\n0:42 Game 3 · Broken Moon\n1:00 Game 4" in desc, desc
     assert "Marked moments: 0:05, 0:45" in desc
@@ -293,6 +298,30 @@ def test_youtube_blocks():
     youtube.build_video([idx["a"].path], [["game", "mic"]], "mix", out)
     assert json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json",
                                       str(out)], capture_output=True, text=True).stdout)["streams"][1]["codec_type"] == "audio"
+    # EEC link: the upload waits for it (asks once), then the link is in the description
+    s.yt_wait_eec, s.yt_wait_eec_h = True, 12
+    d = folder / "Apex Legends_d.mp4"
+    shutil.copy(idx["a"].path, d)
+    (d.with_suffix(".scan")).mkdir()
+    shutil.copy(Path(idx["a"].path).with_suffix(".scan") / "Apex Legends_a.scan.json", d.with_suffix(".scan") / "Apex Legends_d.scan.json")
+    shutil.copy(Path(idx["a"].path).with_suffix(".events.json"), d.with_suffix(".events.json"))
+    os.utime(d, (time.time() - 3000, time.time() - 3000))
+    idx["d"] = retention.Entry(path=str(d), started=time.time() - 3600, status="scanned")
+    up.tick()
+    assert up.thread is None or not up.thread.is_alive() or up.state.get("d", {}).get("status") != "waiting"
+    asks = [x for x in ui.notes if x[0] == "EEC lobby link for YouTube"]
+    assert len(asks) == 1 and asks[0][3] == "eeclink"
+    up.tick()
+    assert len([x for x in ui.notes if x[0] == "EEC lobby link for YouTube"]) == 1   # asked once
+    try:
+        up.set_links("d", ["not a link"])
+    except Exception:
+        pass
+    assert up.set_links("d", ["https://eternalesports.club/lobbies/7/abc123"]) == ["https://eternalesports.club/lobbies/7/abc123"]
+    up.tick(); up.thread.join(120)
+    assert up.state["d"]["status"] == "done" and up.state["d"]["eec"], up.state["d"]
+    assert "EEC lobby: https://eternalesports.club/lobbies/7/abc123" in sent[-1][0]["snippet"]["description"]
+    assert "EEC" in sent[-1][0]["snippet"]["tags"] and "Blakey" in sent[-1][0]["snippet"]["tags"]
     # by hand: the ranked block can still be uploaded
     assert up.request("c") == ["c"] and up.state["c"]["status"] == "requested"
     up.tick(); up.thread.join(120)

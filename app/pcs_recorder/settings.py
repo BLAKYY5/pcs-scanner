@@ -42,6 +42,9 @@ class Settings:
     yt_scrims_only: bool = True                        # skip blocks without a scrim game (ranked, pubs)
     yt_gap_min: int = 45                               # recordings closer than this belong to the same block
     yt_since: float = 0.0                              # only blocks recorded after upload was turned on
+    yt_team: str = "PCS"                               # team name in titles and descriptions
+    yt_wait_eec: bool = True                           # wait for the EEC lobby link before uploading…
+    yt_wait_eec_h: int = 12                            # …at most this long, then upload without it
     yt_when: str = "after_block"                       # after_block | night (while nobody uses the PC)
     night_from: int = 1                                # night window, hours (may cross midnight)
     night_to: int = 7
@@ -68,6 +71,8 @@ class Settings:
         self.yt_privacy = self.yt_privacy if self.yt_privacy in ("unlisted", "private") else "unlisted"
         self.yt_audio = self.yt_audio if self.yt_audio in ("game", "mix") else "game"
         self.yt_gap_min = max(10, min(240, int(self.yt_gap_min)))
+        self.yt_wait_eec_h = max(1, min(72, int(self.yt_wait_eec_h)))
+        self.yt_team = (self.yt_team or "").strip()[:30]
         self.yt_when = self.yt_when if self.yt_when in ("after_block", "night") else "after_block"
         self.night_from, self.night_to = int(self.night_from) % 24, int(self.night_to) % 24
         if self.night_from == self.night_to:
