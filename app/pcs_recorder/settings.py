@@ -42,6 +42,11 @@ class Settings:
     yt_scrims_only: bool = True                        # skip blocks without a scrim game (ranked, pubs)
     yt_gap_min: int = 45                               # recordings closer than this belong to the same block
     yt_since: float = 0.0                              # only blocks recorded after upload was turned on
+    yt_when: str = "after_block"                       # after_block | night (while nobody uses the PC)
+    night_from: int = 1                                # night window, hours (may cross midnight)
+    night_to: int = 7
+    night_idle_min: int = 20                           # no mouse/keyboard for this long first
+    night_shutdown: bool = False                       # turn the PC off once the night uploads are done
     auto_scan: bool = True                             # scan after Apex closes unless the player clicks Skip
     scan_delay_s: int = 60                             # countdown before the scan starts on its own
     capture: str = "window"                            # window | game | display
@@ -63,6 +68,11 @@ class Settings:
         self.yt_privacy = self.yt_privacy if self.yt_privacy in ("unlisted", "private") else "unlisted"
         self.yt_audio = self.yt_audio if self.yt_audio in ("game", "mix") else "game"
         self.yt_gap_min = max(10, min(240, int(self.yt_gap_min)))
+        self.yt_when = self.yt_when if self.yt_when in ("after_block", "night") else "after_block"
+        self.night_from, self.night_to = int(self.night_from) % 24, int(self.night_to) % 24
+        if self.night_from == self.night_to:
+            self.night_to = (self.night_from + 6) % 24
+        self.night_idle_min = max(5, min(180, int(self.night_idle_min)))
         if self.capture not in ("window", "game", "display"):
             self.capture = "window"
         return self

@@ -45,6 +45,9 @@ and tests your graphics card for a few seconds. From then on:
   mid-block stays one video); chapters for each game, marked moments in the description; unlisted or private;
   game sound only, or game + comms when the team agreed. Uploads only while Apex is closed. Older recordings
   only when you press "YouTube" on them.
+- **Night uploads (optional)**: YouTube uploads wait for the night (default 01:00-07:00) and 20 min without
+  mouse or keyboard. Meanwhile the PC is kept from sleeping, so leave it on after the scrims. Separate switch:
+  **turn the PC off** once everything is sent (Windows warns 1 min before; moving the mouse cancels).
 - **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
   8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 

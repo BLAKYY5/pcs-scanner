@@ -164,6 +164,7 @@ class Uploader:
         self.thread: threading.Thread | None = None
         self.told_signin = False
         self.status = ""
+        self.night = None                          # night.Night: when uploads may run, keeps the PC awake
 
     # blocks still waiting for YouTube: their recordings must not be cleaned up yet
     def protected(self) -> set[str]:
@@ -204,6 +205,8 @@ class Uploader:
     def tick(self) -> None:
         if not self.s.yt_enabled or (self.thread and self.thread.is_alive()) or self.is_apex_running():
             return
+        if self.night and not self.night.upload_allowed():
+            return
         ready = self.ready_blocks()
         if not ready:
             return
@@ -225,6 +228,8 @@ class Uploader:
         st = self.state[bid]
         idx = self.rec.idx
         out = Path(self.s.folder_path) / f"youtube-{bid}.mp4"
+        if self.night:
+            self.night.uploading(True)
         try:
             paths = [idx[k].path for k in keys]
             tracks = [events_of(idx[k]).get("tracks") or ["game"] for k in keys]
@@ -255,6 +260,8 @@ class Uploader:
         finally:
             out.unlink(missing_ok=True)
             self.status = ""
+            if self.night:
+                self.night.uploading(False)
 
     def _send(self, path: Path, title: str, desc: str) -> str:
         from googleapiclient.http import MediaFileUpload

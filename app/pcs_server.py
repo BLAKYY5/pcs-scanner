@@ -29,7 +29,8 @@ VIDEO_EXT = (".mp4", ".mkv", ".mov")
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
-              "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min")
+              "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
+              "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 
 

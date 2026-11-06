@@ -56,6 +56,7 @@ class Recorder:
         self.status = "Waiting for Apex"
         self.lock = threading.RLock()
         self.youtube = None                      # youtube.Uploader, attached by the app
+        self.night = None                        # night.Night (night uploads, turning the PC off)
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
@@ -86,6 +87,11 @@ class Recorder:
                         self.youtube.tick()
                     except Exception:
                         log.exception("youtube tick failed")
+            if self.night:
+                try:
+                    self.night.tick(apex)
+                except Exception:
+                    log.exception("night tick failed")
 
     # ---------------------------------------------------------- recording
     def _start(self) -> None:

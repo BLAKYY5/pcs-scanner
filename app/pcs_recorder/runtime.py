@@ -472,7 +472,10 @@ class AutoRecorder:
         if youtube_service:
             from .youtube import Uploader
             from .core import apex_running
+            from .night import Night
             self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, apex_running)
+            self.rec.night = self.rec.youtube.night = Night(self.s, self.rec, self.ui)
+            self.ui.actions["cancelshutdown"] = ("Cancel", lambda: self.rec.night.cancel("Cancelled: the PC stays on."))
         if yt_signin:
             self.ui.actions["ytsignin"] = ("Sign in to YouTube", yt_signin)
 

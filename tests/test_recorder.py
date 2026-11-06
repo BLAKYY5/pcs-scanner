@@ -299,6 +299,66 @@ def test_youtube_blocks():
     assert up.state["c"]["status"] == "done"
 
 
+def test_night_uploads_and_shutdown():
+    """Night mode: uploads only at night when idle; PC turned off only after a night upload with nothing left."""
+    import datetime as dt
+    from pcs_recorder.night import Night, in_window
+    assert in_window(dt.datetime(2026, 11, 7, 2), 1, 7) and not in_window(dt.datetime(2026, 11, 7, 8), 1, 7)
+    assert in_window(dt.datetime(2026, 11, 6, 23), 23, 7) and in_window(dt.datetime(2026, 11, 7, 3), 23, 7)
+    s = settings.Settings(yt_enabled=True, yt_when="night", night_from=1, night_to=7, night_idle_min=20).clamp()
+
+    class Rec:
+        current, scan_proc, queue, idx, youtube = None, None, [], {}, None
+    rec, ui = Rec(), FakeUI()
+    clock = {"t": dt.datetime(2026, 11, 6, 23, 30).timestamp()}
+    idle = {"s": 3600.0}
+    cmds, awake = [], []
+    n = Night(s, rec, ui, idle=lambda: idle["s"], clock=lambda: clock["t"], runner=cmds.append, awake=awake.append)
+    assert not n.upload_allowed()                     # 23:30: not night yet
+    clock["t"] = dt.datetime(2026, 11, 7, 2, 0).timestamp()
+    idle["s"] = 5 * 60
+    assert not n.upload_allowed()                     # someone used the PC 5 min ago
+    idle["s"] = 30 * 60
+    assert n.upload_allowed()
+    s.night_shutdown = True
+    n.tick(apex=False)
+    assert cmds == []                                 # nothing uploaded tonight: the PC isn't turned off
+    n.next_check = 1e12                               # (the once-a-minute check is tested below)
+    n.uploading(True); assert awake == [True]         # kept awake during the upload
+    rec.scan_proc = object()
+    n.uploading(False); n.tick(apex=False)
+    assert awake == [True, False] and cmds == []      # a scan still runs
+    rec.scan_proc = None
+    n.tick(apex=True)
+    assert cmds == []                                 # Apex open
+    n.tick(apex=False)
+    assert cmds and cmds[0][:2] == ["shutdown", "/s"] and ui.notes[-1][3] == "cancelshutdown"
+    idle["s"] = 2                                     # the player moves the mouse
+    n.tick(apex=False)
+    assert cmds[-1] == ["shutdown", "/a"] and n.shutdown_at is None
+    idle["s"] = 3600
+    n.tick(apex=False)
+    assert len(cmds) == 2                             # not again that night
+    s.yt_when = "after_block"
+    assert n.upload_allowed()
+    # a block waiting for the night keeps the PC awake in the evening, and lets it sleep once sent
+
+    class YT:
+        blocks = [["a"]]
+        thread = None
+
+        def ready_blocks(self):
+            return self.blocks
+    rec.youtube = YT()
+    s.yt_when, s.night_shutdown = "night", False
+    awake.clear(); n.awake_on = False; n.next_check = 0
+    n.tick(apex=False)
+    assert awake == [True]
+    rec.youtube.blocks = []
+    n.next_check = 0; n.tick(apex=False)
+    assert awake == [True, False]
+
+
 def test_skip_and_offline_hub():
     r, apex, hub, ui = run_session(scan_answer=False)
     assert r.scan_proc is None and list(r.idx.values())[0].status == "skipped"

@@ -547,7 +547,17 @@ function renderSettings() {
           <small>${s.comms_consent ? 'Comms on YouTube means your team\'s voices are on the channel too.' : 'Comms need the team agreement above.'}</small></label>
         <label class="field"><span>Same block if less than (minutes) apart</span><input id="f-yt_gap_min" type="number" min="10" max="240" value="${s.yt_gap_min}"><small>Restarting Apex mid-block stays one video.</small></label>
         <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks with only ranked or pubs')}</div>
-      </div></section>` : ''}
+      </div>
+      <h3>Night uploads</h3>
+      <div class="form">
+        <label class="field"><span>When to upload</span><select id="f-yt_when">${[['after_block', 'Right after the block'], ['night', 'At night, when nobody uses the PC']].map(([v, l]) => `<option value="${v}" ${v === s.yt_when ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <small>At night your connection is free and the PC is kept awake until it's done.</small></label>
+        <label class="field"><span>Night from / to (hour)</span><span class="row" style="flex-wrap:nowrap"><input id="f-night_from" type="number" min="0" max="23" value="${s.night_from}"><span class="muted">→</span><input id="f-night_to" type="number" min="0" max="23" value="${s.night_to}"></span></label>
+        <label class="field"><span>Start after no mouse/keyboard for (min)</span><input id="f-night_idle_min" type="number" min="5" max="180" value="${s.night_idle_min}"></label>
+      </div>
+      <div class="notice info">${switchHTML('f-night_shutdown', s.night_shutdown, 'Turn the PC off when the night uploads are done',
+        'Only after a night upload, once nothing is left to send and the PC is still unused. Windows warns 1 minute before; moving the mouse cancels it.')}</div>
+      </section>` : ''}
     <section class="card section"><h2>After a session</h2>
       <div class="form">
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, 'Scan automatically', 'Starts after a countdown unless you press Skip')}</div>
@@ -577,9 +587,9 @@ function renderSettings() {
 async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
-    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }
   try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }
