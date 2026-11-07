@@ -153,7 +153,8 @@ class Backend:
         why = self.update_blocked()
         if why:
             return why
-        if self.update and self.update[1] and core.install_update(self.update[1], self.say):
+        if self.update and self.update[1] and core.install_update(
+                self.update[1], self.say, self.update[3] if len(self.update) > 3 else None):
             threading.Timer(1.0, self.quit).start()
         return None
 

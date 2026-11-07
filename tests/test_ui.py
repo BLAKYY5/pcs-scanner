@@ -302,13 +302,42 @@ def test_delete_and_sound_levels():
     assert str(mine) not in core.SETTINGS.get("library", [])
 
 
+def test_update_finisher():
+    """The new exe waits for the old app to close, copies itself over it and starts it; if the copy keeps
+    failing, the old version is started again (the player is never left without an app)."""
+    new, cur = TMP / "PCS-Scanner.update.exe", TMP / "PCS-Scanner.exe"
+    new.write_bytes(b"MZ new version")
+    cur.write_bytes(b"MZ old version")
+    started = []
+    real_exe, real_spawn = sys.executable, core.spawn_detached
+    sys.executable, core.spawn_detached = str(new), started.append
+    try:
+        core.finish_update(str(cur), "999999")             # that process doesn't exist: no waiting
+    finally:
+        sys.executable, core.spawn_detached = real_exe, real_spawn
+    assert cur.read_bytes() == b"MZ new version" and started == [[str(cur)]]
+    assert "copied, starting the new version" in Path(core.UPDATE_LOG).read_text()
+
+
+def test_single_instance():
+    """Only one PCS Scanner per Windows session (a second start just shows the first one's window)."""
+    import pcs_app
+    if os.name != "nt":
+        print("  (not Windows: single-instance test skipped)")
+        return
+    assert pcs_app.first_instance() is True
+    first = pcs_app._MUTEX
+    assert pcs_app.first_instance() is False             # a second app in the same session is refused
+    pcs_app._MUTEX = first
+
+
 def test_update_button_and_checks():
     """The Update button appears once a newer release is found; installing waits while Apex/recording/scan runs."""
     from pcs_recorder import core as rcore
     b = pcs_server.Backend(_Auto(str(TMP / "recs-upd")))
     calls = []
     real_check, real_running = core.check_update, rcore.apex_running
-    core.check_update = lambda: (calls.append(1), ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x"))[1]
+    core.check_update = lambda: (calls.append(1), ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123))[1]
     rcore.apex_running = lambda: False
     srv = pcs_server.Server(b)
     srv.start()
