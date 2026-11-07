@@ -467,6 +467,9 @@ def test_encoder_candidates_skip_av1_on_older_cards():
     c = encoder_candidates("nvidia", "nvidia geforce rtx 3060")
     assert c[0] == "obs_nvenc_hevc_tex" and not any("av1" in e for e in c)
     assert encoder_candidates("amd", "amd radeon rx 7800 xt")[0] == "av1_texture_amf"
+    assert not any("qsv" in e or "amf" in e for e in c)                  # no other vendor's encoder: OBS would complain
+    both = encoder_candidates("nvidia", "intel(r) uhd graphics 770\nnvidia geforce rtx 4060")
+    assert both[0] == "obs_nvenc_av1_tex" and "obs_qsv11_v2" in both and not any("amf" in e for e in both)
 
 
 def test_no_game_recordings():

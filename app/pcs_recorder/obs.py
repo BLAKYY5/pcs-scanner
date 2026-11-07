@@ -95,8 +95,21 @@ def has_av1_encoder(names: str) -> bool:
                 re.search(r"rx\s*[79]\d{3}", n) or "arc" in n)
 
 
+def vendors_present(names: str) -> list[str]:
+    n = names.lower()
+    return [v for v in ("nvidia", "amd", "intel") if v in n or (v == "amd" and "radeon" in n)]
+
+
 def encoder_candidates(vendor: str, names: str = "") -> list[str]:
-    order = ENCODERS.get(vendor, []) + [e for v, l in ENCODERS.items() if v != vendor for e in l]
+    """Only the encoders of graphics chips this PC has: OBS shows a "missing encoder" box for any other one.
+    (A PC with two, e.g. Intel + NVIDIA, gets both, the main card's first.)"""
+    present = vendors_present(names) if names else []
+    if vendor in ENCODERS and vendor not in present:
+        present.insert(0, vendor)
+    if not present:
+        present = list(ENCODERS)                       # unknown card: try everything
+    present.sort(key=lambda v: v != vendor)
+    order = [e for v in present for e in ENCODERS[v]]
     if not has_av1_encoder(names):
         order = [e for e in order if "av1" not in e]
     return order
