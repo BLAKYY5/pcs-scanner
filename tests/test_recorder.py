@@ -486,7 +486,7 @@ def test_no_game_recordings():
         v.write_bytes(b"\0" * size)
         os.utime(v, (now - age_h * 3600, now - age_h * 3600))
         (v.with_suffix(".scan")).mkdir()
-        (v.with_suffix(".scan") / f"{name}.scan.json").write_text(json.dumps({"games": games, "perf": {"feedLines": feed}}))
+        (v.with_suffix(".scan") / f"{name}.scan.json").write_text(json.dumps({"games": games, "perf": {"feedLines": feed, "layoutVotes": {"16:9": 500}}}))
         e = retention.Entry(path=str(v), started=now - age_h * 3600 - 60, status="uploaded")
         e.nogame = no_game(e)
         return e
@@ -503,6 +503,37 @@ def test_no_game_recordings():
     assert [r[0] for r in retention.enforce(idx, 7, 100, nogame_keep_h=0, now=now + 1)] == ["x.mp4"]
     # a scan that can't be read is never treated as "no game"
     assert no_game(retention.Entry(path=str(folder / "missing.mp4"), started=now)) is False
+
+
+def test_half_written_mp4_is_never_scanned():
+    """OBS copies the .mkv into an .mp4 after the session; a half-written .mp4 that stops growing for a moment
+    must not be taken (a 2-hour session was once scanned as 'no game' that way). The .mkv is used instead."""
+    import json
+    folder = TMP / f"final-{time.time_ns()}"
+    folder.mkdir()
+    mkv, mp4 = folder / "Apex Legends_x.mkv", folder / "Apex Legends_x.mp4"
+    mkv.write_bytes(b"\0" * 10 * UNIT)
+    mp4.write_bytes(b"\0" * 4 * UNIT)                      # stuck at 40 %
+    s = settings.load()
+    r = Recorder(s, FakeOBS(folder), FakeHub(), FakeUI(), fake_scan, is_apex_running=lambda: False)
+    assert r._final_file(str(mkv), wait_s=0.5, poll=0.1) == str(mkv) and mkv.exists()
+    mp4.write_bytes(b"\0" * 10 * UNIT)                     # complete now
+    assert r._final_file(str(mkv), wait_s=2, poll=0.1) == str(mp4) and not mkv.exists()
+    # a scan that never looked at a frame is a failed scan, not "no game"
+    from pcs_recorder.core import no_game, read_nothing
+    e = retention.Entry(path=str(mp4), started=time.time(), status="scanned")
+    sc = mp4.with_suffix(".scan")
+    sc.mkdir()
+    (sc / "Apex Legends_x.scan.json").write_text(json.dumps({"games": [], "perf": {"feedLines": 0, "layoutVotes": {"4:3": 0, "16:9": 0}}}))
+    assert read_nothing(e) and not no_game(e)
+    (sc / "Apex Legends_x.scan.json").write_text(json.dumps({"games": [], "perf": {"feedLines": 0, "layoutVotes": {"16:9": 900}}}))
+    assert not read_nothing(e) and no_game(e)
+    # scan again: queued, flags cleared
+    key = "rec-x"
+    r.idx[key] = e
+    e.nogame = True
+    assert r.rescan(key) and e.status == "waiting" and not e.nogame and r.queue[-1] == key
+    assert not r.rescan(key)                               # already queued
 
 
 def test_encoder_test_restarts_obs_per_candidate():
