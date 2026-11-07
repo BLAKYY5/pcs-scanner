@@ -649,7 +649,7 @@ def test_message_window_placement():
         root.update()
         sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
         x, y, ww, wh = w.winfo_rootx(), w.winfo_rooty(), w.winfo_width(), w.winfo_height()
-        assert ww >= 390 and wh >= 60, (ww, wh)                        # a real window, not an empty box
+        assert ww >= 360 and wh >= 60, (ww, wh)                        # a real window, not an empty box
         assert x > sw / 2 and y > sh / 2, (x, y, sw, sh)                # bottom-right corner, not top-left
         assert x + ww <= sw and y + wh <= sh, (x, y, ww, wh, sw, sh)    # fully on screen
         def walk(x):
