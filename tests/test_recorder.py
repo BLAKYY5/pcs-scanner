@@ -652,9 +652,28 @@ def test_message_window_placement():
         assert ww >= 390 and wh >= 60, (ww, wh)                        # a real window, not an empty box
         assert x > sw / 2 and y > sh / 2, (x, y, sw, sh)                # bottom-right corner, not top-left
         assert x + ww <= sw and y + wh <= sh, (x, y, ww, wh, sw, sh)    # fully on screen
-        texts = [c.cget("text") for c in w.winfo_children() if isinstance(c, (tk.Label, tk.Button))]
+        def walk(x):
+            for c in x.winfo_children():
+                yield c
+                yield from walk(c)
+        texts = [c.cget("text") for c in walk(w) if isinstance(c, (tk.Label, tk.Button))]
         assert any("expired" in t for t in texts), texts
-        assert (action is None) or any(t == "Sign in with Google" for t in texts), texts
+        assert (action is None) or any(t == "SIGN IN WITH GOOGLE" for t in texts), texts
+    assert len([t for t in ui.toasts if t.winfo_exists()]) == 2          # stacked, not replaced
+    a, b = [t for t in ui.toasts if t.winfo_exists()]
+    root.update()
+    assert a.winfo_rooty() + a.winfo_height() <= b.winfo_rooty(), "messages overlap"
+    for i in range(4):
+        ui._toast(f"Message {i}", "x", False)
+    assert len([t for t in ui.toasts if t.winfo_exists()]) <= 3
+    ui.TOAST_S = 0.3                                                   # disappears on its own
+    ui._toast("Short", "bye", False)
+    short = ui.toasts[-1]
+    end = time.time() + 5
+    while short.winfo_exists() and time.time() < end:
+        root.update()
+        time.sleep(0.02)
+    assert not short.winfo_exists()
     root.destroy()
 
 

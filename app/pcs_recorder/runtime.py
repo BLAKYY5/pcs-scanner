@@ -252,6 +252,19 @@ def scan_process(video: str, out: str) -> subprocess.Popen:
 
 # ------------------------------------------------------------------ UI bits
 
+def work_area(root) -> tuple[int, int, int, int]:
+    """The screen minus the taskbar (Windows), or the whole screen."""
+    if os.name == "nt":
+        try:
+            from ctypes import wintypes
+            r = wintypes.RECT()
+            if ctypes.windll.user32.SystemParametersInfoW(0x30, 0, ctypes.byref(r), 0):      # SPI_GETWORKAREA
+                return r.left, r.top, r.right, r.bottom
+        except Exception:
+            pass
+    return 0, 0, root.winfo_screenwidth(), root.winfo_screenheight() - 60
+
+
 class UI:
     """Tray icon + small dialogs. Tk calls are passed to the main thread through a queue."""
 
@@ -287,58 +300,205 @@ class UI:
 
     actions: dict = {}          # name -> (button label, callback), e.g. "signin" -> ("Sign in with Google", fn)
 
+    # ------------------------------------------------------------------ corner messages
+    TOAST_W = 380
+    TOAST_S = 7            # seconds a message stays (10 with a button); hovering it pauses the countdown
+    TOAST_ACTION_S = 10
+    MAX_TOASTS = 3
+
+    @staticmethod
+    def _kind(title: str, sticky: bool) -> str:
+        t = title.lower()
+        if any(w in t for w in ("failed", "not sent", "didn't", "error", "no hardware")):
+            return "error"
+        if sticky or any(w in t for w in ("waiting", "turning off", "update available", "eec")):
+            return "attention"
+        if any(w in t for w in ("sent", "finished", "on youtube", "is on", "stays on")):
+            return "done"
+        return "info"
+
     def _toast(self, title: str, text: str, sticky: bool, action: str | None = None) -> None:
-        if self.toast_win is not None:
-            try:
-                self.toast_win.destroy()
-            except tk.TclError:
-                pass
+        """A card in the app's style, bottom right: accent bar by kind, title, text, optional button, a thin
+        bar that runs out, then it fades away. Several messages stack (newest at the bottom, max 3)."""
+        accent = {"error": "#e5392d", "attention": "#e6ad45", "done": "#5fd08f", "info": "#6aa0ff"}[self._kind(title, sticky)]
+        border, panel, panel2 = "#3a3833", PANEL, "#23221f"
+        title_font = ("Bahnschrift SemiCondensed", 12, "bold")
+        body_font = ("Segoe UI", 10)
+
+        self.toasts = [t for t in getattr(self, "toasts", []) if t.winfo_exists()]
+        while len([t for t in self.toasts if not getattr(t, "_prompt", False)]) >= self.MAX_TOASTS:
+            oldest = next(t for t in self.toasts if not getattr(t, "_prompt", False))
+            self.toasts.remove(oldest)
+            self._close_toast(oldest, fade=False)
+
         w = tk.Toplevel(self.root)
         self.toast_win = w
         w.overrideredirect(True)
-        w.configure(bg=PANEL, highlightthickness=1, highlightbackground=RED if sticky else "#302e2a")
+        w.configure(bg=border)
         w.attributes("-topmost", True)
-        w.withdraw()                                  # build it first, place it once its size is known
-        head = tk.Frame(w, bg=PANEL)
-        head.pack(fill="x", padx=14, pady=(10, 0))
-        tk.Label(head, text=title.upper(), bg=PANEL, fg=RED, font=("Segoe UI", 10, "bold")).pack(side="left")
-        tk.Button(head, text="✕", command=w.destroy, bg=PANEL, fg=MUTED, relief="flat", bd=0,
-                  activebackground=PANEL).pack(side="right")
-        body = tk.Label(w, text=text, bg=PANEL, fg=INK, font=("Segoe UI", 10), wraplength=360, justify="left")
-        body.pack(anchor="w", padx=14, pady=(2, 12))
+        try:
+            w.attributes("-alpha", 0.0)
+        except tk.TclError:
+            pass
+        w.withdraw()
+        card = tk.Frame(w, bg=panel)
+        card.pack(fill="both", expand=True, padx=1, pady=1)
+        tk.Frame(card, bg=accent, width=3).pack(side="left", fill="y")
+        main = tk.Frame(card, bg=panel)
+        main.pack(side="left", fill="both", expand=True)
+
+        head = tk.Frame(main, bg=panel)
+        head.pack(fill="x", padx=(12, 8), pady=(10, 0))
+        mark = tk.Canvas(head, width=16, height=16, bg=panel, highlightthickness=0)
+        mark.create_rectangle(1, 1, 15, 15, fill=RED, outline=RED)
+        mark.create_oval(4, 4, 12, 12, outline="white", width=1.6)
+        mark.create_oval(7, 7, 9, 9, fill="white", outline="white")
+        mark.pack(side="left", padx=(0, 7))
+        tk.Label(head, text=title.upper(), bg=panel, fg=INK, font=title_font, anchor="w").pack(side="left")
+        close = tk.Label(head, text="✕", bg=panel, fg=MUTED, font=("Segoe UI", 10), cursor="hand2", padx=4)
+        close.pack(side="right")
+        close.bind("<Button-1>", lambda _e: self._close_toast(w))
+        close.bind("<Enter>", lambda _e: close.config(fg=INK))
+        close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
+
+        body = tk.Label(main, text=text, bg=panel, fg="#d9d6cf", font=body_font, wraplength=self.TOAST_W - 50,
+                        justify="left", anchor="w")
+        body.pack(fill="x", padx=(12, 12), pady=(4, 10))
         if action in self.actions:
             label, fn = self.actions[action]
-            tk.Button(w, text=label, command=lambda: (w.destroy(), fn()), bg=RED, fg="white", relief="flat",
-                      padx=12).pack(anchor="e", padx=14, pady=(0, 12))
+            row = tk.Frame(main, bg=panel)
+            row.pack(fill="x", padx=12, pady=(0, 10))
+            btn = tk.Label(row, text=label.upper(), bg=RED, fg="white", font=("Bahnschrift SemiCondensed", 10, "bold"),
+                           padx=12, pady=4, cursor="hand2")
+            btn.pack(side="right")
+            btn.bind("<Button-1>", lambda _e: (self._close_toast(w, fade=False), fn()))
+            btn.bind("<Enter>", lambda _e: btn.config(bg="#e5392d"))
+            btn.bind("<Leave>", lambda _e: btn.config(bg=RED))
         else:
-            body.bind("<Button-1>", lambda _e: w.destroy())      # click the message to close it
+            for wid in (body, main, head):
+                wid.bind("<Button-1>", lambda _e: self._close_toast(w))      # click the message to close it
+        bar = tk.Canvas(main, height=2, bg=panel2, highlightthickness=0)
+        bar.pack(fill="x", side="bottom")
+        line = bar.create_rectangle(0, 0, self.TOAST_W, 2, fill=accent, outline=accent)
+
         w.update_idletasks()
-        sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
-        ww, wh = max(390, w.winfo_reqwidth()), w.winfo_reqheight()
-        w.geometry(f"{ww}x{wh}+{sw - ww - 20}+{sh - wh - 80}")
+        w.geometry(f"{self.TOAST_W}x{w.winfo_reqheight()}+0+0")
+        self.toasts.append(w)
+        self._layout_toasts()
         w.deiconify()
-        if not sticky:
-            w.after(12000, lambda: w.winfo_exists() and w.destroy())
+        self._round_corners(w)
+        self._fade(w, 0.0, 0.97)
+
+        total = (self.TOAST_ACTION_S if action in self.actions else self.TOAST_S) * 1000
+        state = {"left": total, "hover": False}
+
+        def enter(_e):
+            state["hover"] = True
+
+        def leave(_e):
+            # only when the pointer really left the card (not just moved onto a child widget)
+            x, y = w.winfo_pointerx() - w.winfo_rootx(), w.winfo_pointery() - w.winfo_rooty()
+            if not (0 <= x < w.winfo_width() and 0 <= y < w.winfo_height()):
+                state["hover"] = False
+        w.bind("<Enter>", enter)
+        w.bind("<Leave>", leave)
+
+        def tick():
+            if not w.winfo_exists():
+                return
+            if not state["hover"]:
+                state["left"] -= 50
+            frac = max(0.0, state["left"] / total)
+            bar.coords(line, 0, 0, bar.winfo_width() * frac, 2)
+            if state["left"] <= 0:
+                return self._close_toast(w)
+            w.after(50, tick)
+        w.after(50, tick)
+
+    def _close_toast(self, w, fade: bool = True) -> None:
+        if not w.winfo_exists() or getattr(w, "_closing", False):
+            return
+        w._closing = True
+
+        def gone():
+            try:
+                w.destroy()
+            except tk.TclError:
+                pass
+            self.toasts = [t for t in getattr(self, "toasts", []) if t is not w and t.winfo_exists()]
+            self._layout_toasts()
+        if fade:
+            self._fade(w, 0.97, 0.0, done=gone)
+        else:
+            gone()
+
+    def _fade(self, w, a: float, b: float, done=None, steps: int = 8) -> None:
+        def step(i):
+            if not w.winfo_exists():
+                return
+            try:
+                w.attributes("-alpha", a + (b - a) * i / steps)
+            except tk.TclError:
+                pass
+            if i < steps:
+                w.after(18, step, i + 1)
+            elif done:
+                done()
+        step(1)
+
+    def _layout_toasts(self) -> None:
+        """Bottom right of the work area (above the taskbar), newest at the bottom."""
+        left, top, right, bottom = work_area(self.root)
+        y = bottom - 16
+        for t in reversed([t for t in getattr(self, "toasts", []) if t.winfo_exists()]):
+            h = t.winfo_reqheight()
+            y -= h
+            t.geometry(f"{self.TOAST_W}x{h}+{right - self.TOAST_W - 16}+{y}")
+            y -= 10
+
+    @staticmethod
+    def _round_corners(w) -> None:
+        """Windows 11 rounds the corners like its own pop-ups (no effect elsewhere)."""
+        if os.name != "nt":
+            return
+        try:
+            hwnd = ctypes.windll.user32.GetParent(w.winfo_id()) or w.winfo_id()
+            pref = ctypes.c_int(2)                              # DWMWCP_ROUND
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 33, ctypes.byref(pref), ctypes.sizeof(pref))
+        except Exception:
+            pass
 
     def ask_scan(self, minutes: float, gb: float, auto: bool, delay: int) -> bool:
         done = threading.Event()
         answer = {"scan": auto}
 
         def build():
+            panel = PANEL
             w = tk.Toplevel(self.root)
             w.title("PCS Scanner")
-            w.configure(bg=PANEL)
+            w.overrideredirect(True)
+            w.configure(bg="#3a3833")
             w.attributes("-topmost", True)
-            w.resizable(False, False)
-            sw, sh = w.winfo_screenwidth(), w.winfo_screenheight()
-            w.geometry(f"390x150+{sw - 410}+{sh - 220}")
-            tk.Label(w, text="SESSION RECORDED", bg=PANEL, fg=RED, font=("Segoe UI", 10, "bold")).pack(anchor="w", padx=16, pady=(14, 0))
-            tk.Label(w, text=f"{int(minutes // 60)} h {int(minutes % 60):02d} min · {gb:.1f} GB", bg=PANEL, fg=INK,
-                     font=("Segoe UI", 13, "bold")).pack(anchor="w", padx=16)
-            msg = tk.Label(w, bg=PANEL, fg=MUTED, font=("Segoe UI", 9))
-            msg.pack(anchor="w", padx=16, pady=(2, 8))
-            row = tk.Frame(w, bg=PANEL)
-            row.pack(anchor="e", padx=16)
+            card = tk.Frame(w, bg=panel)
+            card.pack(fill="both", expand=True, padx=1, pady=1)
+            tk.Frame(card, bg=RED, width=3).pack(side="left", fill="y")
+            main = tk.Frame(card, bg=panel)
+            main.pack(side="left", fill="both", expand=True)
+            head = tk.Frame(main, bg=panel)
+            head.pack(fill="x", padx=12, pady=(10, 0))
+            mark = tk.Canvas(head, width=16, height=16, bg=panel, highlightthickness=0)
+            mark.create_rectangle(1, 1, 15, 15, fill=RED, outline=RED)
+            mark.create_oval(4, 4, 12, 12, outline="white", width=1.6)
+            mark.create_oval(7, 7, 9, 9, fill="white", outline="white")
+            mark.pack(side="left", padx=(0, 7))
+            tk.Label(head, text="SESSION RECORDED", bg=panel, fg=INK,
+                     font=("Bahnschrift SemiCondensed", 12, "bold")).pack(side="left")
+            tk.Label(main, text=f"{int(minutes // 60)} h {int(minutes % 60):02d} min  ·  {gb:.1f} GB", bg=panel, fg=INK,
+                     font=("Bahnschrift SemiCondensed", 18, "bold")).pack(anchor="w", padx=12, pady=(2, 0))
+            msg = tk.Label(main, bg=panel, fg="#d9d6cf", font=("Segoe UI", 10), anchor="w", justify="left")
+            msg.pack(fill="x", padx=12, pady=(0, 10))
+            row = tk.Frame(main, bg=panel)
+            row.pack(fill="x", padx=12, pady=(0, 12))
             left = [delay]
 
             def finish(v):
@@ -346,18 +506,35 @@ class UI:
                     return
                 answer["scan"] = v
                 w.destroy()
+                self.toasts = [t for t in getattr(self, "toasts", []) if t is not w and t.winfo_exists()]
+                self._layout_toasts()
                 done.set()
-            tk.Button(row, text="Skip" if auto else "Not now", command=lambda: finish(False), bg=PANEL, fg=INK,
-                      relief="flat", padx=12).pack(side="left", padx=6)
-            tk.Button(row, text="Scan now" if auto else "Scan", command=lambda: finish(True), bg=RED, fg="white",
-                      relief="flat", padx=12).pack(side="left")
-            w.protocol("WM_DELETE_WINDOW", lambda: finish(False))
+
+            def button(text, cmd, primary):
+                bg = RED if primary else "#2b2a26"
+                b = tk.Label(row, text=text.upper(), bg=bg, fg="white" if primary else INK, padx=14, pady=5,
+                             font=("Bahnschrift SemiCondensed", 10, "bold"), cursor="hand2")
+                b.bind("<Button-1>", lambda _e: cmd())
+                b.bind("<Enter>", lambda _e: b.config(bg="#e5392d" if primary else "#3a3833"))
+                b.bind("<Leave>", lambda _e: b.config(bg=bg))
+                return b
+            button("Scan now" if auto else "Scan", lambda: finish(True), True).pack(side="right")
+            button("Skip" if auto else "Not now", lambda: finish(False), False).pack(side="right", padx=(0, 8))
+            bar = tk.Canvas(main, height=2, bg="#23221f", highlightthickness=0)
+            bar.pack(fill="x", side="bottom")
+            line = bar.create_rectangle(0, 0, 400, 2, fill=RED, outline=RED)
+            w.update_idletasks()
+            w._prompt = True                                  # stacks with the messages, never trimmed
+            self.toasts = [t for t in getattr(self, "toasts", []) if t.winfo_exists()] + [w]
+            self._layout_toasts()
+            self._round_corners(w)
 
             def count():
                 if done.is_set():
                     return
                 if auto:
-                    msg.config(text=f"Scanning starts in {left[0]} s, then the results are sent.")
+                    msg.config(text=f"The scan starts in {left[0]} s, then the results are sent.")
+                    bar.coords(line, 0, 0, bar.winfo_width() * max(0, left[0]) / max(1, delay), 2)
                     if left[0] <= 0:
                         return finish(True)
                     left[0] -= 1
