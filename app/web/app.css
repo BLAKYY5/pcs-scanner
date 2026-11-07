@@ -189,6 +189,8 @@ kbd{font:11px var(--mono);background:#26251f;border:1px solid #3a3833;border-bot
 .pois div{display:flex;justify-content:space-between;gap:8px;padding:3px 4px;border-bottom:1px solid #22211e}
 .pois .ours{color:var(--accent);font-weight:600}
 
+#updateBtn{animation:glow 2s ease-in-out infinite}
+@keyframes glow{50%{box-shadow:0 0 0 4px rgba(229,57,45,.25)}}
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#000;border:1px solid var(--line);border-left:3px solid var(--good);padding:10px 16px;border-radius:6px;z-index:50;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .toast.bad{border-left-color:var(--accent)}
 

@@ -14,7 +14,7 @@ Results (.scan.json + .feed.json) go to the team hub and/or a "PCS Scans" folder
 with the coach. The app only asks for Google's drive.file permission: it can see and change only the files it
 created itself.
 """
-import os, sys, threading, traceback, logging, multiprocessing, subprocess, webbrowser
+import os, sys, time, threading, traceback, logging, multiprocessing, subprocess, webbrowser
 
 import pcs_core as core
 from pcs_core import APP, OUT, BUILD, SETTINGS
@@ -169,6 +169,10 @@ class TkThread:
             import tkinter as tk
             self.root = tk.Tk()
             self.root.withdraw()
+            try:                                           # the app's icon on its small windows too
+                self.root.iconbitmap(default=os.path.join(core.HERE, 'assets', 'pcs.ico'))
+            except Exception:
+                pass
             try:
                 setup(self.root)
             except Exception:
@@ -275,10 +279,9 @@ def main():
     def background_checks():
         b.check_google()
         b.check_youtube()
-        u = core.check_update()
-        if u:
-            b.update = u
-            b.say(f'Version {u[0]} is available: press "Update" at the top of the window.')
+        while True:                                        # at start, then every 6 hours (the app lives in the tray)
+            b.check_update()
+            time.sleep(pcs_server.UPDATE_EVERY_S)
     threading.Thread(target=background_checks, daemon=True).start()
 
     if background and not (b.auto and (b.auto.s.enabled or b.auto.s.start_with_windows)):
