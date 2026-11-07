@@ -118,12 +118,20 @@ def vtuple(v):
 def check_update():
     """Latest GitHub release of the app repo; returns (version, exe_url, page) or None."""
     repo = BUILD.get('repo')
-    if not repo or str(BUILD.get('version', 'dev')).startswith('dev'): return None   # test builds: never "update" back
+    current = str(BUILD.get('version', 'dev'))
+    if current.startswith('dev'):
+        # a test build is offered a real release made from the same code or newer (never an older one)
+        current = BUILD.get('base')
+        if not repo or not current: return None
+        older_or_same = lambda tag: vtuple(tag) < vtuple(current)
+    else:
+        older_or_same = lambda tag: vtuple(tag) <= vtuple(current)
+    if not repo: return None
     try:
         req = urllib.request.Request(f'https://api.github.com/repos/{repo}/releases/latest', headers={'Accept': 'application/vnd.github+json', 'User-Agent': APP})
         rel = json.load(urllib.request.urlopen(req, timeout=8))
         tag = rel.get('tag_name', '')
-        if vtuple(tag) <= vtuple(BUILD['version']): return None
+        if older_or_same(tag): return None
         exe = next((a['browser_download_url'] for a in rel.get('assets', []) if a['name'].lower().endswith('.exe')), None)
         return tag, exe, rel.get('html_url')
     except Exception:

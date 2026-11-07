@@ -57,7 +57,7 @@ jobs:
           $release = ((-not $exists) -and ("${{ github.ref_name }}" -eq "main")) -or ("${{ github.ref_type }}" -eq "tag")
           $ver = if ($release) { $code } else { "dev-${{ github.run_number }}" }
           "RELEASE=$release" | Out-File -FilePath $env:GITHUB_ENV -Append
-          @{ version = $ver; repo = "${{ github.repository }}"; coach = $env:COACH_EMAIL } | ConvertTo-Json | Set-Content -Encoding utf8 build.json
+          @{ version = $ver; base = $code; repo = "${{ github.repository }}"; coach = $env:COACH_EMAIL } | ConvertTo-Json | Set-Content -Encoding utf8 build.json
           if ($env:GOOGLE_OAUTH_CLIENT) { $env:GOOGLE_OAUTH_CLIENT | Set-Content -Encoding utf8 client.json } else { Write-Warning "No GOOGLE_OAUTH_CLIENT secret: the app will scan but cannot upload." }
           "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
 

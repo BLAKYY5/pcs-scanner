@@ -291,7 +291,7 @@ class Backend:
             status = "scanned" if scan else "not scanned"
             if norm in rec_index:                          # recorder's own: recording, recorded, uploaded, skipped…
                 status = rec_index[norm][1].status
-                if status in ("recorded", "skipped", "failed") and scan:
+                if status in ("recorded", "skipped") and scan:
                     status = "scanned"
             if self.scan_now == p:
                 status = "scanning"
@@ -432,6 +432,31 @@ class Backend:
         if added:
             threading.Thread(target=self._scan_worker, daemon=True).start()
         return added
+
+    def rescan(self, ids: list[str]) -> int:
+        """Scan again: the app's recordings through the recorder (results next to the recording), others here."""
+        n, manual = 0, []
+        for item_id in ids:
+            it = self.find(item_id)
+            if not it:
+                continue
+            key = None
+            if self.auto:
+                p = os.path.normcase(os.path.abspath(it["path"]))
+                key = next((k for k, e in self.auto.rec.idx.items()
+                            if e.path and os.path.normcase(os.path.abspath(e.path)) == p), None)
+            if key:
+                n += bool(self.auto.rec.rescan(key))
+            else:
+                for f in (Path(core.OUT) / (Path(it["path"]).stem + ".scan.json"),
+                          Path(core.OUT) / (Path(it["path"]).stem + ".feed.json")):
+                    f.unlink(missing_ok=True)
+                manual.append(item_id)
+        if manual:
+            n += self.queue_scans(manual)
+        if n:
+            self.say(f"{n} recording(s) will be scanned again.")
+        return n
 
     def _busy_reason(self) -> str | None:
         """Manual scans wait while Apex runs or the recorder is busy, so a game never shares the PC with a scan."""
@@ -763,6 +788,8 @@ class Server:
                             lib.remove(it["path"])
                             core.save_settings()
                         return self._json({"ok": True})
+                    if path == "/api/rescan":
+                        return self._json({"queued": b.rescan(body.get("ids", []))})
                     if path == "/api/scan":
                         return self._json({"queued": b.queue_scans(body.get("ids", []))})
                     if path == "/api/open":

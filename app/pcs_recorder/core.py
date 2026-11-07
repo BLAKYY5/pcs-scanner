@@ -67,6 +67,8 @@ class Recorder:
             elif e.status in ("scanning", "waiting"):
                 e.status = "waiting"
                 self.queue.append(k)
+            if e.nogame and not no_game(e):          # flagged by an older, less careful version: keep it
+                e.nogame = False
         retention.save_index(self.idx)
 
     # ---------------------------------------------------------- main loop step
@@ -143,21 +145,31 @@ class Recorder:
                 self.hub.report(self._report(key))
         self.cleanup()
 
-    def _final_file(self, path: str, wait_s: float = 90) -> str:
-        """OBS records to .mkv and remuxes to .mp4 afterwards; use the .mp4 once it's complete."""
+    def _final_file(self, path: str, wait_s: float | None = None, poll: float = 3) -> str:
+        """OBS records to .mkv and copies it into an .mp4 afterwards (2 min for a 2-hour session on a hard disk).
+        Use the .mp4 only once it's complete: about as large as the .mkv and no longer growing. Until then,
+        and if that takes too long, the .mkv is the complete recording (a half-written .mp4 can't be read:
+        the scan of a 2-hour session once found nothing because of that)."""
         mkv = Path(path)
+        if mkv.suffix.lower() != ".mkv":
+            return str(mkv)
         mp4 = mkv.with_suffix(".mp4")
-        end = time.time() + wait_s
+        try:
+            gb = mkv.stat().st_size / 1e9
+        except OSError:
+            gb = 0
+        end = time.time() + (wait_s if wait_s is not None else 120 + 60 * gb)     # ~1 min per GB on a slow disk
         last = -1
-        while time.time() < end and mkv.suffix.lower() == ".mkv":
+        while time.time() < end:
             if mp4.exists():
                 size = mp4.stat().st_size
-                if size == last and size > 0:
+                complete = mkv.exists() and size >= 0.98 * mkv.stat().st_size
+                if complete and size == last:
                     drop_original(mp4)
                     return str(mp4)
                 last = size
-            time.sleep(2)
-        return str(mp4 if mp4.exists() else mkv)
+            time.sleep(poll)
+        return str(mkv if mkv.exists() else mp4)
 
     # ---------------------------------------------------------- hotkeys during a recording
     def hotkey(self, action: str) -> str | None:
@@ -267,8 +279,11 @@ class Recorder:
         key, self.scan_proc, self.scan_key = self.scan_key, None, None
         e = self.idx.get(key)
         if e:
+            nothing = code == 0 and read_nothing(e)      # "finished" without seeing a single frame
+            if nothing:
+                code = 3
             e.status = "scanned" if code == 0 else "failed"
-            e.note = "" if code == 0 else f"scanner exit code {code}"
+            e.note = "" if code == 0 else ("the scan couldn't read the video" if nothing else f"scanner exit code {code}")
             retention.save_index(self.idx)
             if code == 0:
                 self._add_extras(e)
@@ -282,12 +297,33 @@ class Recorder:
                         self.cleanup()
                 else:
                     self.ui.notify("Scan finished", f"{summary(e)}. Sending the results…")
+            elif nothing:
+                self.ui.notify("Scan failed", "The scan couldn't read this recording. It's kept: press Scan again "
+                               "on it in Recordings.", sticky=True)
             else:
                 self.ui.notify("Scan failed", f"The scanner stopped with an error (code {code}). The recording is kept; "
                                f"details in {Path(e.path).with_suffix('.scan') / 'scan.log'}", sticky=True)
         self.next_upload = 0
         self.status = "Waiting for Apex"
         self._next_in_queue(apex)
+
+    def rescan(self, key: str) -> bool:
+        """Scan one of the app's recordings again (after a failed or empty scan). Runs like the automatic scan."""
+        with self.lock:
+            e = self.idx.get(key)
+            if not e or not e.path or key in (self.current, self.scan_key) or key in self.queue:
+                return False
+            mkv, mp4 = Path(e.path).with_suffix(".mkv"), Path(e.path).with_suffix(".mp4")
+            if mkv.exists() and mp4.exists():
+                if mp4.stat().st_size >= 0.98 * mkv.stat().st_size:
+                    drop_original(mp4)
+                    e.path = str(mp4)
+                else:
+                    e.path = str(mkv)                    # the .mp4 is incomplete: the .mkv is the whole recording
+            e.status, e.note, e.nogame = "waiting", "", False
+            self.queue.append(key)
+            retention.save_index(self.idx)
+            return True
 
     def _add_extras(self, e) -> None:
         """What goes to the team with the scan results besides the scanner's files: the marks/mutes and,
@@ -386,14 +422,30 @@ def drop_original(mp4: Path) -> bool:
     return False
 
 
-def no_game(e) -> bool:
-    """True only when the scan is sure nothing was played: no game found (no drop map, no ring, no HUD) and
-    not a single kill-feed line. Anything doubtful counts as a game, so a real game is never deleted early."""
+def _scan_json(e) -> dict | None:
     import json
     try:
         f = Path(e.path).with_suffix(".scan") / (Path(e.path).stem + ".scan.json")
-        d = json.loads(f.read_text(encoding="utf-8"))
+        return json.loads(f.read_text(encoding="utf-8"))
     except Exception:
+        return None
+
+
+def read_nothing(e) -> bool:
+    """The scanner wrote a result but never looked at a frame (unreadable or half-written file)."""
+    d = _scan_json(e)
+    if d is None:
+        return False
+    votes = sum(((d.get("perf") or {}).get("layoutVotes") or {}).values())
+    return not d.get("games") and votes == 0
+
+
+def no_game(e) -> bool:
+    """True only when the scan is sure nothing was played: it read the video (frames were looked at), found
+    no game (no drop map, no ring, no HUD) and not a single kill-feed line. Anything doubtful counts as a game,
+    so a real game is never deleted early."""
+    d = _scan_json(e)
+    if d is None or read_nothing(e):
         return False
     return not d.get("games") and int((d.get("perf") or {}).get("feedLines") or 0) == 0
 

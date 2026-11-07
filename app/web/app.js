@@ -216,7 +216,8 @@ function drawList() {
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
         <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
-        <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
+        <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
+          `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
           ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.res ? `EEC ✓ ${ordinal(it.yt.res.standing)}/${it.yt.res.teams}` : it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
           ${it.auto && S && S.youtube && S.youtube.available && !(it.yt && ['done', 'waiting', 'uploading'].includes(it.yt.status)) ? '<button class="btn small ghost" data-a="yt" title="Upload this recording\'s scrim block to the team YouTube channel">YouTube</button>' : ''}
@@ -229,6 +230,7 @@ function drawList() {
     $('input', row).onchange = e => { e.target.checked ? selected.add(id) : selected.delete(id); syncSel(); };
     $$('[data-a]', row).forEach(b => b.onclick = async () => {
       if (b.dataset.a === 'scan') scan([id]);
+      if (b.dataset.a === 'rescan') { try { const r = await api('/api/rescan', {ids: [id]}); toast(r.queued ? 'It will be scanned again (pauses by itself while Apex runs).' : 'Already being scanned.'); loadLibrary(); } catch (e) { toast(e.message, true); } }
       if (b.dataset.a === 'show') api('/api/open', {what: 'file', id});
       if (b.dataset.a === 'eec') {
         const it = LIB.find(x => x.id === id), cur = (it && it.yt && it.yt.eec || []).join(' ');
