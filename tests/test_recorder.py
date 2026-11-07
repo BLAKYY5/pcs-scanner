@@ -458,6 +458,17 @@ def test_night_uploads_and_shutdown():
     assert awake == [True, False]
 
 
+def test_encoder_candidates_skip_av1_on_older_cards():
+    """AV1 is only tried on cards that can encode it, so OBS never shows "couldn't start recording" for it."""
+    from pcs_recorder.obs import encoder_candidates, has_av1_encoder
+    assert not has_av1_encoder("nvidia geforce rtx 3070") and has_av1_encoder("nvidia geforce rtx 4070 super")
+    assert has_av1_encoder("amd radeon rx 9070 xt") and not has_av1_encoder("amd radeon rx 6700 xt")
+    assert has_av1_encoder("intel(r) arc(tm) a770") and has_av1_encoder("nvidia geforce rtx 5080")
+    c = encoder_candidates("nvidia", "nvidia geforce rtx 3060")
+    assert c[0] == "obs_nvenc_hevc_tex" and not any("av1" in e for e in c)
+    assert encoder_candidates("amd", "amd radeon rx 7800 xt")[0] == "av1_texture_amf"
+
+
 def test_skip_and_offline_hub():
     r, apex, hub, ui = run_session(scan_answer=False)
     assert r.scan_proc is None and list(r.idx.values())[0].status == "skipped"

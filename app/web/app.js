@@ -691,12 +691,16 @@ function renderSettings() {
       </div></section>` : '<div class="notice">Auto-record isn\'t available in this build.</div>'}
     <section class="card section"><h2>About</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
-        <span class="row"><button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
+        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to Blakey if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + ((q.value * 1000 + 480) * 3600 / 8 / 1e6).toFixed(1) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
   $('#f-signin').onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
+  const fl = $('#f-obslogs'); if (fl) fl.onclick = () => api('/api/open', {what: 'obslogs'});
+  const ft = $('#f-retest'); if (ft) ft.onclick = async () => {
+    try { await api('/api/encoder/retest', {}); toast('Testing the encoders again: watch Home → Activity.'); } catch (e) { toast(e.message, true); }
+  };
   $('#f-quit').onclick = () => { if (confirmBox('Quit PCS Scanner? Auto-record stops until you open it again.')) api('/api/quit', {}); };
   $('#save').onclick = saveSettings;
   wireHotkeys();

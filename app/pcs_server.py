@@ -765,10 +765,35 @@ class Server:
                             b.open_path(core.OUT)
                         elif what == "recordings" and b.auto:
                             b.open_path(str(b.auto.s.folder_path))
+                        elif what == "obslogs":
+                            from pcs_recorder import obs as obsmod
+                            logs = obsmod.CONFIG / "logs"
+                            b.open_path(str(logs if logs.exists() else obsmod.OBS_ROOT))
                         elif what == "file":
                             it = b.find(body.get("id", ""))
                             if it:
                                 b.open_path(it["path"])
+                        return self._json({"ok": True})
+                    if path == "/api/encoder/retest":
+                        a = b.auto
+                        if not a:
+                            return self._json({"error": "Auto-record isn't available in this build"}, 400)
+                        if a.rec.current is not None or b.update_blocked():
+                            return self._json({"error": "Close Apex (and wait for the scan) first."}, 409)
+                        from pcs_recorder import obs as obsmod
+                        from pcs_recorder import settings as st
+
+                        def retest():
+                            try:
+                                obsmod.close()
+                            except Exception:
+                                pass
+                            a.s.encoder = ""
+                            a.s.enabled = True
+                            st.save(a.s)
+                            a.enable()
+                        threading.Thread(target=retest, daemon=True).start()
+                        b.say("Testing the graphics card's encoders again (a few seconds)…")
                         return self._json({"ok": True})
                     if path == "/api/quit":
                         threading.Timer(0.3, b.quit).start()
