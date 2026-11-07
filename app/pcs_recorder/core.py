@@ -272,7 +272,16 @@ class Recorder:
             retention.save_index(self.idx)
             if code == 0:
                 self._add_extras(e)
-                self.ui.notify("Scan finished", f"{summary(e)}. Sending the results…")
+                e.nogame = no_game(e)
+                retention.save_index(self.idx)
+                if e.nogame:
+                    when = ("now" if self.s.nogame_keep_h == 0 else f"in {self.s.nogame_keep_h} h")
+                    self.ui.notify("No game in this recording", "Only menus or lobby were recorded: it's deleted "
+                                   f"{when} (and first, if space is needed).")
+                    if self.s.nogame_keep_h == 0:
+                        self.cleanup()
+                else:
+                    self.ui.notify("Scan finished", f"{summary(e)}. Sending the results…")
             else:
                 self.ui.notify("Scan failed", f"The scanner stopped with an error (code {code}). The recording is kept; "
                                f"details in {Path(e.path).with_suffix('.scan') / 'scan.log'}", sticky=True)
@@ -347,7 +356,8 @@ class Recorder:
             protect = {k for k in (self.current, self.scan_key) if k}
             if self.youtube:
                 protect |= self.youtube.protected()       # blocks still going to YouTube
-            removed = retention.enforce(self.idx, self.s.keep_days, self.s.max_gb, protect)
+            removed = retention.enforce(self.idx, self.s.keep_days, self.s.max_gb, protect,
+                                        nogame_keep_h=self.s.nogame_keep_h)
             retention.save_index(self.idx)
         if removed:
             self.ui.notify("PCS Recorder", f"Removed {len(removed)} old recording(s) to stay within your limits.")
@@ -374,6 +384,18 @@ def drop_original(mp4: Path) -> bool:
     except OSError:
         pass                                          # still open somewhere: try again at the next clean-up
     return False
+
+
+def no_game(e) -> bool:
+    """True only when the scan is sure nothing was played: no game found (no drop map, no ring, no HUD) and
+    not a single kill-feed line. Anything doubtful counts as a game, so a real game is never deleted early."""
+    import json
+    try:
+        f = Path(e.path).with_suffix(".scan") / (Path(e.path).stem + ".scan.json")
+        d = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return not d.get("games") and int((d.get("perf") or {}).get("feedLines") or 0) == 0
 
 
 def extract_track(video: str, index: int, out: Path) -> Path:

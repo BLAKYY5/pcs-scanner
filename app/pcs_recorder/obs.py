@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import logging
 import subprocess
 import time
@@ -70,26 +71,54 @@ def install(progress=print) -> None:
 
 # ------------------------------------------------------------------ config written before OBS starts
 
-def gpu_vendor() -> str:
+def gpu_names() -> str:
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command",
-                              "(Get-CimInstance Win32_VideoController).Name"],
-                             capture_output=True, text=True, timeout=20, creationflags=0x08000000).stdout.lower()
+        return subprocess.run(["powershell", "-NoProfile", "-Command", "(Get-CimInstance Win32_VideoController).Name"],
+                              capture_output=True, text=True, timeout=20, creationflags=0x08000000).stdout.lower()
     except Exception:
-        return "unknown"
+        return ""
+
+
+def gpu_vendor(names: str | None = None) -> str:
+    out = gpu_names() if names is None else names
     for v in ("nvidia", "amd", "intel"):
         if v in out or (v == "amd" and "radeon" in out):
             return v
     return "unknown"
 
 
-def encoder_candidates(vendor: str) -> list[str]:
-    return ENCODERS.get(vendor, []) + [e for v, l in ENCODERS.items() if v != vendor for e in l]
+def has_av1_encoder(names: str) -> bool:
+    """AV1 hardware encoding exists only on recent cards: NVIDIA RTX 40/50, AMD RX 7000/9000, Intel Arc.
+    Trying AV1 on older cards makes OBS show "couldn't start recording" during the encoder test."""
+    n = names.lower()
+    return bool(re.search(r"rtx\s*(pro\s*)?[45]0\d\d|rtx\s*[2-9]000\s*ada|rtx pro \d+ blackwell", n) or
+                re.search(r"rx\s*[79]\d{3}", n) or "arc" in n)
+
+
+def encoder_candidates(vendor: str, names: str = "") -> list[str]:
+    order = ENCODERS.get(vendor, []) + [e for v, l in ENCODERS.items() if v != vendor for e in l]
+    if not has_av1_encoder(names):
+        order = [e for e in order if "av1" not in e]
+    return order
 
 
 def rec_tracks(s: Settings) -> int:
     """OBS's track bitmask: one track per recorded source (track 1 = first of s.tracks())."""
     return (1 << max(1, len(s.tracks()))) - 1
+
+
+def encoder_settings(encoder: str, mbps: int) -> dict:
+    """CBR (predictable file sizes for the folder limit), keyframe every second (the scanner seeks on keyframes),
+    and a quality preset in each vendor's own words (a preset name another vendor uses can stop the encoder)."""
+    kbps = mbps * 1000
+    base = {"rate_control": "CBR", "bitrate": kbps, "keyint_sec": 1}
+    if "amf" in encoder:
+        return base | {"preset": "quality", "max_bitrate": kbps, "buffer_size": kbps, "bf": 0}
+    if "nvenc" in encoder:
+        return base | {"preset2": "p5", "tune": "hq", "multipass": "qres", "bf": 0}
+    if "qsv" in encoder:
+        return base | {"target_usage": "TU4", "bframes": 0}
+    return base
 
 
 def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
@@ -112,10 +141,7 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
         "FPSType=1", "FPSInt=60", "AutoRemux=true", ""]), encoding="utf-8")
     # constant bitrate (predictable file sizes for the folder limit), keyframe every second
     # (the scanner seeks on keyframes). CBR and these keys are understood by AMD, NVIDIA and Intel encoders.
-    kbps = s.bitrate_mbps * 1000
-    (prof / "recordEncoder.json").write_text(json.dumps({
-        "rate_control": "CBR", "bitrate": kbps, "max_bitrate": kbps, "buffer_size": kbps,
-        "keyint_sec": 1, "preset": "quality", "bf": 0}))
+    (prof / "recordEncoder.json").write_text(json.dumps(encoder_settings(encoder, s.bitrate_mbps)))
     gl = CONFIG / "global.ini"
     gl.write_text("\n".join([
         "[General]", "FirstRun=true", "EnableAutoUpdates=false", "",
@@ -264,22 +290,34 @@ class OBS:
 
 
 def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
-    """First-run self test: try encoders until one actually records (2-second test file, then deleted)."""
-    vendor = gpu_vendor()
-    obs = OBS(s)
-    obs.connect()
-    for enc in encoder_candidates(vendor):
+    """First-run self test: try encoders until one actually records (2-second test file, then deleted).
+    OBS only reads the encoder when it starts, so it is restarted with each candidate's settings
+    (changing the encoder while OBS runs has no effect: every test would use the first one)."""
+    names = gpu_names()
+    vendor = gpu_vendor(names)
+    tried = []
+    for enc in encoder_candidates(vendor, names):
+        tried.append(enc)
         try:
+            close()
+            write_config(s, enc, width, height)
+            launch()
+            obs = OBS(s)
+            obs.connect()
             obs.prepare(width, height, enc)
             obs.c.start_record()
-            time.sleep(2.5)
+            time.sleep(3)
             if obs.recording():
                 path = obs.stop()
                 time.sleep(2)
                 for f in Path(path or "").parent.glob(Path(path or "x").stem + "*") if path else []:
                     f.unlink(missing_ok=True)
-                progress(f"Recording with {enc} ({vendor} GPU).")
+                progress(f"Recording with {enc} ({vendor} graphics card).")
                 return enc
+            log.info("encoder %s didn't start", enc)
         except Exception as e:
             log.info("encoder %s not usable: %s", enc, e)
-    raise RuntimeError("No hardware encoder worked. Update the graphics driver and try again.")
+    close()                                                # also closes any error box OBS left open
+    log.warning("no encoder worked on %r (tried %s)", names, tried)
+    raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}). "
+                       "Send Blakey the OBS log: Settings → About → Recorder logs.")

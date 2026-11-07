@@ -61,6 +61,7 @@ function renderTop() {
 }
 // the window was opened again (from the tray): check for an update if the last check is old
 document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
+setInterval(() => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); }, 10 * 60 * 1000);   // window open: every 10 min
 $('#updateBtn').onclick = async () => {
   if (!confirmBox('Download the new version now? The app restarts by itself.')) return;
   toast('Downloading the update…'); await api('/api/update', {}).catch(e => toast(e.message, true));
@@ -181,6 +182,7 @@ function renderRecordings() {
         <div class="seg" id="filt">${['all', 'scanned', 'not scanned'].map(f => `<button data-f="${f}" class="${f === filter ? 'on' : ''}">${f}</button>`).join('')}</div>
         <button class="btn" id="add">Add recordings…</button>
         ${S && S.youtube && S.youtube.available ? '<button class="btn" id="eecRes" title="The lobby export from EEC (Download button on the lobby page): standing, points and kills go in the YouTube description">EEC results…</button>' : ''}
+        <button class="btn" id="delSel" disabled>Delete selected</button>
         <button class="btn brand" id="scanSel" disabled>Scan selected</button>
       </div></div>
     <div class="drop" id="dropzone">Drop recordings or folders here to add them${S && S.youtube && S.youtube.available ? ' · or an EEC lobby export (.json) for the YouTube description' : ''}</div>
@@ -190,6 +192,7 @@ function renderRecordings() {
   $$('#filt button').forEach(b => b.onclick = () => { filter = b.dataset.f; $$('#filt button').forEach(x => x.classList.toggle('on', x === b)); drawList(); });
   $('#add').onclick = async () => { const r = await api('/api/library/pick', {}).catch(e => toast(e.message, true)); if (r) { toast(r.added ? `Added ${r.added} recording(s).` : 'Nothing added.'); loadLibrary(); } };
   $('#scanSel').onclick = () => scan([...selected]);
+  $('#delSel').onclick = () => deleteItems([...selected]);
   const er = $('#eecRes'); if (er) er.onclick = async () => {
     try { const r = await api('/api/youtube/results', {}); if (r.added.length) toast('EEC results added: ' + r.added.join(' · ')); loadLibrary(); }
     catch (e) { toast(e.message, true); }
@@ -212,12 +215,13 @@ function drawList() {
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
-        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}${ytPill(it)}</span>
+        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
           ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.res ? `EEC ✓ ${ordinal(it.yt.res.standing)}/${it.yt.res.teams}` : it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
           ${it.auto && S && S.youtube && S.youtube.available && !(it.yt && ['done', 'waiting', 'uploading'].includes(it.yt.status)) ? '<button class="btn small ghost" data-a="yt" title="Upload this recording\'s scrim block to the team YouTube channel">YouTube</button>' : ''}
           <button class="btn small ghost" data-a="show" title="Open the file">Open</button>
+          <button class="btn small ghost danger" data-a="del" title="Delete this recording">Delete</button>
           ${!it.auto ? '<button class="btn small ghost" data-a="forget" title="Remove from this list (the file stays)">✕</button>' : ''}</div></div>`).join('');
   }
   $$('.recrow[data-id]', el).forEach(row => {
@@ -235,6 +239,7 @@ function drawList() {
       }
       if (b.dataset.a === 'yt') { try { const r = await api('/api/youtube/upload', {id}); toast(`Block of ${r.queued} recording(s) queued for YouTube.`); loadLibrary(); } catch (e) { toast(e.message, true); } }
       if (b.dataset.a === 'forget') { await api('/api/library/forget', {id}); loadLibrary(); }
+      if (b.dataset.a === 'del') deleteItems([id]);
     });
   });
   syncSel();
@@ -248,14 +253,32 @@ function ytPill(it) {
   if (y.status === 'failed') return ` <span class="pill bad" title="${esc(y.error || '')}">YouTube failed</span>`;
   return '';
 }
-function syncSel() { const b = $('#scanSel'); if (b) { b.disabled = !selected.size; b.textContent = selected.size ? `Scan selected (${selected.size})` : 'Scan selected'; } }
+function syncSel() {
+  const b = $('#scanSel'); if (b) { b.disabled = !selected.size; b.textContent = selected.size ? `Scan selected (${selected.size})` : 'Scan selected'; }
+  const d = $('#delSel'); if (d) { d.disabled = !selected.size; d.textContent = selected.size ? `Delete selected (${selected.size})` : 'Delete selected'; }
+}
+async function deleteItems(ids) {
+  const items = LIB.filter(x => ids.includes(x.id)); if (!items.length) return;
+  const own = items.filter(x => x.auto), added = items.filter(x => !x.auto);
+  const size = items.reduce((a, x) => a + x.size, 0);
+  let msg = `Delete ${items.length} recording${items.length > 1 ? 's' : ''} (${fmtGB(size)})?\n\n`;
+  if (own.length) msg += `• ${own.length} made by auto-record: deleted for good, with their scan files and sound tracks. Results already sent to the team stay with the team.\n`;
+  if (added.length) msg += `• ${added.length} added by hand: moved to the Recycle Bin (you can restore them).\n`;
+  if (!confirmBox(msg)) return;
+  try {
+    const r = await api('/api/library/delete', {ids});
+    toast(r.deleted.length ? `Deleted ${r.deleted.length}, ${fmtGB(r.freed)} freed.` + (r.skipped.length ? ` Not deleted (busy): ${r.skipped.length}.` : '') :
+      'Nothing deleted: ' + r.skipped.join(', '), !r.deleted.length);
+    ids.forEach(i => selected.delete(i)); loadLibrary();
+  } catch (e) { toast(e.message, true); }
+}
 async function scan(ids) {
   try { const r = await api('/api/scan', {ids}); toast(r.queued ? `${r.queued} recording(s) queued for scanning.` : 'Already scanning or queued.'); selected.clear(); loadLibrary(); }
   catch (e) { toast(e.message, true); }
 }
 
 /* ------------------------------------------------------------------ review */
-const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute']};
+const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
 const TRACKN = {game: 'Game sound', discord: 'Discord', mic: 'Microphone'};
 function buildEvents(d) {
   const ev = [];
@@ -310,20 +333,22 @@ async function renderReview(id) {
     <div class="review">
       <div>
         <div class="player"><video id="vid" controls preload="metadata" src="/video/${d.id}?t=${encodeURIComponent(TOKEN)}"></video>
+          <div class="seen" id="seen" ${d.scan ? '' : 'hidden'}></div>
           <div class="err" id="vidErr" hidden><div><h2>This recording can't play here</h2><p class="muted">Its video format isn't supported by the built-in player (usually HEVC/H.265).<br>Open it in your usual video player instead.</p><button class="btn brand" id="vidOpen">Open file</button></div></div></div>
         <div class="card" style="margin-top:12px;padding:12px 16px 14px">
           <div class="tl" id="tl"><div class="lanes">
             <div class="lane games" id="laneG"><span class="lane-label">Games</span></div>
             <div class="lane" id="laneE"><span class="lane-label">Drop · jump · landing · rings</span></div>
             <div class="lane" id="laneF"><span class="lane-label">Kill feed</span></div>
+            <div class="lane sound" id="laneS"><span class="lane-label">Sound · <span id="soundState">analysing…</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>Drop map</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>Drop map</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select></div>
           </div>
           <div id="mixer"></div>
-          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>F</kbd> full screen · <kbd>M</kbd> mute</div>
+          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>F</kbd> full screen · <kbd>M</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
         </div>
       </div>
       <aside class="card side">
@@ -336,7 +361,8 @@ async function renderReview(id) {
   const rs = $('#rvScan'); if (rs) rs.onclick = () => scan([d.id]);
   v.addEventListener('error', () => { $('#vidErr').hidden = false; });
   setupAudio(d, v);
-  v.addEventListener('loadedmetadata', () => { RV.dur = v.duration; drawTimeline(); });
+  v.addEventListener('loadedmetadata', () => { RV.dur = v.duration; drawTimeline(); drawSound(); });
+  try { if (localStorage.getItem('pcs-seen') === '0') $('#seen').hidden = true; } catch (x) {}
   v.addEventListener('timeupdate', onTime);
   $('#speed').onchange = e => v.playbackRate = +e.target.value;
   $$('#rvTabs button').forEach(b => b.onclick = () => { RV.tab = b.dataset.t; $$('#rvTabs button').forEach(x => x.classList.toggle('on', x === b)); drawSide(); });
@@ -346,6 +372,7 @@ async function renderReview(id) {
   tl.addEventListener('mouseleave', () => $('#hoverT').hidden = true);
   tl.addEventListener('click', e => { const t = e.target.dataset && e.target.dataset.t; seek(t != null ? +t : tAt(e)); });
   drawTimeline(); drawSide();
+  loadLevels(d.id);
 }
 function dur() {
   if (RV.dur) return RV.dur;
@@ -362,7 +389,7 @@ function drawTimeline() {
   $('#laneG').innerHTML = '<span class="lane-label">Games</span>' + (RV.spans.length ? RV.spans.map(s =>
     `<div class="segm" data-t="${s.from}" style="left:${pct(s.from)};width:calc(${pct(Math.max(1, s.to - s.from))})" title="${esc(mapName(s.map))} · ${fmtT(s.from)}–${fmtT(s.to)}">${esc(mapName(s.map))}${s.mode ? ' · ' + esc(s.mode) : ''}</div>`).join('') :
     `<span class="faint" style="position:absolute;left:8px;top:4px;font-size:12px">${RV.d.scan ? 'No game found in this recording' : 'Not scanned yet: scan it to see games and events here'}</span>`);
-  $('#laneE').innerHTML = '<span class="lane-label">Drop · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute'].includes(e.k)).map(e =>
+  $('#laneE').innerHTML = '<span class="lane-label">Drop · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
     `<button class="mk ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
@@ -385,7 +412,7 @@ function drawSide() {
     RV.ev.forEach((e, i) => {
       if (e.k === 'feed') return;                     // kill feed lines have their own tab
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
-      const col = {drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63'}[e.k];
+      const col = {drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
       html += `<div class="ev" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';
@@ -417,6 +444,7 @@ function onTime(force) {
   const v = $('#vid'); if (!v || !RV) return;
   const t = v.currentTime;
   $('#playhead').style.left = (t / dur() * 100) + '%';
+  drawSeen(t);
   const body = $('#rvBody'); if (!body) return;
   let best = null;
   $$('[data-t]', body).forEach(el => { if (+el.dataset.t <= t + 0.25) best = el; });
@@ -439,10 +467,83 @@ document.addEventListener('keydown', e => {
   else if (k === ']') { const n = times.find(t => t > v.currentTime + 0.3); if (n != null) seek(n); }
   else if (k === '[') { const p = times.filter(t => t < v.currentTime - 1).pop(); seek(p != null ? p : 0); }
   else if (k === 'f' || k === 'F') { document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen(); }
+  else if (k === 'v' || k === 'V') { const o = $('#seen'); if (o && RV.d.scan) { o.hidden = !o.hidden; try { localStorage.setItem('pcs-seen', o.hidden ? '0' : '1'); } catch (x) {} } }
   else if (k === 'm' || k === 'M') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
   else return;
   e.preventDefault();
 });
+
+/* ------------------------------------------------------------------ what the scanner sees (overlay on the video) */
+function drawSeen(t) {
+  const o = $('#seen'); if (!o || o.hidden || !RV.d.games) return;
+  const games = RV.d.games, spans = RV.spans;
+  let gi = -1;
+  spans.forEach((sp, i) => { if (t >= sp.from - 5 && t <= sp.to + 5) gi = i; });
+  if (gi < 0) { o.innerHTML = '<b>Lobby / menus</b><span>No game on screen</span>'; return; }
+  const g = games[gi], L = g.landing || {};
+  // the scanner's reading for this second (at most 3 s old)
+  let s = null;
+  for (const row of g.seen || []) { if (row[0] <= t + 0.5) s = row; else break; }
+  if (s && t - s[0] > 3) s = null;
+  let phase = 'In game';
+  if (L.exitAtExact != null && t < L.exitAtExact) phase = t < g.tStart ? 'Loading' : 'On the dropship';
+  else if (L.landedAtExact != null && t < L.landedAtExact) phase = 'Dropping';
+  if (s && s[2]) phase = 'Spectating (eliminated)';
+  const rows = [`<b>Game ${gi + 1} · ${esc(mapName(g.map))}</b>`, `<span>${phase}</span>`];
+  for (const r of g.ring || []) {
+    const from = r.appearedAt ?? r.firstSeen;
+    if (r.kind === 'wait' && t >= from && t <= r.endsAt) rows.push(`<span class="ring">Ring${r.round ? ' ' + r.round : ''} starts closing in ${fmtT(r.endsAt - t)}</span>`);
+    if (r.kind === 'closing' && t >= r.firstSeen && t <= r.endsAt) rows.push(`<span class="ring">Ring closing · ends in ${fmtT(r.endsAt - t)}</span>`);
+  }
+  if (s && s[3] != null) {
+    const kmh = s[6] != null ? Math.round(s[6] * 0.0254 * 3.6) : null;
+    rows.push(`<span class="mono">x ${Math.round(s[3])} · y ${Math.round(s[4])} · z ${Math.round(s[5])}${kmh != null ? ` · ${kmh} km/h` : ''}</span>`);
+  }
+  const lv = RV.levels;
+  if (lv) {
+    if ((lv.fights || []).some(([a, b]) => t >= a && t <= b)) rows.push('<span class="hot">Loud game sound: likely a fight</span>');
+    if ((lv.calls || []).some(c => t >= c && t < c + 3)) rows.push('<span class="hot blue">Loud call on the mic</span>');
+  }
+  const f = (RV.d.feed || []).filter(l => l.t <= t && t - l.t < 4).slice(-3);
+  if (f.length) rows.push('<span class="feedimgs">' + f.map(l => `<img alt="Kill feed line" src="data:image/jpeg;base64,${l.jpg}">`).join('') + '</span>');
+  o.innerHTML = rows.join('');
+}
+
+/* ------------------------------------------------------------------ sound analysis (loudness per track) */
+async function loadLevels(id) {
+  const st = () => $('#soundState');
+  let lv;
+  try { lv = await api(`/api/library/${id}/levels`); } catch (e) { if (st()) st().textContent = 'not available'; return; }
+  if (!RV || RV.d.id !== id) return;
+  RV.levels = lv;
+  if (st()) st().textContent = lv.tracks.map(t => t.label).join(' · ') + (lv.talk != null ? ` · mic active ${Math.round(lv.talk * 100)}% of the time` : '');
+  (lv.fights || []).forEach(([a, b]) => RV.ev.push({t: a, k: 'fight', title: 'Loud game sound (likely a fight)', sub: `${fmtT(a)}–${fmtT(b)}`}));
+  (lv.calls || []).forEach(c => RV.ev.push({t: c, k: 'call', title: 'Loud call on the mic'}));
+  RV.ev.sort((a, b) => a.t - b.t);
+  drawSound(); drawSide();
+}
+function drawSound() {
+  const lane = $('#laneS'), lv = RV && RV.levels; if (!lane || !lv) return;
+  const D = dur(), w = lane.clientWidth, h = lane.clientHeight;
+  $$('canvas, .fight, .mk.call', lane).forEach(x => x.remove());
+  const cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2; cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+  const c = cv.getContext('2d'), colors = {game: 'rgba(230,173,69,.55)', discord: 'rgba(196,139,255,.5)', mic: 'rgba(106,160,255,.6)'};
+  lv.tracks.forEach((tr, i) => {
+    c.fillStyle = colors[tr.key] || 'rgba(200,200,200,.4)'; c.beginPath(); c.moveTo(0, cv.height);
+    const n = tr.level.length;
+    for (let x = 0; x < cv.width; x++) {
+      const t = x / cv.width * D, j = Math.min(n - 1, Math.floor(t / lv.step));
+      const v = j >= 0 ? tr.level[j] / 255 : 0;
+      c.lineTo(x, cv.height - v * cv.height * 0.95);
+    }
+    c.lineTo(cv.width, cv.height); c.closePath(); c.fill();
+  });
+  lane.appendChild(cv);
+  const pct = t => (t / D * 100).toFixed(3) + '%';
+  lane.insertAdjacentHTML('beforeend', (lv.fights || []).map(([a, b]) => `<div class="fight" data-t="${a}" style="left:${pct(a)};width:${pct(b - a)}" title="${fmtT(a)}–${fmtT(b)} · loud game sound, likely a fight"></div>`).join('') +
+    (lv.calls || []).map(c2 => `<button class="mk call" data-t="${c2}" style="left:${pct(c2)}" title="${fmtT(c2)} · loud call">!</button>`).join(''));
+}
+window.addEventListener('resize', () => { if (page === 'review') drawSound(); });
 
 /* ------------------------------------------------------------------ separate sound tracks in review */
 function setupAudio(d, v) {
@@ -479,7 +580,7 @@ function drawMixer() {
 function hotkeyText(v) { return v ? v.split('+').map(p => p.length <= 2 || /^f\d/.test(p) ? p.toUpperCase() : p[0].toUpperCase() + p.slice(1)).join(' + ') : 'none'; }
 function hotkeyField(id, value, label) {
   return `<label class="field"><span>${esc(label)}</span><input class="hk" id="${id}" type="text" readonly data-v="${esc(value)}" value="${esc(hotkeyText(value))}">
-    <small>Click, then press the keys. Backspace = none.</small></label>`;
+    <small>Click, then press the key(s): e.g. F5, Shift+F8, Ctrl+Alt+M. Backspace = none.</small></label>`;
 }
 function wireHotkeys() {
   $$('input.hk').forEach(inp => {
@@ -488,13 +589,18 @@ function wireHotkeys() {
     inp.onkeydown = e => {
       e.preventDefault();
       if (e.key === 'Backspace' || e.key === 'Delete') { inp.dataset.v = ''; inp.blur(); return; }
-      let key = '';
+      const SPECIAL = {Pause: 'pause', ScrollLock: 'scrolllock', Insert: 'insert', Home: 'home', End: 'end', PageUp: 'pageup',
+        PageDown: 'pagedown', NumpadAdd: 'numadd', NumpadSubtract: 'numsub', NumpadMultiply: 'nummul', NumpadDivide: 'numdiv', NumpadDecimal: 'numdot'};
+      let key = '', alone = false;
       if (/^Digit\d$/.test(e.code)) key = e.code.slice(5);
       else if (/^Key[A-Z]$/.test(e.code)) key = e.code.slice(3).toLowerCase();
-      else if (/^F\d{1,2}$/.test(e.code)) key = e.code.toLowerCase();
-      else if (/^Numpad\d$/.test(e.code)) key = 'num' + e.code.slice(6);
-      if (!key) return;
-      if (!(e.ctrlKey || e.altKey || e.metaKey)) { toast('Use Ctrl, Alt or Win with the key, so it never takes a game key.', true); return; }
+      else if (/^F\d{1,2}$/.test(e.code)) { key = e.code.toLowerCase(); alone = true; }
+      else if (/^Numpad\d$/.test(e.code)) { key = 'num' + e.code.slice(6); alone = true; }
+      else if (SPECIAL[e.code]) { key = SPECIAL[e.code]; alone = true; }
+      if (!key) return;                                  // a modifier on its own: wait for the key
+      if (!alone && !(e.ctrlKey || e.altKey || e.metaKey)) {
+        toast('Letters and numbers need Ctrl, Alt or Win. F-keys, numpad, Pause, Insert, Home, End, Page Up/Down work alone.', true); return;
+      }
       inp.dataset.v = [e.ctrlKey && 'ctrl', e.altKey && 'alt', e.shiftKey && 'shift', e.metaKey && 'win', key].filter(Boolean).join('+');
       inp.blur();
     };
@@ -524,6 +630,8 @@ function renderSettings() {
       <div class="form">
         <label class="field wide"><span>Folder</span><input id="f-folder" type="text" value="${esc(s.folder)}"><small>Only recordings made by PCS Scanner in this folder are ever deleted.</small></label>
         <label class="field"><span>Keep recordings for (days)</span><input id="f-keep_days" type="number" min="1" max="90" value="${s.keep_days}"><small>1 to 90 days.</small></label>
+        <label class="field"><span>Recordings with no game: delete after (hours)</span><input id="f-nogame_keep_h" type="number" min="0" max="720" value="${s.nogame_keep_h ?? 24}">
+          <small>Only when the scan is sure nothing was played (no game, not one kill-feed line). 0 = right after the scan. They also go first when space is needed.</small></label>
         <label class="field"><span>Maximum folder size (GB)</span><input id="f-max_gb" type="number" min="20" value="${s.max_gb}"><small>Oldest recordings go first. At least 20 GB.</small></label>
         <label class="field wide"><span>Quality: <b id="q-val">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
           <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
@@ -542,7 +650,8 @@ function renderSettings() {
         <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
       </div>
       <h3>Hotkeys while recording</h3>
-      <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).</p>
+      <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).
+        Controller players can use a single key like F5 or a numpad key. While recording, a key used for a hotkey doesn't reach the game, so keyboard players should pick keys they don't play with.</p>
       <div class="form">
         ${hotkeyField('f-hk_mark', s.hk_mark, 'Mark this moment')}
         ${hotkeyField('f-hk_mute_game', s.hk_mute_game, 'Mute / unmute game sound')}
@@ -585,12 +694,16 @@ function renderSettings() {
       </div></section>` : '<div class="notice">Auto-record isn\'t available in this build.</div>'}
     <section class="card section"><h2>About</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
-        <span class="row"><button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
+        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to Blakey if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + ((q.value * 1000 + 480) * 3600 / 8 / 1e6).toFixed(1) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
   $('#f-signin').onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
+  const fl = $('#f-obslogs'); if (fl) fl.onclick = () => api('/api/open', {what: 'obslogs'});
+  const ft = $('#f-retest'); if (ft) ft.onclick = async () => {
+    try { await api('/api/encoder/retest', {}); toast('Testing the encoders again: watch Home → Activity.'); } catch (e) { toast(e.message, true); }
+  };
   $('#f-quit').onclick = () => { if (confirmBox('Quit PCS Scanner? Auto-record stops until you open it again.')) api('/api/quit', {}); };
   $('#save').onclick = saveSettings;
   wireHotkeys();
@@ -607,7 +720,7 @@ async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }

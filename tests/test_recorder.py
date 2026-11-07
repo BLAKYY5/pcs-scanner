@@ -184,6 +184,8 @@ def test_hotkeys_marks_and_mutes():
     assert s.tracks() == ["game"]
     assert settings.parse_hotkey("ctrl+alt+m") and settings.parse_hotkey("m") is None
     assert settings.parse_hotkey("shift+1") is None   # needs ctrl, alt or win
+    assert settings.parse_hotkey("f5") and settings.parse_hotkey("shift+f8") and settings.parse_hotkey("num7")
+    assert settings.parse_hotkey("pause") and settings.Settings(hk_mark="F5").clamp().hk_mark == "f5"
     assert settings.Settings(hk_mark="shift+x").clamp().hk_mark == ""
 
 
@@ -456,6 +458,101 @@ def test_night_uploads_and_shutdown():
     assert awake == [True, False]
 
 
+def test_encoder_candidates_skip_av1_on_older_cards():
+    """AV1 is only tried on cards that can encode it, so OBS never shows "couldn't start recording" for it."""
+    from pcs_recorder.obs import encoder_candidates, has_av1_encoder
+    assert not has_av1_encoder("nvidia geforce rtx 3070") and has_av1_encoder("nvidia geforce rtx 4070 super")
+    assert has_av1_encoder("amd radeon rx 9070 xt") and not has_av1_encoder("amd radeon rx 6700 xt")
+    assert has_av1_encoder("intel(r) arc(tm) a770") and has_av1_encoder("nvidia geforce rtx 5080")
+    c = encoder_candidates("nvidia", "nvidia geforce rtx 3060")
+    assert c[0] == "obs_nvenc_hevc_tex" and not any("av1" in e for e in c)
+    assert encoder_candidates("amd", "amd radeon rx 7800 xt")[0] == "av1_texture_amf"
+
+
+def test_no_game_recordings():
+    """A recording the scan is sure has no game (no game, no kill-feed line) is flagged, deleted after
+    nogame_keep_h and first when space is needed; a recording with a single feed line is kept."""
+    import json
+    from pcs_recorder.core import no_game
+    folder = TMP / f"nogame-{time.time_ns()}"
+    folder.mkdir()
+    now = time.time()
+
+    def rec(name, games, feed, age_h, size=UNIT):
+        v = folder / f"{name}.mp4"
+        v.write_bytes(b"\0" * size)
+        os.utime(v, (now - age_h * 3600, now - age_h * 3600))
+        (v.with_suffix(".scan")).mkdir()
+        (v.with_suffix(".scan") / f"{name}.scan.json").write_text(json.dumps({"games": games, "perf": {"feedLines": feed}}))
+        e = retention.Entry(path=str(v), started=now - age_h * 3600 - 60, status="uploaded")
+        e.nogame = no_game(e)
+        return e
+    idx = {"menus": rec("menus", [], 0, 30), "lobby": rec("lobby", [], 0, 2), "range": rec("range", [], 3, 30),
+           "game": rec("game", [{"map": "WE"}], 40, 30)}
+    assert [k for k, e in idx.items() if e.nogame] == ["menus", "lobby"]
+    removed = retention.enforce(idx, keep_days=7, max_gb=100, nogame_keep_h=24, now=now)
+    assert [r[0] for r in removed] == ["menus.mp4"] and set(idx) == {"lobby", "range", "game"}
+    # space needed: the no-game recording goes first even though it's the newest
+    removed = retention.enforce(idx, keep_days=7, max_gb=2.5 * UNIT / 1024 ** 3, nogame_keep_h=24, now=now)
+    assert [r[0] for r in removed] == ["lobby.mp4"], removed
+    # 0 h: right away
+    idx["x"] = rec("x", [], 0, 0)
+    assert [r[0] for r in retention.enforce(idx, 7, 100, nogame_keep_h=0, now=now + 1)] == ["x.mp4"]
+    # a scan that can't be read is never treated as "no game"
+    assert no_game(retention.Entry(path=str(folder / "missing.mp4"), started=now)) is False
+
+
+def test_encoder_test_restarts_obs_per_candidate():
+    """OBS only reads the encoder at start-up: each candidate is tried in a freshly started OBS."""
+    from pcs_recorder import obs as obsmod
+    calls = []
+
+    class Fake:
+        def __init__(self, s):
+            self.s = s
+
+        def connect(self):
+            calls.append("connect")
+
+        def prepare(self, w, h, enc):
+            self.enc = enc
+
+        @property
+        def c(self):
+            me = self
+
+            class C:
+                def start_record(self):
+                    calls.append(("start", current["enc"]))
+            return C()
+
+        def recording(self):
+            return current["enc"] == "obs_nvenc_h264_tex"
+
+        def stop(self):
+            return None
+    current = {}
+    saved = (obsmod.OBS, obsmod.close, obsmod.write_config, obsmod.launch, obsmod.gpu_names, obsmod.time.sleep)
+    obsmod.OBS = Fake
+    obsmod.close = lambda: calls.append("close")
+    obsmod.write_config = lambda s, enc, w, h: (calls.append(("config", enc)), current.update(enc=enc))
+    obsmod.launch = lambda: calls.append("launch")
+    obsmod.gpu_names = lambda: "nvidia geforce rtx 3060"
+    obsmod.time.sleep = lambda x: None
+    try:
+        enc = obsmod.pick_encoder(settings.Settings(), 1920, 1080, progress=lambda m: None)
+    finally:
+        obsmod.OBS, obsmod.close, obsmod.write_config, obsmod.launch, obsmod.gpu_names, obsmod.time.sleep = saved
+    assert enc == "obs_nvenc_h264_tex"
+    configs = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "config"]
+    starts = [c[1] for c in calls if isinstance(c, tuple) and c[0] == "start"]
+    assert configs == starts == ["obs_nvenc_hevc_tex", "jim_hevc_nvenc", "obs_nvenc_h264_tex"], calls
+    assert calls.count("close") == 3 and calls.count("launch") == 3
+    s = obsmod.encoder_settings("obs_nvenc_hevc_tex", 12)
+    assert s["preset2"] == "p5" and "preset" not in s and s["bitrate"] == 12000 and s["keyint_sec"] == 1
+    assert obsmod.encoder_settings("av1_texture_amf", 12)["preset"] == "quality"
+
+
 def test_skip_and_offline_hub():
     r, apex, hub, ui = run_session(scan_answer=False)
     assert r.scan_proc is None and list(r.idx.values())[0].status == "skipped"
@@ -555,9 +652,28 @@ def test_message_window_placement():
         assert ww >= 390 and wh >= 60, (ww, wh)                        # a real window, not an empty box
         assert x > sw / 2 and y > sh / 2, (x, y, sw, sh)                # bottom-right corner, not top-left
         assert x + ww <= sw and y + wh <= sh, (x, y, ww, wh, sw, sh)    # fully on screen
-        texts = [c.cget("text") for c in w.winfo_children() if isinstance(c, (tk.Label, tk.Button))]
+        def walk(x):
+            for c in x.winfo_children():
+                yield c
+                yield from walk(c)
+        texts = [c.cget("text") for c in walk(w) if isinstance(c, (tk.Label, tk.Button))]
         assert any("expired" in t for t in texts), texts
-        assert (action is None) or any(t == "Sign in with Google" for t in texts), texts
+        assert (action is None) or any(t == "SIGN IN WITH GOOGLE" for t in texts), texts
+    assert len([t for t in ui.toasts if t.winfo_exists()]) == 2          # stacked, not replaced
+    a, b = [t for t in ui.toasts if t.winfo_exists()]
+    root.update()
+    assert a.winfo_rooty() + a.winfo_height() <= b.winfo_rooty(), "messages overlap"
+    for i in range(4):
+        ui._toast(f"Message {i}", "x", False)
+    assert len([t for t in ui.toasts if t.winfo_exists()]) <= 3
+    ui.TOAST_S = 0.3                                                   # disappears on its own
+    ui._toast("Short", "bye", False)
+    short = ui.toasts[-1]
+    end = time.time() + 5
+    while short.winfo_exists() and time.time() < end:
+        root.update()
+        time.sleep(0.02)
+    assert not short.winfo_exists()
     root.destroy()
 
 
