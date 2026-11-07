@@ -229,6 +229,15 @@ def main():
         if not b.auto.s.player:
             b.auto.s.player = SETTINGS.get('player', '')
         b.auto.ui.actions["eeclink"] = ("Paste the link", lambda: win.show('recordings'))
+
+        def update_now():
+            win.show()
+            def go():
+                why = b.install_update()
+                if why:
+                    b.say(why)
+            threading.Thread(target=go, daemon=True).start()
+        b.auto.ui.actions["update"] = ("Update", update_now)
         autorec.hold_guard(lambda: win.show())
         b.auto.tray(lambda: win.show(), lambda: b.quit(), open_settings=lambda: win.show('settings'))
         if b.auto.s.enabled:
@@ -279,9 +288,15 @@ def main():
     def background_checks():
         b.check_google()
         b.check_youtube()
+        told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
-            b.check_update()
-            time.sleep(pcs_server.UPDATE_EVERY_S)
+            b.check_update(pcs_server.UPDATE_EVERY_S - 60)
+            # tell the player once per new version with a corner message (not during a game: it waits)
+            if b.update and told != b.update[0] and b.auto and not b.update_blocked():
+                told = b.update[0]
+                b.auto.ui.notify(f"Update available: {b.update[0]}", "A new version of PCS Scanner is out. Press Update "
+                                 "(about a minute; the app restarts by itself).", sticky=True, action="update")
+            time.sleep(60)
     threading.Thread(target=background_checks, daemon=True).start()
 
     if background and not (b.auto and (b.auto.s.enabled or b.auto.s.start_with_windows)):

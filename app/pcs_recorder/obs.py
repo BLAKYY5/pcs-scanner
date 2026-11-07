@@ -107,6 +107,20 @@ def rec_tracks(s: Settings) -> int:
     return (1 << max(1, len(s.tracks()))) - 1
 
 
+def encoder_settings(encoder: str, mbps: int) -> dict:
+    """CBR (predictable file sizes for the folder limit), keyframe every second (the scanner seeks on keyframes),
+    and a quality preset in each vendor's own words (a preset name another vendor uses can stop the encoder)."""
+    kbps = mbps * 1000
+    base = {"rate_control": "CBR", "bitrate": kbps, "keyint_sec": 1}
+    if "amf" in encoder:
+        return base | {"preset": "quality", "max_bitrate": kbps, "buffer_size": kbps, "bf": 0}
+    if "nvenc" in encoder:
+        return base | {"preset2": "p5", "tune": "hq", "multipass": "qres", "bf": 0}
+    if "qsv" in encoder:
+        return base | {"target_usage": "TU4", "bframes": 0}
+    return base
+
+
 def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
     ws = CONFIG / "plugin_config" / "obs-websocket"
     ws.mkdir(parents=True, exist_ok=True)
@@ -127,10 +141,7 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
         "FPSType=1", "FPSInt=60", "AutoRemux=true", ""]), encoding="utf-8")
     # constant bitrate (predictable file sizes for the folder limit), keyframe every second
     # (the scanner seeks on keyframes). CBR and these keys are understood by AMD, NVIDIA and Intel encoders.
-    kbps = s.bitrate_mbps * 1000
-    (prof / "recordEncoder.json").write_text(json.dumps({
-        "rate_control": "CBR", "bitrate": kbps, "max_bitrate": kbps, "buffer_size": kbps,
-        "keyint_sec": 1, "preset": "quality", "bf": 0}))
+    (prof / "recordEncoder.json").write_text(json.dumps(encoder_settings(encoder, s.bitrate_mbps)))
     gl = CONFIG / "global.ini"
     gl.write_text("\n".join([
         "[General]", "FirstRun=true", "EnableAutoUpdates=false", "",
@@ -279,27 +290,34 @@ class OBS:
 
 
 def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
-    """First-run self test: try encoders until one actually records (2-second test file, then deleted)."""
+    """First-run self test: try encoders until one actually records (2-second test file, then deleted).
+    OBS only reads the encoder when it starts, so it is restarted with each candidate's settings
+    (changing the encoder while OBS runs has no effect: every test would use the first one)."""
     names = gpu_names()
     vendor = gpu_vendor(names)
-    obs = OBS(s)
-    obs.connect()
     tried = []
     for enc in encoder_candidates(vendor, names):
         tried.append(enc)
         try:
+            close()
+            write_config(s, enc, width, height)
+            launch()
+            obs = OBS(s)
+            obs.connect()
             obs.prepare(width, height, enc)
             obs.c.start_record()
-            time.sleep(2.5)
+            time.sleep(3)
             if obs.recording():
                 path = obs.stop()
                 time.sleep(2)
                 for f in Path(path or "").parent.glob(Path(path or "x").stem + "*") if path else []:
                     f.unlink(missing_ok=True)
-                progress(f"Recording with {enc} ({vendor} GPU).")
+                progress(f"Recording with {enc} ({vendor} graphics card).")
                 return enc
+            log.info("encoder %s didn't start", enc)
         except Exception as e:
             log.info("encoder %s not usable: %s", enc, e)
+    close()                                                # also closes any error box OBS left open
     log.warning("no encoder worked on %r (tried %s)", names, tried)
     raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}). "
                        "Send Blakey the OBS log: Settings → About → Recorder logs.")

@@ -61,6 +61,7 @@ function renderTop() {
 }
 // the window was opened again (from the tray): check for an update if the last check is old
 document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
+setInterval(() => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); }, 10 * 60 * 1000);   // window open: every 10 min
 $('#updateBtn').onclick = async () => {
   if (!confirmBox('Download the new version now? The app restarts by itself.')) return;
   toast('Downloading the update…'); await api('/api/update', {}).catch(e => toast(e.message, true));
@@ -214,7 +215,7 @@ function drawList() {
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
-        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${statusPill(it.status)}${ytPill(it)}</span>
+        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${!it.scan && !['scanning', 'waiting', 'recording'].includes(it.status) ? '<button class="btn small" data-a="scan">Scan</button>' : ''}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
           ${it.auto && it.yt && !['done', 'uploading'].includes(it.yt.status) ? `<button class="btn small ghost" data-a="eec" title="EEC lobby link of this scrim block (goes in the YouTube description)">${it.yt.res ? `EEC ✓ ${ordinal(it.yt.res.standing)}/${it.yt.res.teams}` : it.yt.eec && it.yt.eec.length ? 'EEC ✓' : 'EEC link'}</button>` : ''}
@@ -629,6 +630,8 @@ function renderSettings() {
       <div class="form">
         <label class="field wide"><span>Folder</span><input id="f-folder" type="text" value="${esc(s.folder)}"><small>Only recordings made by PCS Scanner in this folder are ever deleted.</small></label>
         <label class="field"><span>Keep recordings for (days)</span><input id="f-keep_days" type="number" min="1" max="90" value="${s.keep_days}"><small>1 to 90 days.</small></label>
+        <label class="field"><span>Recordings with no game: delete after (hours)</span><input id="f-nogame_keep_h" type="number" min="0" max="720" value="${s.nogame_keep_h ?? 24}">
+          <small>Only when the scan is sure nothing was played (no game, not one kill-feed line). 0 = right after the scan. They also go first when space is needed.</small></label>
         <label class="field"><span>Maximum folder size (GB)</span><input id="f-max_gb" type="number" min="20" value="${s.max_gb}"><small>Oldest recordings go first. At least 20 GB.</small></label>
         <label class="field wide"><span>Quality: <b id="q-val">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
           <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
@@ -717,7 +720,7 @@ async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }

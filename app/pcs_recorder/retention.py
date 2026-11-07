@@ -28,6 +28,7 @@ class Entry:
     started: float
     status: str = "recording"       # recording | recorded | scanning | scanned | uploaded | skipped | failed | no-scanner
     note: str = ""
+    nogame: bool = False            # the scan found no game at all (menus, lobby, firing range…)
 
 
 def load_index() -> dict[str, Entry]:
@@ -58,7 +59,7 @@ def size_of(entry: Entry) -> int:
 
 
 def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[str] | None = None,
-            now: float | None = None) -> list[tuple[str, str]]:
+            now: float | None = None, nogame_keep_h: float = 24) -> list[tuple[str, str]]:
     """Delete what the rules say. Returns [(file name, reason)] for what was removed."""
     now = now or time.time()
     protect = protect or set()
@@ -82,10 +83,17 @@ def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[s
         if k not in protect and e.status not in ("recording", "scanning", "waiting") and now - e.started > keep_days * 86400:
             drop(k, f"older than {keep_days} days")
 
+    # recordings without any game: kept a short while (in case), then deleted
+    for k in sorted(idx, key=lambda k: idx[k].started):
+        e = idx[k]
+        if (k not in protect and e.nogame and e.status not in ("recording", "scanning", "waiting")
+                and now - end_time(e) >= nogame_keep_h * 3600):
+            drop(k, "no game in it")
+
     cap = max_gb * 1024 ** 3
     total = sum(size_of(e) for e in idx.values())
     order = sorted((k for k in idx if k not in protect and idx[k].status not in ("recording", "scanning", "waiting")),
-                   key=lambda k: (idx[k].status not in DONE, idx[k].started))
+                   key=lambda k: (not idx[k].nogame, idx[k].status not in DONE, idx[k].started))   # no-game first
     for k in order:
         if total <= cap:
             break
@@ -94,6 +102,13 @@ def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[s
         if k not in idx:
             total -= s
     return removed
+
+
+def end_time(e: Entry) -> float:
+    try:
+        return Path(e.path).stat().st_mtime
+    except OSError:
+        return e.started
 
 
 def folder_usage(idx: dict[str, Entry]) -> int:

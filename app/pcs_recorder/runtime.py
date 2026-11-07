@@ -445,12 +445,12 @@ def first_time_setup(s: st.Settings, say) -> None:
     if not obsmod.installed():
         obsmod.install(say)
     w, h = screen_size()
-    obsmod.write_config(s, s.encoder or "av1_texture_amf", w, h)
-    obsmod.launch()
     if not s.encoder:
         say("Testing your graphics card's encoders (a few seconds)…")
-        s.encoder = obsmod.pick_encoder(s, w, h, say)
+        s.encoder = obsmod.pick_encoder(s, w, h, say)       # leaves OBS running with that encoder
+    else:
         obsmod.write_config(s, s.encoder, w, h)
+        obsmod.launch()
     st.save(s)
     set_start_with_windows(s.start_with_windows)
     say(f"Auto-record is on. Recordings go to {s.folder_path} (kept {s.keep_days} days, max {s.max_gb} GB).")
@@ -535,6 +535,10 @@ class AutoRecorder:
         settings_window(self.root, self.s, self.rec.usage(), saved)
 
     def enable(self) -> None:
+        if getattr(self, "_setting_up", False):       # pressed twice: one setup at a time (two would fight)
+            return
+        self._setting_up = True
+
         def go():
             try:
                 first_time_setup(self.s, self.say)
@@ -543,4 +547,6 @@ class AutoRecorder:
                 self.s.enabled = False
                 st.save(self.s)
                 self.say(f"Auto-record setup failed: {e}")
+            finally:
+                self._setting_up = False
         threading.Thread(target=go, daemon=True).start()

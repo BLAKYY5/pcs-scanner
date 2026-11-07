@@ -27,13 +27,13 @@ import pcs_core as core
 WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
 UPDATE_EVERY_S = 6 * 3600           # update check in the background
-UPDATE_ON_OPEN_S = 30 * 60          # and when the window is opened, if the last check is older than this
+UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
-              "yt_team", "yt_wait_eec", "yt_wait_eec_h")
+              "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 
 
@@ -147,6 +147,15 @@ class Backend:
         if u and (not self.update or self.update[0] != u[0]):
             self.update = u
             self.say(f'Version {u[0]} is available: press "Update" at the top right.')
+
+    def install_update(self) -> str | None:
+        """Download and restart into the new version; returns why not, if it can't now."""
+        why = self.update_blocked()
+        if why:
+            return why
+        if self.update and self.update[1] and core.install_update(self.update[1], self.say):
+            threading.Timer(1.0, self.quit).start()
+        return None
 
     def update_blocked(self) -> str | None:
         """Never restart in the middle of a game, a recording, a scan or an upload."""
@@ -298,7 +307,8 @@ class Backend:
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
-                        "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt}
+                        "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
+                        "nogame": bool(norm in rec_index and getattr(rec_index[norm][1], "nogame", False))}
         return sorted(items.values(), key=lambda x: -x["mtime"])
 
     def find(self, item_id: str) -> dict | None:
@@ -734,12 +744,8 @@ class Server:
                         b.signin()
                         return self._json({"ok": True})
                     if path == "/api/update":
-                        why = b.update_blocked()
-                        if why:
-                            return self._json({"error": why}, 409)
-                        if b.update and b.update[1] and core.install_update(b.update[1], b.say):
-                            threading.Timer(1.0, b.quit).start()
-                        return self._json({"ok": True})
+                        why = b.install_update()
+                        return self._json({"error": why}, 409) if why else self._json({"ok": True})
                     if path == "/api/update/check":
                         threading.Thread(target=b.check_update, args=(UPDATE_ON_OPEN_S,), daemon=True).start()
                         return self._json({"ok": True})
