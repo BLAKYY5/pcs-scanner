@@ -253,6 +253,55 @@ def test_audio_tracks():
         srv.stop()
 
 
+def test_delete_and_sound_levels():
+    """Delete: app recordings for good (with their files), hand-added ones to the Recycle Bin; busy ones refused.
+    Sound levels: one value per half second per track; loud game stretches and loud mic moments found."""
+    import subprocess
+    from pcs_recorder import retention
+    folder = TMP / "del"
+    folder.mkdir(exist_ok=True)
+    own = folder / "Apex Legends_own.mp4"
+    busy = folder / "Apex Legends_busy.mp4"
+    mine = folder / "my vod.mp4"
+    if shutil.which("ffmpeg"):
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=black:s=64x36:d=30",
+                        "-f", "lavfi", "-i", "anoisesrc=d=30:a=0.01,volume='if(between(t,10,20),30,1)':eval=frame",
+                        "-f", "lavfi", "-i", "anoisesrc=d=30:a=0.005,volume='if(between(t,5,6),80,1)':eval=frame",
+                        "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c:v", "mpeg4", "-c:a", "aac", "-shortest", str(own)],
+                       check=True)
+    else:
+        own.write_bytes(b"x" * 1000)
+    own.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "mic"], "events": []}))
+    (folder / "Apex Legends_own.track2.m4a").write_bytes(b"a")
+    own.with_suffix(".scan").mkdir(exist_ok=True)
+    busy.write_bytes(b"y" * 100)
+    mine.write_bytes(b"z" * 100)
+    auto = _Auto(str(folder))
+    auto.rec.idx = {"k1": retention.Entry(path=str(own), started=time.time(), status="scanned"),
+                    "k2": retention.Entry(path=str(busy), started=time.time(), status="scanning")}
+    auto.rec.scan_key, auto.rec.lock = "k2", __import__("threading").RLock()
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(mine)])
+    lib = {x["name"]: x["id"] for x in b.library()}
+    if shutil.which("ffmpeg"):
+        lv = b.levels(lib[own.name])
+        assert [t["label"] for t in lv["tracks"]] == ["Game", "Microphone"] and len(lv["tracks"][0]["level"]) >= 59
+        assert lv["fights"] and 9 <= lv["fights"][0][0] <= 11 and 19 <= lv["fights"][0][1] <= 21.5, lv["fights"]
+        assert lv["calls"] and 4.5 <= lv["calls"][0] <= 6, lv["calls"]
+        assert own.with_name(own.stem + ".levels.json").exists()           # cached next to the recording
+        assert b.levels(lib[own.name]) == lv
+    real_save = retention.save_index
+    retention.save_index = lambda idx: None
+    try:
+        r = b.delete([lib[own.name], lib[busy.name], lib[mine.name]])
+    finally:
+        retention.save_index = real_save
+    assert sorted(r["deleted"]) == sorted([own.name, mine.name]) and r["skipped"] == [busy.name], r
+    assert not own.exists() and not (folder / "Apex Legends_own.track2.m4a").exists() and not own.with_suffix(".scan").exists()
+    assert not mine.exists() and busy.exists() and "k1" not in auto.rec.idx and "k2" in auto.rec.idx
+    assert str(mine) not in core.SETTINGS.get("library", [])
+
+
 def test_update_button_and_checks():
     """The Update button appears once a newer release is found; installing waits while Apex/recording/scan runs."""
     from pcs_recorder import core as rcore

@@ -133,11 +133,11 @@ input[type=range]{width:100%;accent-color:var(--brand)}
 .drop{border:1.5px dashed #3c3a35;border-radius:8px;padding:14px;text-align:center;color:var(--muted);transition:all .15s}
 .drop.over{border-color:var(--brand);background:var(--accent-soft);color:var(--ink)}
 .list{display:flex;flex-direction:column}
-.recrow{display:grid;grid-template-columns:28px minmax(0,1fr) 150px 80px 110px 270px;gap:12px;align-items:center;padding:11px 8px;border-bottom:1px solid var(--line)}
+.recrow{display:grid;grid-template-columns:28px minmax(0,1fr) 150px 70px 120px 390px;gap:12px;align-items:center;padding:11px 8px;border-bottom:1px solid var(--line)}
 .recrow:hover{background:rgba(255,255,255,.02)}
 .recrow .name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recrow .sub{display:flex;gap:6px;margin-top:3px;flex-wrap:wrap;align-items:center}
-.recrow .acts{display:flex;gap:6px;justify-content:flex-end}
+.recrow .acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
 .recrow input{width:16px;height:16px;accent-color:var(--brand)}
 .recrow.head{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding-top:0}
 .recrow.head:hover{background:none}
@@ -203,3 +203,12 @@ kbd{font:11px var(--mono);background:#26251f;border:1px solid #3a3833;border-bot
 .trk.off input{opacity:.35}
 input.hk{cursor:pointer;font-family:var(--mono)}
 input:disabled{opacity:.5}
+
+.btn.danger{color:#ff8a80}.btn.danger:hover{border-color:var(--accent)}
+.seen{position:absolute;top:10px;left:10px;max-width:46%;display:flex;flex-direction:column;gap:2px;background:rgba(10,10,9,.78);border:1px solid rgba(255,255,255,.12);border-left:3px solid var(--brand);border-radius:6px;padding:8px 11px;font-size:12.5px;pointer-events:none;backdrop-filter:blur(3px)}
+.seen b{font:600 14px var(--display);letter-spacing:.05em;text-transform:uppercase}
+.seen .ring{color:#c48bff}.seen .hot{color:var(--warn);font-weight:600}.seen .hot.blue{color:var(--info)}
+.seen .feedimgs{display:flex;flex-direction:column;gap:2px;margin-top:4px}.seen .feedimgs img{max-width:260px;border-radius:2px}
+.lane.sound{height:40px}
+.fight{position:absolute;top:0;bottom:0;background:rgba(230,173,69,.18);border-left:1px solid rgba(230,173,69,.8);border-right:1px solid rgba(230,173,69,.8);cursor:pointer}
+.mk.call{background:#6aa0ff;width:14px;height:14px;font-size:9px;top:30%}

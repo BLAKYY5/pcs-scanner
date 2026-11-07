@@ -37,6 +37,25 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 
 
+def to_recycle_bin(path: str) -> None:
+    """Windows Recycle Bin (can be restored); elsewhere a normal delete."""
+    if os.name != "nt":
+        os.remove(path)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
+    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_NOERRORUI = 3, 0x40, 0x10, 0x4, 0x400
+    op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
+                         FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
+    if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) != 0 or op.fAnyOperationsAborted:
+        raise OSError("couldn't move it to the Recycle Bin")
+
+
 def audio_tracks(video: str) -> list[dict]:
     """The recording's audio tracks: names from the recorder's .events.json, count from ffprobe."""
     import subprocess
@@ -100,6 +119,7 @@ class Backend:
         self.scan_now: str | None = None
         self.scan_lock = threading.Lock()
         self.scan_started = 0.0
+        self._levels_locks: dict[str, threading.Lock] = {}
         self._worker_running = False
         self.pick_files = lambda kind="video": []          # native "open files" dialog
         self.open_path = lambda p: os.startfile(p) if os.name == "nt" else None
@@ -310,7 +330,9 @@ class Backend:
                 games.append({k: g.get(k) for k in ("map", "mode", "tStart", "tEnd", "ring", "landing", "rankedShare",
                                                      "clockStart", "harvesters")}
                              | {"drop": {k: (g.get("drop") or {}).get(k) for k in ("spots", "err")},
-                                "track": [[s[0], s[4], s[5], s[6], s[7]] for s in g.get("samples", []) if s[4] is not None]})
+                                "track": [[s[0], s[4], s[5], s[6], s[7]] for s in g.get("samples", []) if s[4] is not None],
+                                # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]
+                                "seen": [[s[0], s[1], bool(s[3]), s[4], s[5], s[6], s[7]] for s in g.get("samples", [])]})
             it["games"] = games
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
@@ -323,6 +345,70 @@ class Backend:
                 pass
         it["audio"] = audio_tracks(it["path"])
         return it
+
+    # ------------------------------------------------------------- sound analysis for the review
+    def levels(self, item_id: str) -> dict | None:
+        it = self.find(item_id)
+        if not it:
+            return None
+        import pcs_levels
+        v = Path(it["path"])
+        own = v.with_suffix(".events.json").exists()
+        cache = (v.with_name(v.stem + ".levels.json") if own else Path(core.DATA) / "levels-cache" / f"{it['id']}.json")
+        lock = self._levels_locks.setdefault(item_id, threading.Lock())
+        with lock:                                         # one analysis per recording at a time
+            return pcs_levels.cached(str(v), audio_tracks(str(v)), cache)
+
+    # ------------------------------------------------------------- deleting
+    def delete(self, ids: list[str]) -> dict:
+        """App recordings: deleted for good with everything made from them (frees the space).
+        Files added by hand: sent to the Recycle Bin (they're yours; the scan results stay)."""
+        a = self.auto
+        idx = a.rec.idx if a else {}
+        busy_keys = set()
+        if a:
+            busy_keys = {k for k in (a.rec.current, a.rec.scan_key) if k} | set(a.rec.queue)
+            up = getattr(a.rec, "youtube", None)
+            if up:
+                busy_keys |= {k for b in up.state.values() if b.get("status") in ("waiting", "uploading")
+                              for k in b.get("keys", [])}
+        deleted, skipped, freed = [], [], 0
+        for item_id in ids:
+            it = self.find(item_id)
+            if not it:
+                continue
+            p = os.path.normcase(os.path.abspath(it["path"]))
+            key = next((k for k, e in idx.items() if e.path and os.path.normcase(os.path.abspath(e.path)) == p), None)
+            if it["path"] == self.scan_now or it["path"] in self.scan_queue or (key and key in busy_keys):
+                skipped.append(it["name"])
+                continue
+            try:
+                if key:
+                    from pcs_recorder import retention
+                    e = idx[key]
+                    for f in retention.files_of(e):
+                        freed += f.stat().st_size
+                        f.unlink()
+                    sc = Path(e.path).with_suffix(".scan")
+                    if sc.is_dir():
+                        import shutil
+                        shutil.rmtree(sc, ignore_errors=True)
+                    with a.rec.lock:
+                        del idx[key]
+                        retention.save_index(idx)
+                else:
+                    freed += it["size"]
+                    to_recycle_bin(it["path"])
+                    lib = core.SETTINGS.get("library", [])
+                    if it["path"] in lib:
+                        lib.remove(it["path"])
+                        core.save_settings()
+                deleted.append(it["name"])
+            except Exception as ex:
+                skipped.append(f"{it['name']} ({ex})")
+        if deleted:
+            self.say(f"Deleted {len(deleted)} recording(s), {freed / 1e9:.1f} GB freed.")
+        return {"deleted": deleted, "skipped": skipped, "freed": freed}
 
     # ------------------------------------------------------------- scanning by hand
     def queue_scans(self, ids: list[str]) -> int:
@@ -610,6 +696,9 @@ class Server:
                         return self._json(b.state())
                     if path == "/api/library":
                         return self._json(b.library())
+                    if path.startswith("/api/library/") and path.endswith("/levels"):
+                        d = b.levels(path.split("/")[3])
+                        return self._json(d) if d else self._json({"error": "not found"}, 404)
                     if path.startswith("/api/library/"):
                         d = b.detail(path.split("/")[3])
                         return self._json(d) if d else self._json({"error": "not found"}, 404)
@@ -659,6 +748,8 @@ class Server:
                         return self._json({"added": n})
                     if path == "/api/library/add":
                         return self._json({"added": b.add_paths(body.get("paths", []))})
+                    if path == "/api/library/delete":
+                        return self._json(b.delete(body.get("ids", [])))
                     if path == "/api/library/forget":
                         lib = core.SETTINGS.get("library", [])
                         it = b.find(body.get("id", ""))

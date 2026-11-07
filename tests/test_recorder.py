@@ -184,6 +184,8 @@ def test_hotkeys_marks_and_mutes():
     assert s.tracks() == ["game"]
     assert settings.parse_hotkey("ctrl+alt+m") and settings.parse_hotkey("m") is None
     assert settings.parse_hotkey("shift+1") is None   # needs ctrl, alt or win
+    assert settings.parse_hotkey("f5") and settings.parse_hotkey("shift+f8") and settings.parse_hotkey("num7")
+    assert settings.parse_hotkey("pause") and settings.Settings(hk_mark="F5").clamp().hk_mark == "f5"
     assert settings.Settings(hk_mark="shift+x").clamp().hk_mark == ""
 
 
