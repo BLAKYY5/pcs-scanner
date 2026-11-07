@@ -1,6 +1,6 @@
 """PCS Scanner shared logic (no window): paths, settings, Google Drive, updates, scanning.
 Used by the app window, the tray recorder and the headless --scan mode."""
-import os, sys, json, subprocess, urllib.request, logging
+import os, sys, json, time, subprocess, urllib.request, logging
 
 if os.name == 'nt':   # no console windows popping up for ffmpeg / ffprobe (also applies in the scanner's worker processes)
     _Popen = subprocess.Popen
@@ -132,21 +132,83 @@ def check_update():
         rel = json.load(urllib.request.urlopen(req, timeout=8))
         tag = rel.get('tag_name', '')
         if older_or_same(tag): return None
-        exe = next((a['browser_download_url'] for a in rel.get('assets', []) if a['name'].lower().endswith('.exe')), None)
-        return tag, exe, rel.get('html_url')
+        asset = next((a for a in rel.get('assets', []) if a['name'].lower().endswith('.exe')), None)
+        if not asset: return None
+        return tag, asset['browser_download_url'], rel.get('html_url'), asset.get('size')
     except Exception:
         return None
 
-def install_update(url, log):
-    """Download the new exe next to the current one, swap it in with a tiny batch file, restart."""
+UPDATE_LOG = os.path.join(DATA, 'update.log')
+
+def ulog(msg):
+    try:
+        with open(UPDATE_LOG, 'a', encoding='utf-8') as f: f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {msg}\n')
+    except OSError: pass
+
+def staged_path(cur=None):
+    cur = cur or sys.executable
+    return os.path.join(os.path.dirname(cur), 'PCS-Scanner.update.exe')
+
+def install_update(url, log, size=None):
+    """Download the new exe next to the current one and start it with --finish-update: once this app has
+    closed, the new exe copies itself over the old one and starts it (log in update.log)."""
     if not getattr(sys, 'frozen', False): return False
-    cur = sys.executable; new = cur + '.new'
-    log('Downloading update ...')
-    urllib.request.urlretrieve(url, new)
-    bat = os.path.join(DATA, 'update.bat')
-    open(bat, 'w').write(f'@echo off\r\nping -n 6 127.0.0.1 >nul\r\nmove /y "{new}" "{cur}" >nul\r\nstart "" "{cur}"\r\ndel "%~f0"\r\n')
-    subprocess.Popen(['cmd', '/c', bat], creationflags=0x08000000)
+    cur = sys.executable
+    new = staged_path(cur)
+    log('Downloading the update…')
+    ulog(f'download {url} -> {new}')
+    tmp = new + '.part'
+    urllib.request.urlretrieve(url, tmp)
+    got = os.path.getsize(tmp)
+    with open(tmp, 'rb') as f: head = f.read(2)
+    if head != b'MZ' or (size and got != size):
+        os.remove(tmp)
+        ulog(f'bad download: {got} bytes (expected {size}), header {head!r}')
+        raise RuntimeError('The download was incomplete. Try Update again.')
+    os.replace(tmp, new)
+    ulog(f'downloaded {got} bytes; starting the finisher')
+    spawn_detached([new, '--finish-update', cur, str(os.getpid())])
+    log('Update downloaded: PCS Scanner restarts in a few seconds.')
     return True
+
+def spawn_detached(cmd):
+    """Start a process that outlives this one, even if this app runs inside a Windows job that closes its
+    children when it exits (the old updater's restart could be killed that way)."""
+    DETACHED, NEW_GROUP, BREAKAWAY = 0x00000008, 0x00000200, 0x01000000
+    try:
+        return subprocess.Popen(cmd, creationflags=DETACHED | NEW_GROUP | BREAKAWAY, close_fds=True)
+    except OSError:
+        return subprocess.Popen(cmd, creationflags=DETACHED | NEW_GROUP, close_fds=True)
+
+def finish_update(cur, old_pid):
+    """Runs in the new exe: wait for the old app to close, copy over it, start it. Never leaves the player
+    without an app: if the copy fails, the old version is started again."""
+    import shutil
+    ulog(f'finisher started (waiting for {old_pid})')
+    try:
+        import psutil
+        try: psutil.Process(int(old_pid)).wait(timeout=60)
+        except psutil.NoSuchProcess: pass
+    except Exception as e:
+        ulog(f'wait: {e}'); time.sleep(8)
+    ok = False
+    for i in range(60):                                    # the old exe can stay locked a moment after exiting
+        try:
+            shutil.copy2(sys.executable, cur)
+            ok = True
+            break
+        except OSError as e:
+            if i == 0 or i % 10 == 9: ulog(f'copy attempt {i + 1}: {e}')
+            time.sleep(1)
+    ulog('copied, starting the new version' if ok else 'copy failed: starting the old version again')
+    spawn_detached([cur])
+
+def cleanup_staged():
+    """Remove the downloaded installer once the new version runs from its usual place."""
+    p = staged_path()
+    if getattr(sys, 'frozen', False) and os.path.abspath(sys.executable) != os.path.abspath(p) and os.path.exists(p):
+        try: os.remove(p)
+        except OSError: pass
 
 # ---------------- scanning ----------------
 def run_scan(files, log, out=OUT):

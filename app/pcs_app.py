@@ -202,15 +202,44 @@ class TkThread:
         return list(self.call(lambda: filedialog.askopenfilenames(title='Pick files', filetypes=types)) or [])
 
 
+_MUTEX = None
+
+
+def first_instance():
+    """One PCS Scanner per Windows session: a named mutex, held as long as this process runs (released by
+    Windows even if the app crashes)."""
+    global _MUTEX
+    if os.name != 'nt':
+        return True
+    import ctypes
+    k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+    k32.CreateMutexW.restype = ctypes.c_void_p
+    _MUTEX = k32.CreateMutexW(None, False, 'Local\\PCS-Scanner-app')
+    return ctypes.get_last_error() != 183                  # ERROR_ALREADY_EXISTS
+
+
+def show_running_instance():
+    try:
+        import socket
+        from pcs_recorder.runtime import GUARD_PORT
+        with socket.create_connection(('127.0.0.1', GUARD_PORT), timeout=2) as c:
+            c.sendall(b'show')
+    except Exception:
+        pass
+
+
 def main():
     background = '--background' in sys.argv
+    if not first_instance():
+        if not background:
+            show_running_instance()                        # the running one shows its window instead
+        return
+    core.cleanup_staged()
     try:
         from pcs_recorder import runtime as autorec
     except Exception:
         autorec = None
         logging.exception('auto-record unavailable')
-    if autorec and autorec.ask_running_instance_to_show():
-        return                                             # already running: it shows its window instead
 
     import pcs_server
     b = pcs_server.Backend()
@@ -311,4 +340,7 @@ if __name__ == '__main__':
         selftest(sys.argv[sys.argv.index('--selftest') + 1]); sys.exit(0)
     if '--scan' in sys.argv:
         sys.exit(headless_scan(sys.argv[sys.argv.index('--scan') + 1:]))
+    if '--finish-update' in sys.argv:
+        i = sys.argv.index('--finish-update')
+        core.finish_update(sys.argv[i + 1], sys.argv[i + 2]); sys.exit(0)
     main()
