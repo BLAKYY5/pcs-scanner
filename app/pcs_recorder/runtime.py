@@ -503,10 +503,14 @@ class AutoRecorder:
         except Exception:
             log.exception("tray icon unavailable")
             return
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
-        d = ImageDraw.Draw(img)
-        d.ellipse((6, 6, 58, 58), fill=(186, 28, 20))
-        d.ellipse((24, 24, 40, 40), fill=(255, 255, 255))
+        icon = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent)) / "assets" / "pcs.png"
+        try:
+            img = Image.open(icon)                       # the app's icon (same as the window's logo)
+        except OSError:
+            img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+            d = ImageDraw.Draw(img)
+            d.ellipse((6, 6, 58, 58), fill=(186, 28, 20))
+            d.ellipse((24, 24, 40, 40), fill=(255, 255, 255))
         menu = pystray.Menu(
             pystray.MenuItem(lambda _: ("● " if self.s.enabled else "○ ") + self.rec.status, None, enabled=False),
             pystray.MenuItem("Open PCS Scanner", lambda: self.ui.on_main(show_window), default=True),

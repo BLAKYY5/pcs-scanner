@@ -169,6 +169,10 @@ class TkThread:
             import tkinter as tk
             self.root = tk.Tk()
             self.root.withdraw()
+            try:                                           # the app's icon on its small windows too
+                self.root.iconbitmap(default=os.path.join(core.HERE, 'assets', 'pcs.ico'))
+            except Exception:
+                pass
             try:
                 setup(self.root)
             except Exception:
