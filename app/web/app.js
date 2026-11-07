@@ -59,6 +59,8 @@ function renderTop() {
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
 }
+// the window was opened again (from the tray): check for an update if the last check is old
+document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
 $('#updateBtn').onclick = async () => {
   if (!confirmBox('Download the new version now? The app restarts by itself.')) return;
   toast('Downloading the update…'); await api('/api/update', {}).catch(e => toast(e.message, true));

@@ -26,6 +26,8 @@ import pcs_core as core
 
 WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
+UPDATE_EVERY_S = 6 * 3600           # update check in the background
+UPDATE_ON_OPEN_S = 30 * 60          # and when the window is opened, if the last check is older than this
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
@@ -115,6 +117,34 @@ class Backend:
         except Exception:
             ok = False
         self.google = "ok" if ok else ("expired" if os.path.exists(core.TOKEN_F) else "none")
+
+    def check_update(self, min_age_s: float = 0) -> None:
+        """Ask GitHub for a newer release (60 requests/hour allowed without sign-in: far below what this uses)."""
+        if time.time() - getattr(self, "update_checked", 0) < min_age_s:
+            return
+        self.update_checked = time.time()
+        u = core.check_update()
+        if u and (not self.update or self.update[0] != u[0]):
+            self.update = u
+            self.say(f'Version {u[0]} is available: press "Update" at the top right.')
+
+    def update_blocked(self) -> str | None:
+        """Never restart in the middle of a game, a recording, a scan or an upload."""
+        a = self.auto
+        try:
+            from pcs_recorder.core import apex_running
+            if apex_running():
+                return "Apex is running. Update after your games."
+        except Exception:
+            pass
+        if a and a.rec.current is not None:
+            return "A recording is running. Update after your games."
+        if (a and a.rec.scan_proc is not None) or self.scan_now:
+            return "A scan is running. Update when it's done (a few minutes)."
+        up = getattr(a.rec, "youtube", None) if a else None
+        if up and up.thread and up.thread.is_alive():
+            return "A YouTube upload is running. Update when it's done."
+        return None
 
     def check_youtube(self) -> None:
         try:
@@ -615,8 +645,14 @@ class Server:
                         b.signin()
                         return self._json({"ok": True})
                     if path == "/api/update":
+                        why = b.update_blocked()
+                        if why:
+                            return self._json({"error": why}, 409)
                         if b.update and b.update[1] and core.install_update(b.update[1], b.say):
                             threading.Timer(1.0, b.quit).start()
+                        return self._json({"ok": True})
+                    if path == "/api/update/check":
+                        threading.Thread(target=b.check_update, args=(UPDATE_ON_OPEN_S,), daemon=True).start()
                         return self._json({"ok": True})
                     if path == "/api/library/pick":
                         n = b.add_paths(b.pick_files("video") or [])

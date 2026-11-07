@@ -253,6 +253,34 @@ def test_audio_tracks():
         srv.stop()
 
 
+def test_update_button_and_checks():
+    """The Update button appears once a newer release is found; installing waits while Apex/recording/scan runs."""
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend(_Auto(str(TMP / "recs-upd")))
+    calls = []
+    real_check, real_running = core.check_update, rcore.apex_running
+    core.check_update = lambda: (calls.append(1), ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x"))[1]
+    rcore.apex_running = lambda: False
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        assert call(srv, "/api/state")[1]["update"] is None
+        b.check_update()
+        assert call(srv, "/api/state")[1]["update"]["tag"] == "v9.9.9" and len(calls) == 1
+        b.check_update(pcs_server.UPDATE_ON_OPEN_S)        # window opened right after: no second request
+        assert len(calls) == 1
+        assert sum("v9.9.9" in m["text"] for m in b.messages) == 1
+        b.auto.rec.current = "rec-1"                       # recording: refused, nothing downloaded
+        code, r, _ = call(srv, "/api/update", {})
+        assert code == 409 and "recording" in r["error"].lower()
+        b.auto.rec.current = None
+        rcore.apex_running = lambda: True
+        assert call(srv, "/api/update", {})[0] == 409
+    finally:
+        core.check_update, rcore.apex_running = real_check, real_running
+        srv.stop()
+
+
 if __name__ == "__main__":
     try:
         for name, fn in list(globals().items()):
