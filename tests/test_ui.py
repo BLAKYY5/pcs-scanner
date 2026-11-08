@@ -133,6 +133,7 @@ class _S:            # recorder settings stand-in
     keep_days, max_gb, bitrate_mbps, game_audio, auto_scan, scan_delay_s, capture = 7, 100, 12, True, True, 60, "window"
     encoder, gb_per_hour = "av1_texture_amf", 5.5
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
+    mic_device = "default"
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -393,6 +394,47 @@ def test_update_button_and_checks():
         assert call(srv, "/api/update", {})[0] == 409
     finally:
         core.check_update, rcore.apex_running = real_check, real_running
+        srv.stop()
+
+
+def test_labels_queue_and_mics_api():
+    """Recordings carry a session label that can be changed; the YouTube queue and the microphone list are served."""
+    from pcs_recorder import labels, retention, settings as st, youtube
+    labels.FILE.unlink(missing_ok=True)
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    folder = TMP / "lab"
+    folder.mkdir(exist_ok=True)
+    v = folder / "Apex Legends_lab.mp4"
+    v.write_bytes(b"x" * 100)
+    os.utime(v, (time.time() - 7200, time.time() - 7200))
+    v.with_suffix(".scan").mkdir(exist_ok=True)
+    (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps({"games": [{"map": "SP", "mode": "ranked"}]}))
+    auto = _Auto(str(folder))
+    auto.rec.idx = {"k": retention.Entry(path=str(v), started=time.time() - 9000, status="scanned")}
+    s = st.Settings(folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    auto.rec.youtube = youtube.Uploader(s, auto.rec, None, lambda: None, lambda: False)
+    b = pcs_server.Backend(auto)
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        _, lib, _ = call(srv, "/api/library")
+        it = next(x for x in lib if x["name"] == v.name)
+        assert it["label"] == "ranked" and it["label_by_hand"] is False
+        code, r, _ = call(srv, "/api/label", {"id": it["id"], "label": "pubs"})
+        assert code == 200 and r["label"] == "pubs"
+        it = next(x for x in call(srv, "/api/library")[1] if x["name"] == v.name)
+        assert it["label"] == "pubs" and it["label_by_hand"] is True
+        assert call(srv, "/api/label", {"id": it["id"], "label": "casual"})[0] == 500
+        code, q, _ = call(srv, "/api/youtube/queue")
+        assert code == 200 and q["available"] and q["blocks"][0]["id"] == "k" and q["blocks"][0]["label"] == "pubs"
+        code, r, _ = call(srv, "/api/youtube/block", {"id": "k", "action": "label", "title": "scrims"})
+        assert code == 200 and labels.manual(str(v)) == "scrims"
+        code, r, _ = call(srv, "/api/youtube/block", {"id": "k", "action": "upload"})
+        assert code == 200 and r["status"] == "requested"
+        assert call(srv, "/api/youtube/block", {"id": "nope", "action": "skip"})[0] == 500
+        code, m, _ = call(srv, "/api/mics")
+        assert code == 200 and m["current"] == "default" and m["devices"][0]["id"] == "default"
+    finally:
         srv.stop()
 
 

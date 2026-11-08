@@ -165,6 +165,53 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
 
 # ------------------------------------------------------------------ running OBS
 
+MIC_KEY = r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture"
+PKEY_DESC = "{a45c254e-df1c-4efd-8020-67d146a850e0},2"      # "Microphone", "Headset Microphone"…
+PKEY_IFACE = "{b3f8fa53-0004-438e-9003-51a46e139bfc},6"     # "Blue Yeti", "Realtek(R) Audio"…
+
+
+def mic_devices() -> list[dict]:
+    """The PC's microphones (plugged in and enabled), as OBS names them: [{id, name}].
+    Read from the registry, where Windows lists its audio devices (no extra library needed)."""
+    try:
+        import winreg
+    except ImportError:
+        return []
+    out = []
+    try:
+        root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, MIC_KEY)
+    except OSError:
+        return []
+    with root:
+        i = 0
+        while True:
+            try:
+                guid = winreg.EnumKey(root, i)
+            except OSError:
+                break
+            i += 1
+            try:
+                with winreg.OpenKey(root, guid) as k:
+                    if winreg.QueryValueEx(k, "DeviceState")[0] != 1:      # 1 = active
+                        continue
+                with winreg.OpenKey(root, guid + r"\Properties") as k:
+                    desc = _reg_str(winreg, k, PKEY_DESC)
+                    iface = _reg_str(winreg, k, PKEY_IFACE)
+            except OSError:
+                continue
+            name = f"{desc} ({iface})" if desc and iface else (desc or iface or guid)
+            out.append({"id": "{0.0.1.00000000}." + guid.lower(), "name": name})
+    return sorted(out, key=lambda d: d["name"].lower())
+
+
+def _reg_str(winreg, key, name: str) -> str:
+    try:
+        v = winreg.QueryValueEx(key, name)[0]
+        return v if isinstance(v, str) else ""
+    except OSError:
+        return ""
+
+
 def is_running() -> bool:
     import psutil
     for p in psutil.process_iter(["exe"]):
@@ -178,7 +225,7 @@ def is_running() -> bool:
 
 def config_signature(s: Settings) -> str:
     """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up)."""
-    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}"
+    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}|{s.mic_device}"
 
 
 def close() -> None:
@@ -256,11 +303,11 @@ class OBS:
         c.create_input(SCENE, SOURCE, kind, settings, True)
         # sound: one source per track, each recorded on its own track only
         #   game    = Apex's sound only (application audio capture), never the rest of the PC
-        #   discord = Discord's sound only;  mic = the default microphone
+        #   discord = Discord's sound only;  mic = the microphone picked in the app (Windows default if none)
         sources = {
             "game": ("wasapi_process_output_capture", {"window": APEX_WINDOW, "priority": 2}),
             "discord": ("wasapi_process_output_capture", {"window": DISCORD_WINDOW, "priority": 2}),
-            "mic": ("wasapi_input_capture", {"device_id": "default"}),
+            "mic": ("wasapi_input_capture", {"device_id": s.mic_device or "default"}),
         }
         tracks = s.tracks()
         for i, t in enumerate(tracks, 1):

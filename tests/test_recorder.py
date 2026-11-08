@@ -725,6 +725,125 @@ def test_message_window_placement():
     root.destroy()
 
 
+def test_labels_and_youtube_queue():
+    """Session labels (scrims / ranked / pubs / wildcard) decide what goes to YouTube; the queue page can upload
+    now, skip, put back and set a title and privacy per block."""
+    import json
+    from pcs_recorder import labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    folder = TMP / f"ytq-{time.time_ns()}"
+    folder.mkdir()
+    base = time.time() - 6 * 3600
+    idx = {}
+    drop = {"spots": [{"poi": "x", "kind": "enemy"}]}
+    for key, start, games in (("p", 0, [{"map": "SP", "mode": "unknown", "tStart": 5}]),          # pubs: no proof
+                              ("s", 2 * 3600, [{"map": "WE", "mode": "scrim", "tStart": 5, "drop": drop}]),
+                              ("r", 4 * 3600, [{"map": "SP", "mode": "ranked", "tStart": 5}])):
+        v = folder / f"Apex Legends_{key}.mp4"
+        v.write_bytes(b"x")
+        end = base + start + 600
+        os.utime(v, (end, end))
+        v.with_suffix(".scan").mkdir()
+        (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps({"games": games}))
+        idx[key] = retention.Entry(path=str(v), started=base + start, status="scanned")
+    # automatic labels from the scan
+    assert labels.of(idx["s"].path, youtube.scan_of(idx["s"])) == ("scrims", False)
+    assert labels.of(idx["r"].path, youtube.scan_of(idx["r"])) == ("ranked", False)
+    assert labels.of(idx["p"].path, youtube.scan_of(idx["p"])) == (None, False)
+    labels.set_label(idx["p"].path, "pubs")
+    assert labels.of(idx["p"].path, {}) == ("pubs", True)
+    try:
+        labels.set_label(idx["p"].path, "casual")
+        assert False, "unknown label accepted"
+    except ValueError:
+        pass
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    assert up.ready_blocks() == [["s"]]
+    assert up.state["p"]["why"] == "labelled pubs" and up.state["r"]["why"] == "no scrim game"
+    q = {b["id"]: b for b in up.queue()}
+    assert [b["id"] for b in up.queue()] == ["r", "s", "p"]                  # newest first
+    assert q["p"]["status"] == "skipped" and q["p"]["label"] == "pubs" and q["p"]["label_by_hand"]
+    assert q["s"]["status"] == "pending" and q["s"]["why"] == "ready" and q["s"]["maps"] == ["World's Edge"]
+    # the ranked block was really scrims (no drop screen read): labelled by hand, it's judged again
+    labels.set_label(idx["r"].path, "scrims")
+    up.relabelled("r")
+    assert up.state["r"]["status"] is None and ["r"] in up.ready_blocks()
+    # a scrim labelled wildcard by hand isn't uploaded
+    labels.set_label(idx["s"].path, "wildcard")
+    up.relabelled("s")
+    assert ["s"] not in up.ready_blocks() and up.state["s"]["why"] == "labelled wildcard"
+    # queue actions
+    up.act("p", "upload")
+    assert up.state["p"]["status"] == "requested" and up.ready_blocks()[0] == ["p"]   # asked for by hand: first
+    up.act("r", "skip")
+    assert up.state["r"]["status"] == "skipped" and up.state["r"]["by_hand"]
+    assert ["r"] not in up.ready_blocks()
+    up.act("r", "edit", title="  Scrims night 2 · Xno POV ", privacy="private")
+    assert up.state["r"]["custom_title"] == "Scrims night 2 · Xno POV" and up.state["r"]["privacy"] == "private"
+    up.act("r", "unskip")
+    assert up.state["r"]["status"] is None and up.state["r"]["custom_title"] == "Scrims night 2 · Xno POV"
+    assert ["r"] in up.ready_blocks()
+    try:
+        up.act("r", "edit", privacy="everyone")
+        assert False
+    except RuntimeError:
+        pass
+    up.state["r"]["status"] = "done"
+    for action in ("upload", "skip"):
+        try:
+            up.act("r", action)
+            assert False, action
+        except RuntimeError:
+            pass
+    # the title word follows the label
+    title, desc, _ = youtube.describe(s, idx, ["p"], [0.0], kind="pubs")
+    assert title.startswith("Pubs ") and "Pubs session" in desc, title
+    title, _, _ = youtube.describe(s, idx, ["s"], [0.0])
+    assert title.startswith("Scrims "), title
+    assert "EEC" not in youtube.tags_for(s, desc, "pubs") and "pubs" in youtube.tags_for(s, desc, "pubs")
+
+
+def test_microphone_choice():
+    """The picked microphone goes to OBS's mic source, and changing it restarts OBS before the next recording."""
+    from pcs_recorder import obs as obsmod
+    s = settings.Settings()
+    assert s.mic_device == "default"
+    sig = obsmod.config_signature(s)
+    s.mic_device = "{0.0.1.00000000}.{8d5c2f9a-1111-2222-3333-444455556666}"
+    assert obsmod.config_signature(s) != sig
+    devs = obsmod.mic_devices()
+    assert isinstance(devs, list) and all({"id", "name"} <= set(d) for d in devs)
+    if os.name == "nt":
+        assert all(d["id"].startswith("{0.0.1.00000000}.{") for d in devs), devs
+    # prepare() creates the mic source with that device
+    created = {}
+
+    class C:
+        def __getattr__(self, name):
+            def f(*a, **k):
+                if name == "create_input":
+                    created[a[1]] = a[3]
+                if name == "get_scene_list":
+                    return type("x", (), {"scenes": []})()
+                if name == "get_input_list":
+                    return type("x", (), {"inputs": []})()
+                if name == "get_special_inputs":
+                    return type("x", (), {})()
+            return f
+    s.comms_consent = True
+    o = obsmod.OBS(s)
+    o.c = C()
+    o.prepare(1920, 1080)
+    assert created["PCS Mic"]["device_id"] == s.mic_device, created
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

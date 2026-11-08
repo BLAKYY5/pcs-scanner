@@ -141,6 +141,23 @@ input[type=range]{width:100%;accent-color:var(--brand)}
 .recrow input{width:16px;height:16px;accent-color:var(--brand)}
 .recrow.head{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);padding-top:0}
 .recrow.head:hover{background:none}
+select.label{appearance:none;-webkit-appearance:none;font:600 11px var(--mono);text-transform:uppercase;letter-spacing:.04em;padding:2px 9px;border-radius:999px;border:1px solid var(--line);background:transparent;color:var(--muted);cursor:pointer;width:auto}
+select.label option{background:#1d1c19;color:var(--ink);text-transform:none}
+select.label.auto{border-style:dashed}
+select.label.k-scrims{color:var(--accent);border-color:#6b231d;background:var(--accent-soft)}
+select.label.k-ranked{color:var(--warn);border-color:#5c4719;background:var(--warn-soft)}
+select.label.k-pubs{color:var(--good);border-color:#2b5a40;background:var(--good-soft)}
+select.label.k-wildcard{color:var(--info);border-color:#2a4270;background:var(--info-soft)}
+select.label:disabled{opacity:.5;cursor:default}
+#kindFilt{width:auto}
+.ytrow{display:grid;grid-template-columns:minmax(0,1fr) 260px 330px;gap:12px;align-items:center;padding:12px 8px;border-bottom:1px solid var(--line)}
+.ytrow .name{font-weight:600}
+.ytrow .sub{display:flex;gap:6px;margin-top:4px;flex-wrap:wrap;align-items:center}
+.ytrow .acts{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.ytstate{display:flex;flex-direction:column;gap:3px;align-items:flex-start}
+.ytstate small{font-size:12px;line-height:1.35}
+.ytform{grid-column:1/-1;padding:10px 0 2px}
+@media(max-width:980px){.ytrow{grid-template-columns:minmax(0,1fr)}.ytrow .acts{justify-content:flex-start}}
 @media(max-width:980px){.recrow{grid-template-columns:28px minmax(0,1fr) auto}.recrow .c3,.recrow .c4,.recrow .c5{display:none}}
 
 /* review */
