@@ -82,6 +82,7 @@ def test_server():
         code, st, _ = call(srv, "/api/state")
         assert code == 200 and st["recorder"] is None and st["version"]
 
+        b.coach = True                                     # importing by hand is the coach's
         # add a folder: only the video is added, once
         code, r, _ = call(srv, "/api/library/add", {"paths": [str(VIDEO.parent)]})
         assert r["added"] == 1, r
@@ -300,6 +301,42 @@ def test_delete_and_sound_levels():
     assert not own.exists() and not (folder / "Apex Legends_own.track2.m4a").exists() and not own.with_suffix(".scan").exists()
     assert not mine.exists() and busy.exists() and "k1" not in auto.rec.idx and "k2" in auto.rec.idx
     assert str(mine) not in core.SETTINGS.get("library", [])
+
+
+def test_coach_role():
+    """Coach only for the coach's Google account; importing recordings by hand is the coach's."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    real_build, real_drive = dict(core.BUILD), core.drive_service
+    core.BUILD["coach"] = "coach@example.com"
+    who = {"email": "player@example.com"}
+
+    class Svc:
+        def about(self):
+            class A:
+                def get(self, fields):
+                    class X:
+                        def execute(self):
+                            return {"user": {"emailAddress": who["email"]}}
+                    return X()
+            return A()
+    core.drive_service = lambda interactive=True: Svc()
+    try:
+        code, r, _ = call(srv, "/api/settings", {"role": "Coach", "player": "Xno"})
+        assert code == 403 and "coach" in r["error"].lower()
+        assert core.SETTINGS["player"] == "Xno" and core.SETTINGS.get("role") != "Coach"   # the rest was saved
+        assert call(srv, "/api/library/add", {"paths": []})[0] == 403
+        who["email"] = "Coach@Example.com"
+        code, st, _ = call(srv, "/api/settings", {"role": "Coach"})
+        assert code == 200 and st["coach"] is True and st["role"] == "Coach"
+        assert call(srv, "/api/library/add", {"paths": []})[0] == 200
+        code, st, _ = call(srv, "/api/settings", {"role": "IGL"})
+        assert st["coach"] is False
+    finally:
+        core.BUILD.clear(); core.BUILD.update(real_build); core.drive_service = real_drive
+        core.SETTINGS["role"] = ""
+        srv.stop()
 
 
 def test_update_finisher():

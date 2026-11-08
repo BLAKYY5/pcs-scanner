@@ -56,6 +56,7 @@ function renderTop() {
   else if (r.enabled) { cls += ' on'; text = 'Ready · waiting for Apex'; }
   if (S && S.scans.now) { cls = 'live on'; text = 'Scanning'; }
   pill.className = cls; pill.querySelector('span').textContent = text;
+  const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
 }
@@ -180,17 +181,17 @@ function renderRecordings() {
     <div class="pagehead"><div><h1>Recordings</h1><p>Your recordings and their scans. Review a recording to see drops, rings and fights on the timeline.</p></div>
       <div class="toolbar">
         <div class="seg" id="filt">${['all', 'scanned', 'not scanned'].map(f => `<button data-f="${f}" class="${f === filter ? 'on' : ''}">${f}</button>`).join('')}</div>
-        <button class="btn" id="add">Add recordings…</button>
+        ${S && S.coach ? '<button class="btn" id="add" title="Coach: import any recording or VOD (other teams, older games) to review and scan it">Import recordings…</button>' : ''}
         ${S && S.youtube && S.youtube.available ? '<button class="btn" id="eecRes" title="The lobby export from EEC (Download button on the lobby page): standing, points and kills go in the YouTube description">EEC results…</button>' : ''}
         <button class="btn" id="delSel" disabled>Delete selected</button>
         <button class="btn brand" id="scanSel" disabled>Scan selected</button>
       </div></div>
-    <div class="drop" id="dropzone">Drop recordings or folders here to add them${S && S.youtube && S.youtube.available ? ' · or an EEC lobby export (.json) for the YouTube description' : ''}</div>
+    <div class="drop" id="dropzone">${S && S.coach ? 'Drop recordings or folders here to import them' : 'Your games are added by auto-record'}${S && S.youtube && S.youtube.available ? ' · drop an EEC lobby export (.json) here for the YouTube description' : ''}</div>
     <section class="card" style="padding:6px 12px"><div class="list" id="list"><div class="empty">Loading…</div></div></section>
     <div class="row muted" style="font-size:13px"><button class="btn small ghost" id="openRes">Open results folder</button>
       ${S && S.recorder ? '<button class="btn small ghost" id="openRec">Open recordings folder</button>' : ''}</div>`;
   $$('#filt button').forEach(b => b.onclick = () => { filter = b.dataset.f; $$('#filt button').forEach(x => x.classList.toggle('on', x === b)); drawList(); });
-  $('#add').onclick = async () => { const r = await api('/api/library/pick', {}).catch(e => toast(e.message, true)); if (r) { toast(r.added ? `Added ${r.added} recording(s).` : 'Nothing added.'); loadLibrary(); } };
+  if ($('#add')) $('#add').onclick = async () => { const r = await api('/api/library/pick', {}).catch(e => toast(e.message, true)); if (r) { toast(r.added ? `Added ${r.added} recording(s).` : 'Nothing added.'); loadLibrary(); } };
   $('#scanSel').onclick = () => scan([...selected]);
   $('#delSel').onclick = () => deleteItems([...selected]);
   const er = $('#eecRes'); if (er) er.onclick = async () => {
@@ -618,7 +619,8 @@ function renderSettings() {
     <section class="card section"><h2>You</h2>
       <div class="form">
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
-        <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select></label>
+        <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub', 'Coach'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select>
+          <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s Google account.'}</small></label>
         <div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>

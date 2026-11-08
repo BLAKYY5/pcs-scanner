@@ -19,7 +19,7 @@ from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
 
-VERSION = '1.10.3'
+VERSION = '1.10.4'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
@@ -454,8 +454,19 @@ def timeline(games, samples, path=None, rank=None, mode=None):
         g['hud'] = {'samples': len(S), 'self': sum(1 for s in S if s[4] is not None and not s[3])}
         R = [r for t_, r in (rank or []) if lo <= t_ < hi]
         g['rankedShare'] = round(sum(R) / len(R), 2) if R else None
-        g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else 'scrim')
+        # scrim only with evidence: the pre-game drop screen was read and no ranked badge. Without the drop
+        # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
+        g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else ('scrim' if g['drop'] else 'unknown'))
         g['samples'] = S
+    # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
+    # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
+    prev = None
+    for g in games:
+        ld = g.get('landing') or {}
+        jump = ld.get('exitAtExact') or ld.get('landedAtExact')
+        if g['drop'] is None and jump is not None and jump < g['tStart']:
+            g['tStart'] = max(jump - 60, (prev + 60) if prev is not None else 0)
+        prev = g['tStart']
     return games
 
 def main():

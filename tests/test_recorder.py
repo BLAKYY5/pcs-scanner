@@ -215,8 +215,9 @@ def test_youtube_blocks():
         os.utime(v, (end, end))
         scan = v.with_suffix(".scan")
         scan.mkdir()
-        (scan / (v.stem + ".scan.json")).write_text(json.dumps({"games": [{"map": "BM", "mode": mode, "tStart": 2.0},
-                                                                          {"map": "WE", "mode": mode, "tStart": 20.0}]}))
+        drop = {"spots": [{"poi": "x", "kind": "enemy"}] * 20}
+        (scan / (v.stem + ".scan.json")).write_text(json.dumps({"games": [{"map": "BM", "mode": mode, "tStart": 2.0, "drop": drop},
+                                                                          {"map": "WE", "mode": mode, "tStart": 20.0, "drop": drop}]}))
         v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "mic"],
                                                              "events": [{"t": 5.0, "kind": "mark"}]}))
         idx[key] = retention.Entry(path=str(v), started=base + start, status="scanned")
@@ -325,9 +326,22 @@ def test_youtube_blocks():
     assert "EEC lobby: https://eternalesports.club/lobbies/7/abc123" in sent[-1][0]["snippet"]["description"]
     assert "EEC" in sent[-1][0]["snippet"]["tags"] and "Blakey" in sent[-1][0]["snippet"]["tags"]
     # by hand: the ranked block can still be uploaded
+    # an upload cut by quitting the app is judged again at the next start, not left "uploading" forever
+    youtube.save_state({"zz": {"keys": ["zz"], "status": "uploading"}})
+    assert youtube.Uploader(s, rec, ui, lambda: None, lambda: False).state["zz"]["status"] is None
+    youtube.save_state(up.state)
     assert up.request("c") == ["c"] and up.state["c"]["status"] == "requested"
     up.tick(); up.thread.join(120)
     assert up.state["c"]["status"] == "done"
+
+
+def test_scrim_needs_proof():
+    """Older scans called every game without a ranked badge 'scrim': a whole ranked session was uploaded as a
+    scrim block. A scrim now needs the scrim drop screen to have been read."""
+    from pcs_recorder.youtube import is_scrim
+    assert is_scrim({"mode": "scrim", "drop": {"spots": [1] * 20}})
+    assert not is_scrim({"mode": "scrim", "drop": None})          # old scan, no drop screen: not a scrim
+    assert not is_scrim({"mode": "ranked", "drop": {"spots": [1]}})
 
 
 def test_eec_results():

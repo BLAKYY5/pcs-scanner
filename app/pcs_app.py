@@ -302,7 +302,10 @@ def main():
                 b.say(f'EEC results not added: {e}')
         others = [p for p in paths if p not in jsons]
         if others:
-            b.say(f'Added {b.add_paths(others)} recording(s).')
+            if getattr(b, 'coach', False):
+                b.say(f'Added {b.add_paths(others)} recording(s).')
+            else:
+                b.say('Adding recordings by hand is for the coach. Your own games are added by auto-record.')
     win.on_drop = dropped
 
     if autorec and os.name == 'nt':
@@ -316,6 +319,7 @@ def main():
 
     def background_checks():
         b.check_google()
+        b.check_coach()
         b.check_youtube()
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
