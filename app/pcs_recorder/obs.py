@@ -236,10 +236,16 @@ class OBS:
         if SCENE not in [x["sceneName"] for x in c.get_scene_list().scenes]:
             c.create_scene(SCENE)
         c.set_current_program_scene(SCENE)
+        ours = (SOURCE, AUDIO, *TRACK_INPUTS.values())
         names = {i["inputName"] for i in c.get_input_list().inputs}
-        for n in (SOURCE, AUDIO, *TRACK_INPUTS.values()):
+        for n in ours:
             if n in names:
                 c.remove_input(n)
+        # OBS removes sources a moment later, not at once: creating one with the same name before that fails
+        # ("a source with that name already exists"), which stopped the whole encoder test on some PCs
+        end = time.time() + 10
+        while time.time() < end and {i["inputName"] for i in c.get_input_list().inputs} & set(ours):
+            time.sleep(0.2)
         kind, settings = {
             "window": ("window_capture", {"window": APEX_WINDOW, "priority": 2, "method": 2, "cursor": False,
                                           "capture_audio": False}),
@@ -308,16 +314,20 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
     (changing the encoder while OBS runs has no effect: every test would use the first one)."""
     names = gpu_names()
     vendor = gpu_vendor(names)
-    tried = []
+    tried, why = [], []
     for enc in encoder_candidates(vendor, names):
         tried.append(enc)
+        step = "starting OBS"
         try:
             close()
             write_config(s, enc, width, height)
             launch()
             obs = OBS(s)
+            step = "connecting to OBS"
             obs.connect()
+            step = "setting up the scene"
             obs.prepare(width, height, enc)
+            step = "starting the test recording"
             obs.c.start_record()
             time.sleep(3)
             if obs.recording():
@@ -328,9 +338,11 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
                 progress(f"Recording with {enc} ({vendor} graphics card).")
                 return enc
             log.info("encoder %s didn't start", enc)
+            why.append(f"{enc}: OBS couldn't start recording")
         except Exception as e:
-            log.info("encoder %s not usable: %s", enc, e)
+            log.info("encoder %s not usable (%s): %s", enc, step, e)
+            why.append(f"{enc}: {step} failed ({e})")
     close()                                                # also closes any error box OBS left open
     log.warning("no encoder worked on %r (tried %s)", names, tried)
-    raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}). "
-                       "Send Blakey the OBS log: Settings → About → Recorder logs.")
+    raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}): "
+                       + "; ".join(why) + ". Send Blakey this message and the OBS logs (Settings → About → Recorder logs).")
