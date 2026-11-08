@@ -62,6 +62,12 @@ def blocks(idx: dict[str, retention.Entry], gap_min: int) -> list[list[str]]:
     return out
 
 
+def is_scrim(g: dict) -> bool:
+    """A scrim game for sure: the scrim drop screen was read and the scan said scrim. Older scans called every
+    game without a ranked badge 'scrim' (a whole ranked session once went to YouTube that way)."""
+    return g.get("mode") == "scrim" and bool(g.get("drop"))
+
+
 def scan_of(e: retention.Entry) -> dict:
     f = Path(e.path).with_suffix(".scan") / (Path(e.path).stem + ".scan.json")
     try:
@@ -127,7 +133,7 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
     for k, off in zip(keys, offsets):
         for g in scan_of(idx[k]).get("games", []):
             if g.get("tStart") is not None:
-                games.append((off + g["tStart"], g.get("map"), g.get("mode"), our_drop(g),
+                games.append((off + g["tStart"], g.get("map"), "scrim" if is_scrim(g) else ("ranked" if g.get("mode") == "ranked" else "unknown"), our_drop(g),
                               idx[k].started + g["tStart"]))
         for m in events_of(idx[k]).get("events", []):
             if m.get("kind") == "mark":
@@ -342,8 +348,8 @@ class Uploader:
                                        "paste the lobby link (Recordings → EEC). The upload waits for it up to "
                                        f"{self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
                     continue                               # waiting for the link (at most yt_wait_eec_h)
-            if not requested and self.s.yt_scrims_only and not any(g.get("mode") == "scrim" for k in keys
-                                                 for g in scan_of(idx[k]).get("games", [])):
+            if not requested and self.s.yt_scrims_only and not st.get("eec_res") and not any(
+                    is_scrim(g) for k in keys for g in scan_of(idx[k]).get("games", [])):
                 self._set(bid, keys=keys, status="skipped", why="no scrim game")
                 save_state(self.state)
                 continue

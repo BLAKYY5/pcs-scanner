@@ -532,18 +532,54 @@ class Backend:
         up = getattr(a.rec, "youtube", None) if a else None
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
-                "role": core.SETTINGS.get("role", ""), "google": self.google,
+                "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
 
+    # ------------------------------------------------------------- coach
+    def check_coach(self) -> bool:
+        """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
+        checked against the Google account this app is signed in with, not just the menu choice."""
+        self.coach = False
+        if core.SETTINGS.get("role") != "Coach":
+            return False
+        want = (core.BUILD.get("coach") or "").strip().lower()
+        try:
+            svc = core.drive_service(interactive=False)
+            email = svc.about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"] if svc else ""
+        except Exception:
+            email = ""
+        self.coach = bool(want) and email.strip().lower() == want
+        return self.coach
+
+    def require_coach(self) -> None:
+        if not getattr(self, "coach", False):
+            raise PermissionError("Only the coach can do this (Settings → Role: Coach, signed in with the coach's "
+                                  "Google account).")
+
     def save_settings(self, body: dict) -> None:
+        body = dict(body)
+        role = body.pop("role", None)
+        self._save_settings(body)
+        if role is not None:                                 # last: refusing Coach must not lose the rest
+            self._save_settings({"role": role})
+
+    def _save_settings(self, body: dict) -> None:
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
         if "role" in body:
+            before = core.SETTINGS.get("role", "")
             core.SETTINGS["role"] = str(body["role"])
+            if body["role"] == "Coach" and not self.check_coach():
+                core.SETTINGS["role"] = before
+                core.save_settings()
+                raise PermissionError("Coach is reserved for the coach's Google account. Sign in with it first "
+                                      "(Settings → Google Drive), then choose Coach again.")
+            if body["role"] != "Coach":
+                self.coach = False
         core.save_settings()
         a = self.auto
         if a:
@@ -776,9 +812,11 @@ class Server:
                         threading.Thread(target=b.check_update, args=(UPDATE_ON_OPEN_S,), daemon=True).start()
                         return self._json({"ok": True})
                     if path == "/api/library/pick":
+                        b.require_coach()
                         n = b.add_paths(b.pick_files("video") or [])
                         return self._json({"added": n})
                     if path == "/api/library/add":
+                        b.require_coach()
                         return self._json({"added": b.add_paths(body.get("paths", []))})
                     if path == "/api/library/delete":
                         return self._json(b.delete(body.get("ids", [])))
@@ -833,6 +871,8 @@ class Server:
                         threading.Timer(0.3, b.quit).start()
                         return self._json({"ok": True})
                     return self._json({"error": "not found"}, 404)
+                except PermissionError as e:
+                    return self._json({"error": str(e)}, 403)
                 except Exception as e:
                     return self._json({"error": str(e)}, 500)
 
