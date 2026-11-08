@@ -30,6 +30,7 @@ class Settings:
     comms_consent: bool = False                        # the team agreed that voice comms are recorded
     discord_audio: bool = True                         # track 2: Discord only (needs comms_consent)
     mic_audio: bool = True                             # track 3: the player's microphone (needs comms_consent)
+    mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"

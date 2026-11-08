@@ -23,13 +23,14 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pcs_core as core
+from pcs_recorder import labels
 
 WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
 UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
-              "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "send_mic",
+              "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "mic_device", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
@@ -243,6 +244,54 @@ class Backend:
         self.say(f"Block of {len(keys)} recording(s) queued for YouTube. It uploads once Apex is closed.")
         return len(keys)
 
+    def yt_queue(self) -> dict:
+        a = self.auto
+        up = getattr(a.rec, "youtube", None) if a else None
+        if not up:
+            return {"available": False, "blocks": []}
+        return {"available": True, "enabled": bool(a.s.yt_enabled), "signed_in": self.youtube == "ok",
+                "privacy": a.s.yt_privacy, "now": up.status, "blocks": up.queue()}
+
+    def yt_block(self, bid: str, action: str, title: str | None = None, privacy: str | None = None) -> dict:
+        a = self.auto
+        if not a or not getattr(a.rec, "youtube", None):
+            raise RuntimeError("YouTube upload isn't available in this build")
+        up = a.rec.youtube
+        if action == "label":                          # the label of every recording in the block
+            kind = title or None
+            for k in up._block(bid):
+                labels.set_label(a.rec.idx[k].path, kind)
+            up.relabelled(bid)
+            self.say(f"Block labelled {labels.TITLE[kind]}." if kind else "Block label back to automatic.")
+            return {"id": bid, "label": kind}
+        r = up.act(bid, action, title, privacy)
+        self.say({"upload": "Block queued for YouTube: it uploads as soon as Apex is closed.",
+                  "skip": "Block skipped: it won't go to YouTube.",
+                  "unskip": "Block back in the queue (the usual rules apply).",
+                  "edit": "Saved: used when this block uploads."}.get(action, "Done."))
+        return {k: v for k, v in r.items() if k in ("id", "status", "custom_title", "privacy")}
+
+    def set_label(self, item_id: str, label: str | None) -> str | None:
+        it = self.find(item_id)
+        if not it:
+            raise RuntimeError("Recording not found")
+        labels.set_label(it["path"], label)
+        a = self.auto
+        if a and getattr(a.rec, "youtube", None):
+            key = next((k for k, e in a.rec.idx.items() if e.path and os.path.normcase(os.path.abspath(e.path)) ==
+                        os.path.normcase(os.path.abspath(it["path"]))), None)
+            if key:
+                a.rec.youtube.relabelled(key)
+        return label
+
+    def mics(self) -> dict:
+        from pcs_recorder import obs
+        cur = getattr(self.auto.s, "mic_device", "default") if self.auto else "default"
+        devs = obs.mic_devices()
+        if cur and cur != "default" and cur not in {d["id"] for d in devs}:
+            devs.append({"id": cur, "name": "Saved microphone (not plugged in)"})
+        return {"current": cur or "default", "devices": [{"id": "default", "name": "Windows default microphone"}] + devs}
+
     def signin(self) -> None:
         def go():
             try:
@@ -281,10 +330,10 @@ class Backend:
                 continue
             st = os.stat(p)
             scan, feed = scan_files(p)
-            summary = None
+            summary, full = None, {}
             if scan:
                 try:
-                    d = json.loads(scan.read_text(encoding="utf-8"))
+                    d = full = json.loads(scan.read_text(encoding="utf-8"))
                     summary = {"games": [{"map": g.get("map"), "mode": g.get("mode")} for g in d.get("games", [])],
                                "recStart": d.get("recStart"), "feedLines": d.get("perf", {}).get("feedLines")}
                 except Exception:
@@ -307,7 +356,9 @@ class Backend:
                 r = up.results_of(rec_index[norm][0])
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
+            label, by_hand = labels.of(p, full)
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
+                        "label": label, "label_by_hand": by_hand,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "nogame": bool(norm in rec_index and getattr(rec_index[norm][1], "nogame", False))}
         return sorted(items.values(), key=lambda x: -x["mtime"])
@@ -768,6 +819,10 @@ class Server:
                         return self._json(b.state())
                     if path == "/api/library":
                         return self._json(b.library())
+                    if path == "/api/youtube/queue":
+                        return self._json(b.yt_queue())
+                    if path == "/api/mics":
+                        return self._json(b.mics())
                     if path.startswith("/api/library/") and path.endswith("/levels"):
                         d = b.levels(path.split("/")[3])
                         return self._json(d) if d else self._json({"error": "not found"}, 404)
@@ -802,6 +857,11 @@ class Server:
                         return self._json({"added": b.add_eec_files(paths)})
                     if path == "/api/youtube/upload":
                         return self._json({"queued": b.yt_upload(body.get("id", ""))})
+                    if path == "/api/youtube/block":
+                        return self._json(b.yt_block(body.get("id", ""), body.get("action", ""),
+                                                     body.get("title"), body.get("privacy")))
+                    if path == "/api/label":
+                        return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
                     if path == "/api/signin":
                         b.signin()
                         return self._json({"ok": True})

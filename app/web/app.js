@@ -59,6 +59,7 @@ function renderTop() {
   const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
+  const yn = $('#nav a[data-page="youtube"]'); if (yn) yn.hidden = !(S && S.youtube && S.youtube.available);
 }
 // the window was opened again (from the tray): check for an update if the last check is old
 document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
@@ -92,6 +93,7 @@ function route() {
   else if (page === 'recordings') renderRecordings();
   else if (page === 'review') renderReview(pageArg);
   else if (page === 'settings') renderSettings();
+  else if (page === 'youtube') renderYouTube();
   else location.hash = '#home';
 }
 window.addEventListener('hashchange', route);
@@ -166,11 +168,19 @@ function gameChips(it) {
   const games = (it.scan && it.scan.games) || [];
   if (!it.scan) return '';
   if (!games.length) return '<span class="faint" style="font-size:12px">no game found</span>';
-  return games.map(g => `<span class="chip">${esc(mapName(g.map))}</span>`).join('');
+  const n = {}; games.forEach(g => { n[g.map] = (n[g.map] || 0) + 1; });
+  return Object.entries(n).map(([m, c]) => `<span class="chip">${esc(mapName(m))}${c > 1 ? ' ×' + c : ''}</span>`).join('');
 }
 
 /* ------------------------------------------------------------------ recordings */
-let filter = 'all', selected = new Set();
+let filter = 'all', kindFilter = '', selected = new Set();
+const KINDS = {scrims: 'Scrims', ranked: 'Ranked', pubs: 'Pubs', wildcard: 'Wildcard'};
+function labelSelect(label, byHand, attrs) {
+  const auto = !byHand;
+  return `<select class="label k-${label || 'none'} ${auto ? 'auto' : ''}" ${attrs} title="Session type. Auto = from the scan (scrim drop screen → Scrims, ranked badge → Ranked). Pubs and Wildcard are set by hand.">
+    <option value="" ${auto ? 'selected' : ''}>${label ? KINDS[label] + ' · auto' : 'Type?'}</option>
+    ${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${byHand && k === label ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
+}
 async function loadLibrary() {
   try { LIB = await api('/api/library'); } catch (e) { return; }
   if (page === 'recordings') drawList();
@@ -181,6 +191,7 @@ function renderRecordings() {
     <div class="pagehead"><div><h1>Recordings</h1><p>Your recordings and their scans. Review a recording to see drops, rings and fights on the timeline.</p></div>
       <div class="toolbar">
         <div class="seg" id="filt">${['all', 'scanned', 'not scanned'].map(f => `<button data-f="${f}" class="${f === filter ? 'on' : ''}">${f}</button>`).join('')}</div>
+        <select id="kindFilt" class="btn" aria-label="Session type"><option value="">All types</option>${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${k === kindFilter ? 'selected' : ''}>${v}</option>`).join('')}<option value="none" ${kindFilter === 'none' ? 'selected' : ''}>No type</option></select>
         ${S && S.coach ? '<button class="btn" id="add" title="Coach: import any recording or VOD (other teams, older games) to review and scan it">Import recordings…</button>' : ''}
         ${S && S.youtube && S.youtube.available ? '<button class="btn" id="eecRes" title="The lobby export from EEC (Download button on the lobby page): standing, points and kills go in the YouTube description">EEC results…</button>' : ''}
         <button class="btn" id="delSel" disabled>Delete selected</button>
@@ -192,6 +203,7 @@ function renderRecordings() {
       ${S && S.recorder ? '<button class="btn small ghost" id="openRec">Open recordings folder</button>' : ''}</div>`;
   $$('#filt button').forEach(b => b.onclick = () => { filter = b.dataset.f; $$('#filt button').forEach(x => x.classList.toggle('on', x === b)); drawList(); });
   if ($('#add')) $('#add').onclick = async () => { const r = await api('/api/library/pick', {}).catch(e => toast(e.message, true)); if (r) { toast(r.added ? `Added ${r.added} recording(s).` : 'Nothing added.'); loadLibrary(); } };
+  $('#kindFilt').onchange = e => { kindFilter = e.target.value; drawList(); };
   $('#scanSel').onclick = () => scan([...selected]);
   $('#delSel').onclick = () => deleteItems([...selected]);
   const er = $('#eecRes'); if (er) er.onclick = async () => {
@@ -207,7 +219,8 @@ function renderRecordings() {
 }
 function drawList() {
   const el = $('#list'); if (!el) return;
-  const items = LIB.filter(it => filter === 'all' || (filter === 'scanned' ? !!it.scan : !it.scan));
+  const items = LIB.filter(it => (filter === 'all' || (filter === 'scanned' ? !!it.scan : !it.scan)) &&
+    (!kindFilter || (kindFilter === 'none' ? !it.label : it.label === kindFilter)));
   selected = new Set([...selected].filter(id => LIB.some(it => it.id === id)));
   if (!items.length) {
     el.innerHTML = `<div class="empty"><strong>${LIB.length ? 'Nothing here' : 'No recordings yet'}</strong>${LIB.length ? 'Try another filter.' : 'Turn on auto-record, or add recordings with the button or by dropping them here.'}</div>`;
@@ -215,7 +228,7 @@ function drawList() {
     el.innerHTML = `<div class="recrow head"><span></span><span>Recording</span><span class="c3">Recorded</span><span class="c4">Size</span><span class="c5">Status</span><span></span></div>` +
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
-        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
+        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
         <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
@@ -229,6 +242,10 @@ function drawList() {
   $$('.recrow[data-id]', el).forEach(row => {
     const id = row.dataset.id;
     $('input', row).onchange = e => { e.target.checked ? selected.add(id) : selected.delete(id); syncSel(); };
+    const ls = $('select[data-label]', row); if (ls) ls.onchange = async () => {
+      try { await api('/api/label', {id, label: ls.value}); toast(ls.value ? `Labelled ${KINDS[ls.value]}.` : 'Type back to automatic.'); loadLibrary(); }
+      catch (e) { toast(e.message, true); }
+    };
     $$('[data-a]', row).forEach(b => b.onclick = async () => {
       if (b.dataset.a === 'scan') scan([id]);
       if (b.dataset.a === 'rescan') { try { const r = await api('/api/rescan', {ids: [id]}); toast(r.queued ? 'It will be scanned again (pauses by itself while Apex runs).' : 'Already being scanned.'); loadLibrary(); } catch (e) { toast(e.message, true); } }
@@ -650,7 +667,9 @@ function renderSettings() {
       </div>
       <div class="form" id="commsBox">
         <div class="field">${switchHTML('f-discord_audio', s.discord_audio, 'Discord', 'Discord\'s sound only')}</div>
-        <div class="field">${switchHTML('f-mic_audio', s.mic_audio, 'My microphone', 'Your default Windows microphone')}</div>
+        <div class="field">${switchHTML('f-mic_audio', s.mic_audio, 'My microphone', 'Your voice, on its own track')}</div>
+        <label class="field"><span>Microphone</span><select id="f-mic_device"><option value="${esc(s.mic_device || 'default')}">Loading…</option></select>
+          <small>Takes effect the next time Apex starts.</small></label>
         <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
       </div>
       <h3>Hotkeys while recording</h3>
@@ -675,7 +694,7 @@ function renderSettings() {
         <label class="field"><span>Sound on YouTube</span><select id="f-yt_audio">${[['game', 'Game only'], ['mix', 'Game + comms (Discord and mic)']].map(([v, l]) => `<option value="${v}" ${v === s.yt_audio ? 'selected' : ''} ${v === 'mix' && !s.comms_consent ? 'disabled' : ''}>${l}</option>`).join('')}</select>
           <small>${s.comms_consent ? 'Comms on YouTube means your team\'s voices are on the channel too.' : 'Comms need the team agreement above.'}</small></label>
         <label class="field"><span>Same block if less than (minutes) apart</span><input id="f-yt_gap_min" type="number" min="10" max="240" value="${s.yt_gap_min}"><small>Restarting Apex mid-block stays one video.</small></label>
-        <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks with only ranked or pubs')}</div>
+        <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks labelled ranked, pubs or wildcard (see the YouTube page)')}</div>
         <label class="field"><span>Team name (titles)</span><input id="f-yt_team" type="text" value="${esc(s.yt_team)}" maxlength="30"></label>
         <div class="field">${switchHTML('f-yt_wait_eec', s.yt_wait_eec, 'Wait for the EEC lobby link', 'You get a message after the block; paste the link in Recordings')}</div>
         <label class="field"><span>…but at most (hours)</span><input id="f-yt_wait_eec_h" type="number" min="1" max="72" value="${s.yt_wait_eec_h}"><small>Then it uploads without the link.</small></label>
@@ -712,8 +731,11 @@ function renderSettings() {
   $('#save').onclick = saveSettings;
   wireHotkeys();
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
+  const md = $('#f-mic_device'); if (md) api('/api/mics').then(m => {
+    md.innerHTML = m.devices.map(d => `<option value="${esc(d.id)}" ${d.id === m.current ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
+  }).catch(() => { md.innerHTML = '<option value="default">Windows default microphone</option>'; });
   const cc = $('#f-comms_consent'), box = $('#commsBox');
-  const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input', box).forEach(i => i.disabled = !cc.checked); } };
+  const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input, select', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
   const en = $('#f-enabled'); if (en) en.onchange = async () => {
     try { S = await api('/api/autorecord', {enabled: en.checked}); toast(en.checked ? 'Auto-record on.' : 'Auto-record off.'); renderTop(); }
@@ -723,13 +745,79 @@ function renderSettings() {
 async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
   if (S.recorder) {
-    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
+    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
   }
   try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }
   catch (e) { toast('Not saved: ' + e.message, true); }
+}
+
+/* ------------------------------------------------------------------ youtube queue */
+const YT_STATUS = {
+  done: ['good', 'On YouTube'], uploading: ['info', 'Uploading'], waiting: ['info', 'Preparing'],
+  requested: ['info', 'Next in line'], pending: ['', 'Waiting'], skipped: ['', 'Skipped'],
+  failed: ['bad', 'Failed'], 'waiting-retry': ['warn', 'Retrying soon'],
+};
+let ytEdit = null, ytTimer = null;
+function renderYouTube() {
+  $('#main').innerHTML = `
+    <div class="pagehead"><div><h1>YouTube queue</h1><p>One video per block of games, to the team channel. Change a block's type, upload it now, skip it, or set its title and privacy before it goes up.</p></div>
+      <div class="toolbar"><a class="btn ghost" href="#settings">YouTube settings</a><button class="btn" id="ytRefresh">Refresh</button></div></div>
+    <div id="ytNote"></div>
+    <section class="card" style="padding:6px 12px"><div class="list" id="ytList"><div class="empty">Loading…</div></div></section>`;
+  $('#ytRefresh').onclick = loadQueue;
+  clearInterval(ytTimer);
+  ytTimer = setInterval(() => { if (page !== 'youtube') return clearInterval(ytTimer); if (!ytEdit && !document.hidden) loadQueue(); }, 5000);
+  loadQueue();
+}
+async function loadQueue() {
+  let q; try { q = await api('/api/youtube/queue'); } catch (e) { return; }
+  if (page !== 'youtube') return;
+  const note = $('#ytNote'), el = $('#ytList');
+  note.innerHTML = !q.available ? '<div class="notice">YouTube upload isn\'t available in this build.</div>'
+    : !q.enabled ? '<div class="notice">YouTube upload is off: blocks only go up when you press Upload now. Turn it on in <a href="#settings">Settings → YouTube</a>.</div>'
+    : !q.signed_in ? '<div class="notice warn">Not signed in to the team channel yet: <a href="#settings">Settings → YouTube</a>.</div>'
+    : q.now ? `<div class="notice info">${esc(q.now)}</div>` : '';
+  if (!q.blocks.length) { el.innerHTML = '<div class="empty"><strong>No blocks yet</strong>Auto-recorded games appear here, grouped in blocks.</div>'; return; }
+  el.innerHTML = q.blocks.map(b => {
+    const [cls, word] = YT_STATUS[b.status] || ['', b.status];
+    const busy = ['uploading', 'waiting'].includes(b.status), done = b.status === 'done';
+    const acts = done ? `<a class="btn small brand" href="${esc(b.url)}" target="_blank" rel="noopener">Watch ↗</a>`
+      : busy ? '' : [
+        b.status !== 'requested' ? `<button class="btn small ${b.status === 'skipped' ? '' : 'brand'}" data-a="upload">${b.status === 'skipped' ? 'Upload anyway' : b.status === 'failed' ? 'Try again' : 'Upload now'}</button>` : '',
+        b.status === 'skipped' ? (b.why === 'skipped by you' ? '<button class="btn small ghost" data-a="unskip" title="Back to the automatic rules">Put back</button>' : '')
+          : '<button class="btn small ghost" data-a="skip" title="This block won\'t go to YouTube">Skip</button>',
+        '<button class="btn small ghost" data-a="edit">Title & privacy</button>'].join('');
+    const res = b.res ? ` · ${ordinal(b.res.standing)}/${b.res.teams}, ${b.res.pts} pts` : '';
+    const custom = b.custom_title || b.privacy ? `<div class="sub faint" style="font-size:12px">${b.custom_title ? 'Title: ' + esc(b.custom_title) : ''}${b.custom_title && b.privacy ? ' · ' : ''}${b.privacy ? esc(b.privacy) : ''}</div>` : '';
+    const form = ytEdit === b.id ? `<div class="ytform form">
+        <label class="field wide"><span>Title (empty = automatic)</span><input id="ye-title" maxlength="100" value="${esc(b.custom_title)}" placeholder="${esc(b.title || 'Scrims dd.mm.yyyy hh:mm · team · player POV · …')}"></label>
+        <label class="field"><span>Privacy</span><select id="ye-privacy">${[['', 'As in Settings (' + q.privacy + ')'], ['unlisted', 'Unlisted'], ['private', 'Private'], ['public', 'Public']].map(([v, l]) => `<option value="${v}" ${v === b.privacy ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+        <div class="row"><button class="btn small brand" data-a="save">Save</button><button class="btn small ghost" data-a="cancel">Cancel</button></div></div>` : '';
+    return `<div class="ytrow" data-id="${esc(b.id)}">
+      <div style="min-width:0"><div class="name">${fmtDate(b.start)} <span class="faint">→ ${new Date(b.end * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span></div>
+        <div class="sub">${done || busy ? (b.label ? `<span class="chip">${KINDS[b.label]}</span>` : '') : labelSelect(b.label, b.label_by_hand, 'data-label')}
+          <span class="faint" style="font-size:12px">${b.games} game${b.games === 1 ? '' : 's'}${b.maps.length ? ' · ' + esc(b.maps.join(', ')) : ''} · ${b.recordings} recording${b.recordings === 1 ? '' : 's'}${res}${b.eec && !b.res ? ' · EEC link' : ''}</span></div>${custom}</div>
+      <div class="ytstate"><span class="pill ${cls}">${word}</span><small class="muted">${esc(busy ? b.progress : b.why)}</small></div>
+      <div class="acts">${acts}</div>${form}</div>`;
+  }).join('');
+  $$('.ytrow', el).forEach(row => {
+    const id = row.dataset.id;
+    const act = async (action, extra) => {
+      try { await api('/api/youtube/block', {id, action, ...(extra || {})}); ytEdit = null; loadQueue(); }
+      catch (e) { toast(e.message, true); }
+    };
+    $$('[data-a]', row).forEach(b => b.onclick = () => {
+      const a = b.dataset.a;
+      if (a === 'edit') { ytEdit = ytEdit === id ? null : id; loadQueue(); }
+      else if (a === 'cancel') { ytEdit = null; loadQueue(); }
+      else if (a === 'save') act('edit', {title: $('#ye-title').value, privacy: $('#ye-privacy').value});
+      else act(a);
+    });
+    const ls = $('select[data-label]', row); if (ls) ls.onchange = () => act('label', {title: ls.value});
+  });
 }
 
 poll();

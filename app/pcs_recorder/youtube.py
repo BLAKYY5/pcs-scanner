@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import eec, retention
+from . import eec, labels, retention
 from .settings import APP_DIR, Settings
 
 log = logging.getLogger("recorder.youtube")
@@ -66,6 +66,11 @@ def is_scrim(g: dict) -> bool:
     """A scrim game for sure: the scrim drop screen was read and the scan said scrim. Older scans called every
     game without a ranked badge 'scrim' (a whole ranked session once went to YouTube that way)."""
     return g.get("mode") == "scrim" and bool(g.get("drop"))
+
+
+def block_label(idx, keys: list[str]) -> tuple[str | None, bool]:
+    """(scrims / ranked / pubs / wildcard / None, set by hand?) for a block of recordings."""
+    return labels.of_block([idx[k].path for k in keys], [scan_of(idx[k]) for k in keys])
 
 
 def scan_of(e: retention.Entry) -> dict:
@@ -121,13 +126,13 @@ def our_drop(g: dict) -> str | None:
     return " ".join(w.capitalize() for w in words)
 
 
-def tags_for(s: Settings, desc: str) -> list[str]:
-    tags = ["Apex Legends", "scrims", "EEC", s.yt_team or "PCS", s.player] + [m for m in MAP_NAMES.values() if m in desc]
+def tags_for(s: Settings, desc: str, kind: str | None = "scrims") -> list[str]:
+    tags = ["Apex Legends", kind or "", "EEC" if kind == "scrims" else "", s.yt_team or "PCS", s.player] + [m for m in MAP_NAMES.values() if m in desc]
     return [t for t in dict.fromkeys(tags) if t][:15]
 
 
 def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: list[str] | None = None,
-             audio: str = "game", results: dict | None = None) -> tuple[str, str, int]:
+             audio: str = "game", results: dict | None = None, kind: str | None = None) -> tuple[str, str, int]:
     """Title, description with chapters, and the number of games."""
     games, marks = [], []
     for k, off in zip(keys, offsets):
@@ -144,8 +149,11 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
     player = s.player or "Player"
     maps = ", ".join(dict.fromkeys(MAP_NAMES.get(g[1], g[1] or "?") for g in games)) or "no game found"
     scrim = any(g[2] == "scrim" for g in games)
+    kind = kind or ("scrims" if scrim else None)            # the label set in the app wins over the scan
+    scrim = kind == "scrims"
+    word = labels.TITLE.get(kind, "Session")
     standing = f" · {eec.ordinal(results['standing'])}/{results['teams']}, {pl(results['pts'], 'pt')}" if results else ""
-    title = (f"{'Scrims' if scrim else 'Session'} {start:%d.%m.%Y %H:%M} · {team} · {player} POV{standing} · "
+    title = (f"{word} {start:%d.%m.%Y %H:%M} · {team} · {player} POV{standing} · "
              f"{len(games)} game{'s' if len(games) != 1 else ''} ({maps})")[:100]
 
     per_game = {}
@@ -166,7 +174,7 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
             chapters.append((g[0], label(i, g)))
         elif len(chapters) == 1:
             chapters[0] = (0.0, label(i, g))               # the recording starts right at the game
-    lines = [f"{team} · {player} POV · {'EEC scrims' if scrim else 'Apex session'} · {start:%A %d %B %Y, %H:%M}"]
+    lines = [f"{team} · {player} POV · {'EEC scrims' if scrim else (word + ' session' if kind else 'Apex session')} · {start:%A %d %B %Y, %H:%M}"]
     if results:
         n = len(results.get("games", []))
         lines.append(f"Result: {eec.ordinal(results['standing'])}{' (tied)' if results.get('tied') else ''} of "
@@ -242,7 +250,7 @@ class Uploader:
 
     def _set(self, bid: str, **kw) -> dict:
         """Update a block's state, keeping what the player added (EEC links) and what was already asked."""
-        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "eec_res", "asked", "hub_tried")}
+        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "eec_res", "asked", "hub_tried", "custom_title", "privacy")}
         self.state[bid] = {**keep, **kw}
         return self.state[bid]
 
@@ -340,6 +348,11 @@ class Uploader:
                 if all(idx[k].status in ("skipped", "failed") for k in keys):
                     self._set(bid, keys=keys, status="skipped", why="not scanned")
                 continue                                   # wait for the scans (they give the chapters)
+            kind, by_hand = block_label(idx, keys)
+            if not requested and self.s.yt_scrims_only and by_hand and kind != "scrims":
+                self._set(bid, keys=keys, status="skipped", why=f"labelled {kind}")
+                save_state(self.state)
+                continue                                   # labelled by hand: no need to ask for EEC results
             self._try_hub(keys)
             st = self.state.get(bid, {})
             if self.s.yt_wait_eec and not (st.get("eec") or st.get("eec_res")) and not requested:
@@ -353,22 +366,26 @@ class Uploader:
                                        "paste the lobby link (Recordings → EEC). The upload waits for it up to "
                                        f"{self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
                     continue                               # waiting for the link (at most yt_wait_eec_h)
-            if not requested and self.s.yt_scrims_only and not st.get("eec_res") and not any(
-                    is_scrim(g) for k in keys for g in scan_of(idx[k]).get("games", [])):
+            if not requested and self.s.yt_scrims_only and kind != "scrims" and not st.get("eec_res"):
                 self._set(bid, keys=keys, status="skipped", why="no scrim game")
                 save_state(self.state)
                 continue
             out.append(keys)
+        # blocks asked for by hand go first
+        out.sort(key=lambda ks: self.state.get(ks[0], {}).get("status") != "requested")
         return out
 
     def tick(self) -> None:
         if not self.s.yt_enabled or (self.thread and self.thread.is_alive()) or self.is_apex_running():
             return
-        if self.night and not self.night.upload_allowed():
-            return
         ready = self.ready_blocks()
         if not ready:
             return
+        if self.night and not self.night.upload_allowed():
+            # "Upload now" in the app doesn't wait for the night
+            ready = [ks for ks in ready if self.state.get(ks[0], {}).get("status") == "requested"]
+            if not ready:
+                return
         if self.service() is None:
             if not self.told_signin:
                 self.told_signin = True
@@ -398,12 +415,14 @@ class Uploader:
             for p in paths:
                 offsets.append(t)
                 t += duration(p)
+            kind, _ = block_label(idx, keys)
             title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio,
-                                            results=st.get("eec_res"))
+                                            results=st.get("eec_res"), kind=kind)
+            title = (st.get("custom_title") or title)[:100]
             build_video(paths, tracks, audio, out)
             st.update(status="uploading", title=title)
             save_state(self.state)
-            vid = self._send(out, title, desc)
+            vid = self._send(out, title, desc, privacy=st.get("privacy"), kind=kind)
             st.update(status="done", video=vid, url=f"https://youtu.be/{vid}", at=self.clock())
             save_state(self.state)
             self.ui.notify("Scrim block on YouTube", f"{title}\nhttps://youtu.be/{vid}")
@@ -423,14 +442,14 @@ class Uploader:
             if self.night:
                 self.night.uploading(False)
 
-    def _send(self, path: Path, title: str, desc: str) -> str:
+    def _send(self, path: Path, title: str, desc: str, privacy: str | None = None, kind: str | None = "scrims") -> str:
         from googleapiclient.http import MediaFileUpload
         yt = self.service()
         if yt is None:
             raise ConnectionError("not signed in to YouTube")
         body = {"snippet": {"title": title, "description": desc, "categoryId": "20",           # 20 = Gaming
-                            "tags": tags_for(self.s, desc)},
-                "status": {"privacyStatus": self.s.yt_privacy, "selfDeclaredMadeForKids": False}}
+                            "tags": tags_for(self.s, desc, kind)},
+                "status": {"privacyStatus": privacy or self.s.yt_privacy, "selfDeclaredMadeForKids": False}}
         media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=16 * 1024 * 1024, resumable=True)
         req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
         resp = None
@@ -459,6 +478,114 @@ class Uploader:
             if key in b.get("keys", []):
                 return {"id": bid, **b}
         return None
+
+    # ---------------------------------------------------------- the queue in the app
+    def _block(self, bid: str) -> list[str]:
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if keys[0] == bid:
+                return keys
+        raise RuntimeError("This block isn't in your recordings any more")
+
+    def _pending_why(self, i: int, n: int, keys: list[str], st: dict) -> str:
+        """Why a block that hasn't been decided yet isn't uploading (no side effects, unlike ready_blocks)."""
+        idx = self.rec.idx
+        if not self.s.yt_enabled:
+            return "YouTube upload is off (Settings → YouTube)"
+        if st.get("status") != "requested" and idx[keys[0]].started < self.s.yt_since:
+            return "recorded before YouTube upload was turned on"
+        if self.rec.current is not None and i == n - 1:
+            return "the block is still being played"
+        left = self.s.yt_gap_min * 60 - (self.clock() - end_of(idx[keys[-1]]))
+        if left > 0:
+            return f"waiting {int(left // 60) + 1} min to be sure the block is over"
+        if any(idx[k].status not in DONE_STATES + ("skipped",) for k in keys):
+            return "waiting for the scans"
+        if st.get("status") != "requested" and self.s.yt_scrims_only:
+            kind, by_hand = block_label(idx, keys)
+            if by_hand and kind != "scrims":
+                return f"won't upload: labelled {labels.TITLE[kind]} (Scrims only is on)"
+        if st.get("status") == "requested":
+            if self.is_apex_running():
+                return "uploads as soon as Apex is closed"
+            return "uploads in a moment"
+        if self.s.yt_wait_eec and not (st.get("eec") or st.get("eec_res")):
+            return f"waiting for the EEC results (up to {self.s.yt_wait_eec_h} h)"
+        if self.night and not self.night.upload_allowed():
+            return f"waiting for the night ({self.s.night_from}:00 to {self.s.night_to}:00, PC idle)"
+        if self.is_apex_running():
+            return "waiting for Apex to close"
+        return "ready"
+
+    def queue(self, limit: int = 40) -> list[dict]:
+        """Every block, newest first, with what happens to it: on YouTube, uploading, waiting (and why), skipped."""
+        idx = self.rec.idx
+        all_blocks = blocks(idx, self.s.yt_gap_min)
+        out = []
+        for i, keys in enumerate(all_blocks):
+            bid = keys[0]
+            st = self.state.get(bid, {})
+            status = st.get("status")
+            if status in ("skipped", "failed") and st.get("keys") != keys:
+                status = None                              # the block grew since: judged again
+            games = [g for k in keys for g in scan_of(idx[k]).get("games", [])]
+            kind, by_hand = block_label(idx, keys)
+            item = {"id": bid, "keys": keys, "start": idx[keys[0]].started, "end": end_of(idx[keys[-1]]),
+                    "recordings": len(keys), "games": len(games),
+                    "maps": list(dict.fromkeys(MAP_NAMES.get(g.get("map"), g.get("map") or "?") for g in games)),
+                    "label": kind, "label_by_hand": by_hand, "status": status or "pending",
+                    "url": st.get("url"), "title": st.get("title"), "custom_title": st.get("custom_title", ""),
+                    "privacy": st.get("privacy", ""), "eec": bool(st.get("eec") or st.get("eec_res")),
+                    "res": {k: st["eec_res"].get(k) for k in ("standing", "teams", "pts")} if st.get("eec_res") else None,
+                    "why": "", "progress": ""}
+            if item["status"] in ("waiting", "uploading"):
+                item["progress"] = self.status
+            elif item["status"] == "skipped":
+                item["why"] = "skipped by you" if st.get("by_hand") else f"skipped: {st.get('why') or '?'}"
+            elif item["status"] in ("failed", "waiting-retry"):
+                item["why"] = f"failed: {st.get('error') or '?'}" + (" (trying again soon)" if item["status"] == "waiting-retry" else "")
+            elif item["status"] in ("pending", "requested"):
+                item["why"] = self._pending_why(i, len(all_blocks), keys, st)
+            out.append(item)
+        return out[::-1][:limit]
+
+    def act(self, bid: str, action: str, title: str | None = None, privacy: str | None = None) -> dict:
+        """Upload now / skip / put back / edit title and privacy, from the queue page."""
+        keys = self._block(bid)
+        st = self.state.get(bid, {})
+        if st.get("status") in ("waiting", "uploading"):
+            raise RuntimeError("This block is uploading right now")
+        if action == "upload":
+            if st.get("status") == "done":
+                raise RuntimeError("This block is already on YouTube")
+            self._set(bid, keys=keys, status="requested")
+        elif action == "skip":
+            if st.get("status") == "done":
+                raise RuntimeError("This block is already on YouTube (remove it in YouTube Studio)")
+            self._set(bid, keys=keys, status="skipped", why="by you", by_hand=True)
+        elif action == "unskip":                       # back to the automatic rules
+            self._set(bid, keys=keys, status=None)
+        elif action == "edit":
+            if st.get("status") == "done":
+                raise RuntimeError("This block is already on YouTube: edit it in YouTube Studio")
+            if privacy and privacy not in ("private", "unlisted", "public"):
+                raise RuntimeError("Privacy must be private, unlisted or public")
+            cur = self.state.setdefault(bid, {"keys": keys})
+            cur["custom_title"] = (title or "").strip()[:100]
+            cur["privacy"] = privacy or ""
+        else:
+            raise RuntimeError(f"Unknown action: {action}")
+        save_state(self.state)
+        return {"id": bid, **self.state.get(bid, {})}
+
+    def relabelled(self, key: str) -> None:
+        """A recording's label changed: its block is judged again if it had been skipped automatically."""
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if key in keys:
+                st = self.state.get(keys[0], {})
+                if st.get("status") == "skipped" and not st.get("by_hand"):
+                    self._set(keys[0], keys=keys, status=None)
+                    save_state(self.state)
+                return
 
 
 def _quiet() -> int:
