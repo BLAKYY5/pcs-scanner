@@ -326,6 +326,10 @@ def test_youtube_blocks():
     assert "EEC lobby: https://eternalesports.club/lobbies/7/abc123" in sent[-1][0]["snippet"]["description"]
     assert "EEC" in sent[-1][0]["snippet"]["tags"] and "Blakey" in sent[-1][0]["snippet"]["tags"]
     # by hand: the ranked block can still be uploaded
+    # an upload cut by quitting the app is judged again at the next start, not left "uploading" forever
+    youtube.save_state({"zz": {"keys": ["zz"], "status": "uploading"}})
+    assert youtube.Uploader(s, rec, ui, lambda: None, lambda: False).state["zz"]["status"] is None
+    youtube.save_state(up.state)
     assert up.request("c") == ["c"] and up.state["c"]["status"] == "requested"
     up.tick(); up.thread.join(120)
     assert up.state["c"]["status"] == "done"

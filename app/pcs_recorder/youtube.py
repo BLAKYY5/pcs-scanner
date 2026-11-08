@@ -230,6 +230,11 @@ class Uploader:
         self.service = service                    # () -> YouTube API client, or None when not signed in
         self.is_apex_running, self.clock = is_apex_running, clock
         self.state = load_state()
+        # an upload cut by quitting the app: judge that block again (it isn't on YouTube; YouTube drops
+        # unfinished uploads), instead of leaving it "uploading" forever
+        for st in self.state.values():
+            if st.get("status") in ("waiting", "uploading"):
+                st["status"] = "requested" if st.get("requested") else None
         self.thread: threading.Thread | None = None
         self.told_signin = False
         self.status = ""
