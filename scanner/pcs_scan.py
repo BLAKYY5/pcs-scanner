@@ -19,7 +19,7 @@ from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
 
-VERSION = '1.10.5'
+VERSION = '1.10.6'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
@@ -497,6 +497,18 @@ def main():
         if kind == 'video': games = split_restarts(games, samples)
         timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode)
         perf['refine'] = time.time() - t_tl
+        audio = None
+        if kind == 'video':     # sound cues from the game track back up what was read on screen
+            t_au = time.time()
+            try:
+                import pcs_audio
+                audio = pcs_audio.scan(path)
+                pcs_audio.attach(games, audio)
+            except Exception as e:      # never lose a scan to the sound check
+                audio = {'error': f'{type(e).__name__}: {e}'[:200]}
+            perf['audio'] = time.time() - t_au
+            if audio.get('cues'):
+                print(f"  sound: ring moving heard {len(audio['cues'].get('ring_moving', []))} time(s)", flush=True)
         st = rec_start(path)
         for gm in games:
             if st:
@@ -509,6 +521,7 @@ def main():
         res = {'scanner': VERSION, 'file': os.path.basename(path), 'recStart': st, 'scannedAt': datetime.datetime.now().isoformat(timespec='seconds'),
                'events': len(events), 'perf': {k: (round(v, 1) if isinstance(v, float) else v) for k, v in perf.items()},
                'ringLabels': labels.export(), 'games': games}
+        if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)
         print(f'  -> {len(games)} game(s): ' + '; '.join(f"{g['map']} drop={'yes' if g['drop'] else 'no'} harvesters={len(g['harvesters'])} ring phases={len(g.get('ring', []))} landing={'yes' if g.get('landing') else 'no'}" for g in games))

@@ -844,6 +844,45 @@ def test_microphone_choice():
     assert created["PCS Mic"]["device_id"] == s.mic_device, created
 
 
+def test_sound_ring_moving():
+    """The ring alarm (steady 374 + 533 Hz tones, pulsing) is found in noisy game sound, and matched to the rings
+    read on screen; other tones and plain noise don't trigger it."""
+    import subprocess
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_audio as A
+    sr = A.SR
+    rng = np.random.default_rng(1)
+    a = rng.normal(0, 0.05, sr * 120).astype(np.float32)            # 2 min of noise
+    t = np.arange(int(sr * 1.2)) / sr
+    pulse = 0.04 * (np.sin(2 * np.pi * 374.1 * t) + np.sin(2 * np.pi * 532.9 * t))
+    for start in (30.0, 80.0):                                       # two alarms, three pulses each
+        for k in range(3):
+            i = int((start + 1.75 * k) * sr)
+            a[i:i + len(pulse)] += pulse
+    other = 0.05 * np.sin(2 * np.pi * 440 * np.arange(sr * 3) / sr)   # a different tone
+    a[int(55 * sr):int(58 * sr)] += other
+    found = A.cues(a)["ring_moving"]
+    assert [round(c["t"]) for c in found] == [30, 80], found
+    assert all(c["pulses"] == 3 for c in found), found
+    games = [{"tStart": 0, "ring": [{"kind": "wait", "endsAt": 29.5}, {"kind": "closing", "endsAt": 50}]}]
+    A.attach(games, {"cues": {"ring_moving": found}})
+    assert abs(games[0]["ring"][0]["soundAt"] - 30) < 0.5 and "soundAt" not in games[0]["ring"][1]
+    assert [round(x) for x in games[0]["ringSound"]] == [80]
+    # read from a real file through ffmpeg
+    wav = TMP / "alarm.wav"
+    import wave
+    with wave.open(str(wav), "wb") as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(sr)
+        w.writeframes((np.clip(a, -1, 1) * 32767).astype("<i2").tobytes())
+    try:
+        r = A.scan(str(wav))
+    except FileNotFoundError:
+        return                                                       # no ffmpeg here
+    if "error" not in r:
+        assert [round(c["t"]) for c in r["cues"]["ring_moving"]] == [30, 80], r
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
