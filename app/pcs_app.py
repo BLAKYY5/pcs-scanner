@@ -23,7 +23,7 @@ from pcs_core import APP, OUT, BUILD, SETTINGS
 def selftest(out):
     """Used by the build: proves the libraries, the scanner and the interface files are inside the exe."""
     try:
-        import numpy, scipy.ndimage, PIL.Image, pcs_scan, pcs_hud, tkinter   # noqa: F401
+        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
