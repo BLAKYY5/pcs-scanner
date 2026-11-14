@@ -340,6 +340,58 @@ def test_coach_role():
         srv.stop()
 
 
+def test_team_link_weapon_icons():
+    """The weapon icons come from the Google Drive link the player pastes in Settings: only Drive links are taken,
+    only a real icons file is kept, and a new version of the file replaces the old one."""
+    import io
+    import numpy as np
+
+    def icons(n):
+        b = io.BytesIO()
+        np.savez_compressed(b, **{f"gun{i}": np.full((20, 50), 10 * i, np.uint8) for i in range(n)})
+        return b.getvalue()
+    fid = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    assert core.drive_link_id(f"https://drive.google.com/file/d/{fid}/view?usp=sharing") == fid
+    assert core.drive_link_id(f"https://drive.google.com/open?id={fid}") == fid
+    assert core.drive_link_id(f"https://evil.example.com/file/d/{fid}/view") is None
+    assert core.drive_link_id(f"http://drive.google.com/file/d/{fid}/view") is None
+    assert core.icons_valid(icons(3)) and not core.icons_valid(b"<html>Sign in</html>") and not core.icons_valid(b"PK\x03\x04junk")
+    big = io.BytesIO(); np.savez_compressed(big, gun=np.zeros((500, 900), np.uint8))
+    assert not core.icons_valid(big.getvalue())                      # not an icon: far too large a picture
+
+    served = {"data": icons(3), "urls": []}
+    real_get = core.http_get
+    core.http_get = lambda url, limit: (served["urls"].append(url), served["data"])[1]
+    Path(core.ICONS_F).unlink(missing_ok=True)
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        assert call(srv, "/api/state")[1]["icons"] is None and b.sync_icons() == "none"
+        assert call(srv, "/api/settings", {"team_link": "https://example.com/x"})[0] == 500
+        assert core.SETTINGS.get("team_link", "") == ""
+        code, st, _ = call(srv, "/api/settings", {"team_link": f"https://drive.google.com/file/d/{fid}/view"})
+        assert code == 200 and st["teamLink"].endswith("/view")
+        for _ in range(100):                                         # fetched in the background right after saving
+            if Path(core.ICONS_F).exists(): break
+            time.sleep(0.05)
+        assert Path(core.ICONS_F).read_bytes() == served["data"] and fid in served["urls"][0]
+        assert call(srv, "/api/state")[1]["icons"] is not None
+        assert b.sync_icons() == "same"
+        assert b.sync_icons(3600) == "skipped"                       # not asked again within the interval
+        served["data"] = icons(5)                                    # the coach replaced the file (new season)
+        n = len(b.messages)
+        assert b.sync_icons() == "updated" and Path(core.ICONS_F).read_bytes() == served["data"]
+        assert any("Weapon icons updated" in m["text"] for m in list(b.messages)[n:])
+        served["data"] = b"<html>You need access</html>"             # link no longer public: keep what we have
+        assert b.sync_icons() == "error" and core.icons_valid(Path(core.ICONS_F).read_bytes())
+    finally:
+        core.http_get = real_get
+        core.SETTINGS["team_link"] = ""
+        Path(core.ICONS_F).unlink(missing_ok=True)
+        srv.stop()
+
+
 def test_update_finisher():
     """The new exe waits for the old app to close, copies itself over it and starts it; if the copy keeps
     failing, the old version is started again (the player is never left without an app)."""

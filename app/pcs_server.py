@@ -149,6 +149,17 @@ class Backend:
             self.update = u
             self.say(f'Version {u[0]} is available: press "Update" at the top right.')
 
+    def sync_icons(self, min_age_s: float = 0, tell: bool = False) -> str:
+        """Fetch the weapon icons from the team link (Settings). Says something only when they changed, or
+        when the player just pasted the link (tell)."""
+        if time.time() - getattr(self, "icons_checked", 0) < min_age_s:
+            return "skipped"
+        self.icons_checked = time.time()
+        status, text = core.fetch_icons()
+        if text and (tell or status == "updated"):
+            self.say(text)
+        return status
+
     def install_update(self) -> str | None:
         """Download and restart into the new version; returns why not, if it can't now."""
         why = self.update_blocked()
@@ -584,6 +595,8 @@ class Backend:
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
+                "teamLink": core.SETTINGS.get("team_link", ""),
+                "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
@@ -621,6 +634,15 @@ class Backend:
     def _save_settings(self, body: dict) -> None:
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "team_link" in body:
+            link = str(body["team_link"]).strip()
+            if link and not core.drive_link_id(link):
+                raise ValueError("The team link must be a Google Drive link. Paste the link your coach sent.")
+            if link != core.SETTINGS.get("team_link", ""):
+                core.SETTINGS["team_link"] = link
+                core.save_settings()
+                if link:                                     # fetch now, in the background: the result shows in Activity
+                    threading.Thread(target=self.sync_icons, args=(0, True), daemon=True).start()
         if "role" in body:
             before = core.SETTINGS.get("role", "")
             core.SETTINGS["role"] = str(body["role"])

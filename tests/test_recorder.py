@@ -883,6 +883,63 @@ def test_sound_ring_moving():
         assert [round(c["t"]) for c in r["cues"]["ring_moving"]] == [30, 80], r
 
 
+def test_feed_weapon_icon():
+    """A kill line gets the name of its weapon icon (and whether the red arrow follows it); a line without an icon
+    gets none; without the private icons file the feed is captured exactly as before."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    rng = np.random.default_rng(3)
+
+    def shape(h, w):                                                 # a made-up icon: blocky white picture
+        s = (rng.random((h // 2, w // 3)) > 0.45).repeat(2, 0).repeat(3, 1)[:h, :w]
+        return np.pad((s * 255).astype(np.uint8), ((2, 2), (3, 3)))
+    icons = {"alpha_gun": shape(20, 54), "beta_gun": shape(24, 36)}
+    f = TMP / "weapons.npz"
+    np.savez_compressed(f, **icons)
+
+    def letters(img, x, y, n):                                       # stands in for a name: short white strokes
+        for k in range(n):
+            img[y + (0 if k % 2 else 9):y + (11 if k % 2 else 20), x + 7 * k:x + 7 * k + 3] = 255
+        return x + 7 * n
+
+    def frame(icon=None, arrow=False, y=300):
+        img = np.zeros((1440, 2560, 3), np.uint8)
+        x = letters(img, 2000, y, 14) + 18
+        if icon is not None:
+            t = icons[icon]; img[y - 2:y - 2 + t.shape[0], x:x + t.shape[1]] = t[..., None]; x += t.shape[1] + 12
+        if arrow: img[y + 2:y + 18, x:x + 12] = (230, 40, 30); x += 24
+        letters(img, 2470 - 7 * 16, y, 16)
+        return img
+
+    feed = HUD.Feed(HUD.Weapons(str(f)))
+    feed.read(frame("alpha_gun", arrow=True, y=300), 10.0)
+    feed.read(frame("beta_gun", y=360), 40.0)
+    feed.read(frame(None, y=420), 70.0)
+    assert len(feed.lines) == 3, feed.lines
+    a, b, c = feed.lines
+    assert a["weapon"] == "alpha_gun" and a["arrow"] is True and a["weaponScore"] >= 0.8, a
+    assert a["event"] == "knock", a                                  # red arrow = knock
+    assert b["weapon"] == "beta_gun" and b["arrow"] is False and b["weaponName"] == "Beta Gun", b
+    assert b["event"] == "kill", b                                   # a weapon without the arrow = kill
+    assert "weapon" not in c and set(c) == {"t", "y", "jpg"}, c
+    old = {k: os.environ.pop(k, None) for k in ("PCS_WEAPON_ICONS", "PCS_DATA_DIR")}
+    try:                                                             # the app's data folder is where the app puts the file
+        d = TMP / "data-icons"; d.mkdir(exist_ok=True)
+        os.environ["PCS_DATA_DIR"] = str(d)
+        assert HUD.weapon_file() in (None, str(Path(HUD.HERE) / "pcs_weapons.npz"))
+        np.savez_compressed(d / "pcs_weapons.npz", **icons)
+        assert HUD.weapon_file() == str(d / "pcs_weapons.npz") and len(HUD.Weapons().T) == 2
+    finally:
+        for k, v in old.items():
+            os.environ.pop(k, None)
+            if v is not None: os.environ[k] = v
+    assert HUD.WEAPON_NAMES["r97"] == "R-99"
+    plain = HUD.Feed(HUD.Weapons(str(TMP / "missing.npz")))          # no icons file: same lines, no weapon
+    plain.read(frame("alpha_gun", arrow=True), 10.0)
+    assert len(plain.lines) == 1 and set(plain.lines[0]) == {"t", "y", "jpg"}
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
