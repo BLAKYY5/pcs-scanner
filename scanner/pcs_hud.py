@@ -334,13 +334,121 @@ def red_arrow(rgb, x0, x1):
     p = np.asarray(rgb, np.int16)[:, max(0, x0):max(0, x1)]
     return int(((p[..., 0] > 170) & (p[..., 1] < 110) & (p[..., 2] < 110)).sum()) >= 25
 
+# ---------- who is on each side of a kill line ----------
+# Around the weapon icon a kill line reads:  killer  [weapon]  marker  victim.
+# Marker: red arrow = knock, gold skull = kill whose last bullet was a headshot, nothing = kill (Blakey, Nov 2026);
+# in ranked, kills that give RP show the victim's rank badge there, with '+N RP' after the name (kept as 'rank').
+# Names of our squad are drawn in the squad colours (orange, green, teal...), everyone else in white: that tells
+# "ours" from "theirs" without reading the name, in any alphabet.
+def _feed_masks(a):
+    r, g, b = a[..., 0], a[..., 1], a[..., 2]; mx = a.max(2); mn = a.min(2)
+    white = (mn > 195) & (mx - mn < 50)
+    red = (r > 170) & (g < 110) & (b < 110)
+    col = (mx > 165) & ((mx - mn) > 0.38 * mx) & ~red
+    gold = (r > 190) & (g > 130) & (g < 215) & (b < 120)
+    return white, red, col, gold
+
+def _gap_runs(c, gap):
+    out = []; s = l = None
+    for x in np.nonzero(c)[0]:
+        if s is None: s = l = x
+        elif x - l > gap: out.append((int(s), int(l) + 1)); s = l = x
+        else: l = x
+    if s is not None: out.append((int(s), int(l) + 1))
+    return out
+
+def _hue(p):
+    """Median hue in degrees of the pixels p (n x 3)."""
+    p = p.astype(np.float32); mx = p.max(1); mn = p.min(1); d = np.maximum(mx - mn, 1e-3)
+    r, g, b = p[:, 0], p[:, 1], p[:, 2]
+    h = np.where(mx == r, ((g - b) / d) % 6, np.where(mx == g, (b - r) / d + 2, (r - g) / d + 4)) * 60
+    return float(np.median(h))
+
+SQUAD_HUES = (('orange', 20, 58), ('green', 58, 105), ('teal', 150, 195), ('blue', 195, 250), ('purple', 250, 320))
+def _name(seg, white, col, run):
+    """One word of a name -> None (too little to say), {'side': 'other'} or {'side': 'squad', 'hue', 'color'}."""
+    s, e = run; w = int(white[:, s:e].sum()); c = int(col[:, s:e].sum())
+    if w + c < 40: return None
+    if c > 0.6 * (w + c):
+        h = _hue(seg[:, s:e][col[:, s:e]])
+        return {'side': 'squad', 'hue': round(h), 'color': next((n for n, lo, hi in SQUAD_HUES if lo <= h < hi), 'other')}
+    if w > 0.6 * (w + c): return {'side': 'other'}
+    return None
+
+def kill_parts(rgb, wp):
+    """rgb: a feed line at full size; wp: the weapon found in it (Weapons.match).
+    -> {'marker': 'arrow' | 'skull' | 'other' | None, 'killer': ..., 'victim': ...} (names as in _name)."""
+    a = np.asarray(rgb, np.int16); y0 = max(0, wp['y'] - 6); y1 = min(a.shape[0], wp['y'] + wp['h'] + 6)
+    out = {'marker': None, 'killer': None, 'victim': None}
+    seg = a[y0:y1, wp['x'] + wp['w'] - 2:]; white, red, col, gold = _feed_masks(seg); anyt = white | red | col
+    R = _gap_runs(anyt.sum(0) >= 2, 9); k = 0
+    if R and R[0][0] <= 45:
+        s, e = R[0]; n = max(1, int(anyt[:, s:e].sum())); w = e - s
+        ys = np.nonzero(anyt[:, s:e].sum(1) >= 2)[0]; h = int(ys[-1] - ys[0] + 1) if len(ys) else 0
+        if w <= 22 and red[:, s:e].sum() >= 0.5 * n: out['marker'] = 'arrow'; k = 1
+        elif 22 <= w <= 40 and h >= 28 and gold[:, s:e].sum() >= 0.45 * n: out['marker'] = 'skull'; k = 1
+        elif w <= 22 and white[:, s:e].sum() < 0.3 * n: out['marker'] = 'rank'; k = 1
+    if out['marker'] is None:      # a line that is fading out: the arrow is only a pale red smear before the name
+        z = seg[:, 16:52]      # red, not the orange of a squad name: green well under red
+        soft = (z[..., 0] > 120) & (z[..., 0] - np.maximum(z[..., 1], z[..., 2]) > 60) & (z[..., 1] < 0.56 * z[..., 0])
+        cols = soft.sum(0) >= 3
+        if soft.sum() >= 40 and 5 <= int(cols.sum()) <= 24 and not (white[:, 16:52] & ~soft).sum() > 60:
+            out['marker'] = 'arrow'; R = [r for r in R if r[0] >= 46] if R and R[0][0] < 46 else R; k = 0
+    if len(R) > k and R[k][0] <= 115:
+        out['victim'] = _name(seg, white, col, R[k]); out['victimSig'] = _sig(white | col, R[k:], +1)
+    seg = a[y0:y1, :max(0, wp['x'] + 2)]; white, red, col, gold = _feed_masks(seg)
+    R = _gap_runs((white | col).sum(0) >= 2, 9)
+    if R and seg.shape[1] - R[-1][1] <= 45:
+        out['killer'] = _name(seg, white, col, R[-1]); out['killerSig'] = _sig(white | col, R, -1)
+    return out
+
+def _sig(mask, R, direction):
+    """Shape of a whole name (its words, up to the first wide gap) as 36 hex digits: the same name gives nearly the
+    same digits, so one line captured twice (the feed scrolls and fades) can be recognised. Not readable text."""
+    R = list(R) if direction > 0 else list(R)[::-1]; x0, x1 = R[0]
+    for s, e in R[1:]:
+        if (s - x1 if direction > 0 else x0 - e) > 26 or (max(e, x1) - min(s, x0)) > 300: break
+        x0, x1 = min(x0, s), max(x1, e)
+    m = mask[:, x0:x1]; ys = np.nonzero(m.sum(1) >= 2)[0]
+    if len(ys) < 4 or x1 - x0 < 8: return None
+    m = m[ys[0]:ys[-1] + 1]
+    bits = np.array(Image.fromarray((m * 255).astype(np.uint8)).resize((24, 6), Image.BILINEAR)) > 60
+    return '%036x' % int(''.join('1' if b else '0' for b in bits.ravel()), 2)
+
+def _same_sig(a, b):
+    if not a or not b: return a == b
+    return bin(int(a, 16) ^ int(b, 16)).count('1') <= 26          # of 144 points
+
+def feed_stats(lines, t0, t1):
+    """What the kill lines between t0 and t1 say about our squad: knocks and kills we made, times we went down."""
+    s = {'squadKnocks': 0, 'squadKills': 0, 'squadKnocked': 0, 'squadKilled': 0, 'headshotKills': 0}
+    seen = []
+    for l in lines:
+        if not (t0 <= l['t'] < t1) or 'event' not in l: continue
+        k = (l.get('killer') or {}).get('side'); v = (l.get('victim') or {}).get('side')
+        if k == 'squad' and v == 'squad': continue          # firing range / friendly fire: not a fight
+        if k != 'squad' and v != 'squad': continue
+        # the feed scrolls and fades, so one line is often captured two or three times: count it once
+        if any(l['t'] - p['t'] < 25 and p['event'] == l['event'] and p.get('weapon') == l.get('weapon')
+               and _same_sig(p.get('killerSig'), l.get('killerSig')) and _same_sig(p.get('victimSig'), l.get('victimSig')) for p in seen):
+            continue
+        seen.append(l)
+        knock = l['event'] == 'knock'
+        if k == 'squad':
+            s['squadKnocks' if knock else 'squadKills'] += 1
+            if l.get('headshot'): s['headshotKills'] += 1
+        if v == 'squad': s['squadKnocked' if knock else 'squadKilled'] += 1
+    return s
+
 # ---------- kill feed / event feed (top right): every new line saved once, read by Claude at import ----------
 class Feed:
     """Lines of the feed under 'squads left' (kills, knocks, shield breaks, pings, squad eliminations,
     kill leader). Each new line is kept once as a small colour JPEG + time; text is read at import.
     A line that shows a weapon icon also gets 'weapon' (the game's name for it), 'weaponName', 'weaponScore',
     'arrow' (red arrow after the icon) and 'event' when the weapon icons file is present. The red arrow means a
-    knock; a weapon line without it is a kill (Blakey, 14 Nov 2026)."""
+    knock; a weapon line without it is a kill (Blakey, 14 Nov 2026). Such a line also gets, when they can be told:
+    'marker' (arrow / skull / rank), 'headshot' (gold skull: the kill's last bullet was a headshot), and 'killer' /
+    'victim' = {'side': 'squad' or 'other'} with the squad colour ('hue', 'color') for our own squad's names."""
     X0, X1, Y0, Y1 = 1820, 2470, 260, 640
     def __init__(self, weapons=None): self.recent = []; self.lines = []; self.weapons = weapons if weapons is not None else Weapons()
     @staticmethod
@@ -388,6 +496,14 @@ class Feed:
                     arrow = red_arrow(full, wp['x'] + wp['w'], wp['x'] + wp['w'] + 80)
                     line.update(weapon=wp['weapon'], weaponName=WEAPON_NAMES.get(wp['weapon'], wp['weapon'].replace('_', ' ').title()),
                                 weaponScore=round(wp['score'], 2), arrow=arrow, event='knock' if arrow else 'kill')
+                    try:
+                        kp = kill_parts(full, wp)
+                        if kp['marker'] == 'arrow' and not arrow: line.update(arrow=True, event='knock')   # arrow fading out
+                        if kp['marker'] == 'skull' and not line['arrow']: line['headshot'] = True
+                        if kp['marker']: line['marker'] = kp['marker']
+                        for key in ('killer', 'victim', 'killerSig', 'victimSig'):
+                            if kp.get(key): line[key] = kp[key]
+                    except Exception: pass
             except Exception: pass
             self.lines.append(line)
 
