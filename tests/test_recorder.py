@@ -1,4 +1,4 @@
-"""Tests for the recorder's logic with a fake OBS, fake Apex process and fake scanner.
+﻿"""Tests for the recorder's logic with a fake OBS, fake Apex process and fake scanner.
 Run:  python tests/test_recorder.py
 """
 import os
@@ -883,6 +883,18 @@ def test_sound_ring_moving():
         assert [round(c["t"]) for c in r["cues"]["ring_moving"]] == [30, 80], r
 
 
+def test_scanner_no_function_defined_twice():
+    """A second function with the same name silently replaces the first one (the scanner's files are long): a new
+    helper once took the name of the pre-ring clock's helper and every scan failed. Caught here instead."""
+    import ast
+    import collections
+    for f in sorted((Path(__file__).resolve().parent.parent / "scanner").glob("*.py")):
+        tree = ast.parse(f.read_text(encoding="utf-8"))
+        names = collections.Counter(n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)))
+        twice = [k for k, v in names.items() if v > 1]
+        assert not twice, f"{f.name}: defined twice: {twice}"
+
+
 def test_feed_weapon_icon():
     """A kill line gets the name of its weapon icon (and whether the red arrow follows it); a line without an icon
     gets none; without the private icons file the feed is captured exactly as before."""
@@ -923,6 +935,42 @@ def test_feed_weapon_icon():
     assert b["weapon"] == "beta_gun" and b["arrow"] is False and b["weaponName"] == "Beta Gun", b
     assert b["event"] == "kill", b                                   # a weapon without the arrow = kill
     assert "weapon" not in c and set(c) == {"t", "y", "jpg"}, c
+    assert a["marker"] == "arrow" and a["killer"] == {"side": "other"}, a
+
+    # who is on each side: our squad's names are coloured, everyone else's are white; gold skull = headshot kill
+    ORANGE, GREEN, WHITE = (255, 165, 40), (150, 215, 60), (255, 255, 255)
+
+    def kill_line(killer, victim, marker=None, icon="alpha_gun", y=300, shift=0):
+        img = np.zeros((1440, 2560, 3), np.uint8)
+
+        def name(x, n, colour):
+            for k in range(n):
+                img[y + (0 if k % 2 else 9):y + (11 if k % 2 else 20), x + 7 * k:x + 7 * k + 3] = colour
+            return x + 7 * n
+        x = name(1960 + shift, 14, killer) + 18
+        t = icons[icon]; img[y - 2:y - 2 + t.shape[0], x:x + t.shape[1]] = t[..., None]; x += t.shape[1] + 22
+        if marker == "arrow": img[y + 1:y + 19, x:x + 12] = (230, 40, 30)
+        if marker == "skull": img[y - 6:y + 28, x - 6:x + 24] = (240, 180, 60)
+        name(x + (34 if marker else 4), 16 if marker else 19, victim)  # without a marker the name starts right after the icon
+        img[y + 9:y + 20, 2440:2468:7] = 255                          # something at the right edge, as on the real HUD
+        img[y + 9:y + 20, 2441:2469:7] = 255
+        return img
+    feed = HUD.Feed(HUD.Weapons(str(f)))
+    feed.read(kill_line(ORANGE, WHITE, "arrow", y=300), 100.0)                 # we knock someone
+    feed.read(kill_line(ORANGE, WHITE, None, y=380), 130.0)                    # then the kill
+    feed.read(kill_line(WHITE, GREEN, "arrow", icon="beta_gun", y=420), 150.0) # one of us goes down
+    feed.read(kill_line(GREEN, WHITE, "skull", icon="beta_gun", y=460), 190.0) # headshot kill by another of us
+    feed.read(kill_line(WHITE, WHITE, None, y=500), 230.0)                     # nothing to do with us
+    L = [{k: v for k, v in l.items() if k != "jpg"} for l in feed.lines if "event" in l]
+    assert [l["event"] for l in L] == ["knock", "kill", "knock", "kill", "kill"], L
+    assert [(l["killer"]["side"], l["victim"]["side"]) for l in L] == [("squad", "other")] * 2 + [("other", "squad"), ("squad", "other"), ("other", "other")], L
+    assert L[0]["killer"]["color"] == "orange" and L[2]["victim"]["color"] == "green" and L[3]["killer"]["color"] == "green", L
+    assert L[3].get("headshot") is True and L[3]["marker"] == "skull" and "headshot" not in L[1], L
+    want = {"squadKnocks": 1, "squadKills": 2, "squadKnocked": 1, "squadKilled": 0, "headshotKills": 1}
+    assert HUD.feed_stats(L, 0, 1000) == want, HUD.feed_stats(L, 0, 1000)
+    again = sorted(L + [dict(L[0], t=104.0, y=340), dict(L[2], t=158.0)], key=lambda l: l["t"])   # the feed scrolls: the
+    assert HUD.feed_stats(again, 0, 1000) == want                    # same line caught twice is counted once
+    assert HUD.feed_stats(L, 0, 140)["squadKills"] == 1              # only the lines of that game's time window
     old = {k: os.environ.pop(k, None) for k in ("PCS_WEAPON_ICONS", "PCS_DATA_DIR")}
     try:                                                             # the app's data folder is where the app puts the file
         d = TMP / "data-icons"; d.mkdir(exist_ok=True)

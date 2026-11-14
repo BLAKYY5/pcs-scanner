@@ -514,6 +514,10 @@ def main():
             if st:
                 gm['clockStart'] = (datetime.datetime.fromisoformat(st) + datetime.timedelta(seconds=gm['tStart'])).isoformat(timespec='minutes')
         feed_lines = perf.pop('_feed', [])
+        if any('event' in l for l in feed_lines):   # our squad's knocks / kills / downs per game, from the kill lines
+            for i, gm in enumerate(games):          # a game's lines: from 60 s before it starts to 60 s before the next
+                t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
+                gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1)
         if feed_lines:
             json.dump({'scanner': VERSION, 'file': os.path.basename(path), 'recStart': st, 'lines': feed_lines},
                       open(os.path.join(A.out, name + '.feed.json'), 'w'))
