@@ -66,7 +66,7 @@ A push to `main` builds too, and publishes release `v<VERSION>` if that tag does
 a `--hidden-import` (or `--collect-submodules`) in `build.yml` and a line in the selftest import in `pcs_app.py`,
 or the exe breaks while the tests pass.
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.6 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is released).
 
 ## How the pieces work (things that bit us)
 
@@ -97,6 +97,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.6 is
   never in the repo). Coach-only: importing recordings by hand.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
+- **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
+  icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
+  (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
+  built on the coach's PC. Players get it through Settings → Team link (a Google Drive "Anyone with the link"
+  file, re-checked every 6 hours, saved in the data folder). `drive.file` sign-in can't read a file someone else
+  shared, which is why it is a pasted link. No file = no weapon names, scan otherwise unchanged.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 
