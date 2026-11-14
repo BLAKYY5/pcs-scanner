@@ -324,6 +324,8 @@ def main():
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)
+            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the team link, same rhythm
+            except Exception: logging.exception('team link')
             # tell the player once per new version with a corner message (not during a game: it waits)
             if b.update and told != b.update[0] and b.auto and not b.update_blocked():
                 told = b.update[0]

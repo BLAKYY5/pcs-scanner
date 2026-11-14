@@ -110,6 +110,64 @@ def drive_upload_quiet(paths):
         if p.endswith('.json'): upload(svc, folder, p, logging.info)
     return True
 
+# ---------------- team file: weapon icons for the kill feed ----------------
+# The scanner names kill-feed weapons from a small private file the coach builds from the game's own icons. It is
+# not in this (public) app: the coach shares it on Google Drive as "Anyone with the link" and each player pastes that
+# link once in Settings. The app's Google sign-in can't be used for this: its drive.file permission only sees files
+# the same person's app created.
+ICONS_F = os.path.join(DATA, 'pcs_weapons.npz')
+ICONS_MAX = 2 * 1024 * 1024
+
+def drive_link_id(link):
+    """The file ID in a Google Drive share link, or None (only Google Drive addresses are accepted)."""
+    import re, urllib.parse
+    try: u = urllib.parse.urlparse((link or '').strip())
+    except Exception: return None
+    if u.scheme != 'https' or u.hostname not in ('drive.google.com', 'docs.google.com'): return None
+    m = re.search(r'/d/([A-Za-z0-9_-]{20,})', u.path) or re.search(r'(?:^|&)id=([A-Za-z0-9_-]{20,})(?:&|$)', u.query)
+    return m.group(1) if m else None
+
+def http_get(url, limit):
+    req = urllib.request.Request(url, headers={'User-Agent': 'PCS-Scanner'})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return r.read(limit + 1)
+
+def icons_valid(data):
+    """True for a weapon icons file: a small numpy archive of little grey pictures, nothing else."""
+    import io
+    import numpy as np
+    try:
+        if not data or len(data) > ICONS_MAX or data[:2] != b'PK': return False
+        z = np.load(io.BytesIO(data), allow_pickle=False)
+        if not 1 <= len(z.files) <= 300: return False
+        return all(z[n].ndim == 2 and z[n].dtype == np.uint8 and z[n].shape[0] <= 64 and z[n].shape[1] <= 704 for n in z.files)
+    except Exception:
+        return False
+
+def fetch_icons(link=None):
+    """Download the weapon icons from the team link. -> (status, text for the player);
+    status: none (no link) / bad_link / error / same / updated."""
+    link = SETTINGS.get('team_link', '') if link is None else link
+    if not (link or '').strip(): return 'none', ''
+    fid = drive_link_id(link)
+    if not fid: return 'bad_link', "That isn't a Google Drive link. Paste the link your coach sent."
+    try:
+        data = http_get(f'https://drive.google.com/uc?export=download&id={fid}', ICONS_MAX)
+    except Exception as e:
+        logging.info('team link: download failed (%s)', type(e).__name__)
+        return 'error', "The team link couldn't be reached. It is tried again later."
+    if not icons_valid(data):
+        return 'error', "The team link didn't give the weapon icons. Ask your coach to check the link."
+    try:
+        if os.path.exists(ICONS_F) and open(ICONS_F, 'rb').read() == data: return 'same', 'Weapon icons are up to date.'
+        tmp = ICONS_F + '.part'
+        with open(tmp, 'wb') as f: f.write(data)
+        os.replace(tmp, ICONS_F)
+    except Exception:
+        logging.exception('team link: saving the icons')
+        return 'error', "The weapon icons couldn't be saved on this PC."
+    return 'updated', 'Weapon icons updated: new scans name the weapons in the kill feed.'
+
 # ---------------- updates ----------------
 def vtuple(v):
     try: return tuple(int(x) for x in v.lstrip('v').split('.'))

@@ -278,12 +278,71 @@ def restart_cuts(samples, segs, mp):
             cuts.append(P[i - 1][0] + 1); anchor = nxt['endsAt']
     return cuts
 
+# ---------- weapon icon of a kill line ----------
+def weapon_file():
+    """The private weapon icons file: where PCS_WEAPON_ICONS says, else the app's data folder, else next to the scanner."""
+    data = os.environ.get('PCS_DATA_DIR')
+    for p in (os.environ.get('PCS_WEAPON_ICONS'), os.path.join(data, 'pcs_weapons.npz') if data else None, os.path.join(HERE, 'pcs_weapons.npz')):
+        if p and os.path.exists(p): return p
+    return None
+WEAPON_NAMES = {'r97': 'R-99', 'r45': 'RE-45', 'r301': 'R-301', 'energy_ar': 'Havoc', 'g7': 'G7 Scout', 'bow': 'Bocek',
+                'lstar': 'L-STAR', 'car': 'CAR', '3030repeater': '30-30 Repeater', 'eva8': 'EVA-8', 'hemlock': 'Hemlok',
+                'sniper': 'Kraber', 'dragon': 'Rampage', 'p2020': 'P2020', 'p2020_akimbo_active': 'Dual P2020',
+                'mozambique_akimbo_active': 'Dual Mozambique', 'wingman_akimbo_active': 'Dual Wingman'}
+
+class Weapons:
+    """Names the weapon icon in a kill-feed line by comparing it with the game's own icons.
+    The icons come from a private file (pcs_weapons.npz: one small grey picture per weapon, at the size and
+    orientation the feed draws them on a 2560-wide frame). The file is built from the game's files on the coach's
+    PC and is not part of the public repo; without it no weapon is read and the scan is otherwise unchanged.
+    Measured on real lines: a line with a weapon scores >= 0.86, a line without one <= 0.69."""
+    FH, FW = 64, 704          # working canvas: one feed line with margin
+    MIN = 0.80                # accept above this
+    STD = 15.0                # a flat background must not look like a match
+    def __init__(self, path=None):
+        self.T = []
+        try:
+            z = np.load(path or weapon_file())
+            for n in z.files:
+                t = z[n].astype(np.float32); tz = t - t.mean(); pad = np.zeros((self.FH, self.FW), np.float32)
+                if t.shape[0] > self.FH or t.shape[1] > self.FW: continue
+                pad[:t.shape[0], :t.shape[1]] = tz
+                self.T.append((n, t.shape, float(np.sqrt((tz * tz).sum())) + 1e-6, np.conj(np.fft.rfft2(pad))))
+        except Exception: self.T = []
+    @staticmethod
+    def _box(a, h, w):
+        c = np.pad(a, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+        return c[h:, w:] - c[:-h, w:] - c[h:, :-w] + c[:-h, :-w]
+    def match(self, rgb):
+        """rgb: one feed line at full size (rows x cols x 3). -> None or {'weapon', 'score', 'x', 'y', 'w', 'h'}."""
+        if not self.T: return None
+        g = np.asarray(rgb, np.float32).min(2)[:self.FH, :self.FW]     # white icon stays bright, coloured names drop
+        H, Wd = g.shape; c = np.zeros((self.FH, self.FW), np.float64); c[:H, :Wd] = g
+        G = np.fft.rfft2(c); best = None
+        for n, (th, tw), tn, F in self.T:
+            if th > H or tw > Wd: continue
+            num = np.fft.irfft2(G * F, s=(self.FH, self.FW))[:H - th + 1, :Wd - tw + 1]
+            k = th * tw; S = self._box(c[:H, :Wd], th, tw); S2 = self._box(c[:H, :Wd] ** 2, th, tw)
+            sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * self.STD ** 2)) * tn)
+            i = int(sc.argmax()); y, x = divmod(i, sc.shape[1])
+            if best is None or sc[y, x] > best['score']:
+                best = {'weapon': n, 'score': float(sc[y, x]), 'x': x, 'y': y, 'w': tw, 'h': th}
+        return best if best and best['score'] >= self.MIN else None
+
+def red_arrow(rgb, x0, x1):
+    """The red down arrow the feed draws between the weapon and the victim (columns x0..x1 of a line)."""
+    p = np.asarray(rgb, np.int16)[:, max(0, x0):max(0, x1)]
+    return int(((p[..., 0] > 170) & (p[..., 1] < 110) & (p[..., 2] < 110)).sum()) >= 25
+
 # ---------- kill feed / event feed (top right): every new line saved once, read by Claude at import ----------
 class Feed:
     """Lines of the feed under 'squads left' (kills, knocks, shield breaks, pings, squad eliminations,
-    kill leader). Each new line is kept once as a small colour JPEG + time; text is read at import."""
+    kill leader). Each new line is kept once as a small colour JPEG + time; text is read at import.
+    A line that shows a weapon icon also gets 'weapon' (the game's name for it), 'weaponName', 'weaponScore',
+    'arrow' (red arrow after the icon) and 'event' when the weapon icons file is present. The red arrow means a
+    knock; a weapon line without it is a kill (Blakey, 14 Nov 2026)."""
     X0, X1, Y0, Y1 = 1820, 2470, 260, 640
-    def __init__(self): self.recent = []; self.lines = []
+    def __init__(self, weapons=None): self.recent = []; self.lines = []; self.weapons = weapons if weapons is not None else Weapons()
     @staticmethod
     def _text(p):
         r, g, b = p[..., 0], p[..., 1], p[..., 2]
@@ -321,7 +380,16 @@ class Feed:
             crop = Image.fromarray(reg[max(0, y0 - 5):y1 + 5, x0:].astype(np.uint8))
             crop = crop.resize((max(1, crop.width * 2 // 3), max(1, crop.height * 2 // 3)), Image.LANCZOS)
             b = io.BytesIO(); crop.save(b, 'JPEG', quality=80)
-            self.lines.append({'t': round(t, 2), 'y': int(self.Y0 + y0), 'jpg': base64.b64encode(b.getvalue()).decode()})
+            line = {'t': round(t, 2), 'y': int(self.Y0 + y0), 'jpg': base64.b64encode(b.getvalue()).decode()}
+            try:
+                full = reg[max(0, y0 - 12):y1 + 12, x0:]
+                wp = self.weapons.match(full)
+                if wp:
+                    arrow = red_arrow(full, wp['x'] + wp['w'], wp['x'] + wp['w'] + 80)
+                    line.update(weapon=wp['weapon'], weaponName=WEAPON_NAMES.get(wp['weapon'], wp['weapon'].replace('_', ' ').title()),
+                                weaponScore=round(wp['score'], 2), arrow=arrow, event='knock' if arrow else 'kill')
+            except Exception: pass
+            self.lines.append(line)
 
 
 # ---------- game mode: ranked badge (RP panel, top right) ----------

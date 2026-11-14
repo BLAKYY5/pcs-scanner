@@ -12,3 +12,4 @@ pcs_scan/
 *.scan.json
 *.feed.json
 scanner/decoder.json
+pcs_weapons.npz

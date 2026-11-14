@@ -641,6 +641,8 @@ function renderSettings() {
         <div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
+        <label class="field wide"><span>Team link</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="Paste the Google Drive link from your coach">
+          <small>Lets the scan name the weapons in the kill feed. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
       </div></section>
     ${r ? `
     <section class="card section"><h2>Start-up</h2>
@@ -743,7 +745,7 @@ function renderSettings() {
   };
 }
 async function saveSettings() {
-  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
+  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim()};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
