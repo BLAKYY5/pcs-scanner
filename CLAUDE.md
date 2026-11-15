@@ -114,6 +114,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
   only: ranked, wildcard; SP, ED, BM so far). It gives `games[].banner`, the map when nobody opens it, and the
   `wildcard` mode/label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to teach it.
+- **Squads left**: `pcs_hud.SquadsLeft` reads the number in front of "SQUADS LEFT" (top right) once a second,
+  digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
+  time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close
+  to the placement. 16:9 only.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 

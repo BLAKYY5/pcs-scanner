@@ -1101,6 +1101,39 @@ def test_legend_select_starts_a_game():
     assert {"ranked", "wildcard"} <= set(real["mode"]) and set(real["map"]) <= set(SCAN.MAPS), real.keys()
 
 
+def test_squads_left_counter():
+    """The number in front of "SQUADS LEFT" is read digit by digit; per game it only goes down, and a value
+    counts once it was read twice, so one bad read never moves it."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    assert set("0123456789") <= {d for d, _ in HUD.SquadsLeft.T}
+
+    def cells(digit):                                                # a table shape back to a 22 x 14 picture
+        bits = next(t for d, t in HUD.SquadsLeft.T if d == digit)
+        g = np.array([(bits >> (191 - i)) & 1 for i in range(192)], np.uint8).reshape(16, 12)
+        from PIL import Image
+        return np.asarray(Image.fromarray(g * 255).resize((14, 22), Image.NEAREST)) > 127
+
+    def hud(number, words=True):
+        img = np.full((1440, 2560, 3), 40, np.uint8)
+        if words:
+            for x in range(2140, 2286, 16): img[77:99, x:x + 4] = 255        # stands in for the words: right place, right density
+            img[77:99, 2288:2292] = 255
+        x = 2130
+        for ch in reversed(str(number)):
+            img[77:99, x - 14:x][cells(ch)] = 255; x -= 18
+        return img
+    for n in (20, 17, 13, 9, 4, 1, 58, 36):
+        assert HUD.SquadsLeft.read(hud(n)) == n, (n, HUD.SquadsLeft.read(hud(n)))
+    assert HUD.SquadsLeft.read(hud(14, words=False)) is None             # no "SQUADS LEFT" next to it: not the counter
+    assert HUD.SquadsLeft.read(np.full((1440, 2560, 3), 250, np.uint8)) is None
+    reads = [(10, 20), (11, 20), (30, 19), (31, 19), (40, 7), (50, 18), (52, 18), (60, 19), (70, 17), (300, 16), (310, 17), (311, 17),
+             (500, 20), (501, 20)]
+    assert HUD.squads_timeline(reads, 0, 400) == [[10, 20], [30, 19], [50, 18], [310, 17]], HUD.squads_timeline(reads, 0, 400)
+    assert HUD.squads_timeline(reads, 400, 900) == [[500, 20]]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
