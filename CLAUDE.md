@@ -118,11 +118,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
   time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close
   to the placement. 16:9 only.
-- **Own stats**: `pcs_hud.OwnStats` reads the recording player's damage, kills and assists from the strip under
-  the squads counter (same digit table, with extra shapes for the smaller damage digits: 5 and 6 differ by a few
-  cells there). `games[].own` = the highest value read twice in the game (`damage`, `kills`, `assists`, `knocks` + `...At`).
-  A dropped leading digit only gives a lower value, which that rule ignores. Knocks are dark digits on a white
-  plate (inverse mask). Reads taken while the ring clock says "spectating" are dropped.
+- **Own stats**: `pcs_hud.OwnStats` reads the recording player's kills, assists and knocks from the strip under the
+  squads counter (same digit table; knocks are dark digits on a white plate). `games[].own` = for each, the value
+  shown most among the last 25 reads of the game (+ `...At`); reads taken while spectating are dropped. Damage is
+  in the same strip but not read: its 17 px digits were misread too often at the end of games (see the class note).
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 

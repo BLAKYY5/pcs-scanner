@@ -726,11 +726,13 @@ class SquadsLeft:
         return n if 1 <= n <= 60 else None
 
 class OwnStats:
-    """The recording player's own numbers under "SQUADS LEFT": damage (always shown in a game), kills and assists
-    and knocks (shown once one of them is not zero). Same digit shapes as the squads counter, at other sizes."""
-    BOXES = {'damage': (130, 158, 2284, 2376, 15, 19), 'kills': (130, 158, 1994, 2040, 20, 23), 'assists': (130, 158, 2078, 2124, 20, 23)}
+    """The recording player's own kills, assists and knocks, in the strip under "SQUADS LEFT" (shown once one of
+    them is not zero). Same digit shapes as the squads counter; knocks are dark digits on a white plate.
+    Damage is in the same strip but NOT read: its digits are smaller (17 px, thin strokes) and were misread too often
+    in the last seconds of a game (355 as 375, 262 as 297), exactly when the final value matters."""
+    BOXES = {'kills': (130, 158, 1994, 2040, 20, 23), 'assists': (130, 158, 2078, 2124, 20, 23)}
     @staticmethod
-    def number(m, hmin, hmax):
+    def number(m, hmin, hmax, table=None):
         """The run of digits in the box -> int or None. Bright bits of the icon left of the number are skipped;
         from the first digit on, every shape up to the first wide gap must be a clean digit."""
         col = m.sum(0) > 0; out = ''; x = 0; last = None
@@ -745,7 +747,7 @@ class OwnStats:
             if sized:
                 n = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((12, 16), Image.BOX)) > 110
                 v = int(''.join('1' if b else '0' for b in n.flat), 2)
-                d, dist = min(((d, bin(v ^ t).count('1')) for d, t in SquadsLeft.T), key=lambda r: r[1])
+                d, dist = min(((d, bin(v ^ t).count('1')) for d, t in (table or SquadsLeft.T)), key=lambda r: r[1])
                 if dist > 34: return None                     # digit-sized but not a digit: no clean read
             if d is None:
                 if out or x > 24: return None                 # not a digit inside or far into the box: no clean read
@@ -768,14 +770,16 @@ class OwnStats:
         except Exception: pass
         return out
 
-def stat_final(reads, t0, t1):
-    """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists).
-    -> (highest value read at least twice in [t0, t1), time it was first seen) or None."""
-    R = [(t, v) for t, v in reads if t0 <= t < t1]; seen = {}
-    for t, v in R: seen.setdefault(v, []).append(t)
-    ok = [v for v, T in seen.items() if len(T) >= 2]
-    if not ok: return None
-    v = max(ok); return v, round(seen[v][0], 2)
+def stat_final(reads, t0, t1, last=25):
+    """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists, knocks).
+    -> (final value, time it was first read) or None. The final value is the one read most often among the last
+    25 reads of the game (at least 3 times): a digit misread now and then gives other values, never the same wrong
+    one most of the time, so 'the highest value seen' would be wrong where 'the usual value at the end' is right."""
+    R = [(t, v) for t, v in reads if t0 <= t < t1]
+    if len(R) < 3: return None
+    tail = [v for _, v in R[-last:]]; v = max(set(tail), key=lambda x: (tail.count(x), x))
+    if tail.count(v) < 3: return None
+    return v, round(next(t for t, x in R if x == v), 2)
 
 def squads_timeline(reads, t0, t1):
     """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.

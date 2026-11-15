@@ -512,9 +512,9 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
-        if own:                 # the recording player's own damage / kills / assists / knocks: the highest value read twice
+        if own:                 # the recording player's own kills / assists / knocks: the value shown most at the end
             st = {}
-            for k in ('damage', 'kills', 'assists', 'knocks'):
+            for k in ('kills', 'assists', 'knocks'):
                 f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi)
                 if f: st[k] = f[0]; st[k + 'At'] = f[1]
             if st: g['own'] = st
