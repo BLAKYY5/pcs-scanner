@@ -103,6 +103,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   built on the coach's PC. Players get it through Settings → Team link (a Google Drive "Anyone with the link"
   file, re-checked every 6 hours, saved in the data folder). `drive.file` sign-in can't read a file someone else
   shared, which is why it is a pasted link. No file = no weapon names, scan otherwise unchanged.
+- **Legend select screen**: `pcs_hud.Legends` recognises the squad roster at the top left before a game (ranked:
+  rank badges left of the slots; other modes: no badges, roster 114 px further left). A screen seen for 8 s to
+  2 min starts a game (`games[].select`: `tFirst`, `tLast`, `ranked`, `squad[]` with `slot`, `legend`, `self`,
+  `hue`), so games no longer merge when nobody opens the map. Legend names need the portraits, stored in the same
+  private file as the weapon icons under `legend_<name>`; without them the screen still starts a game. A slot shows
+  the legend a player is looking at before their turn: the last read with a coloured frame wins. Look-alikes: the
+  lobby's party list (rejected by position) and odd single frames (rejected by duration). 16:9 only so far.
+- **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
+  connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
+  only: ranked, wildcard; SP, ED so far). It gives `games[].banner`, the map when nobody opens it, and the
+  `wildcard` mode/label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to teach it.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 

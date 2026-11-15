@@ -46,12 +46,15 @@ def set_label(path: str, kind: str | None) -> None:
 
 
 def auto(scan: dict) -> str | None:
-    """From the scan: scrims when the scrim drop screen was read, ranked when the ranked badge was seen."""
+    """From the scan: scrims when the scrim drop screen was read, ranked when the ranked badge was seen,
+    wildcard when the loading banner before a game said so."""
     games = scan.get("games", []) if scan else []
     if any(g.get("mode") == "scrim" and g.get("drop") for g in games):
         return "scrims"
     if any(g.get("mode") == "ranked" for g in games):
         return "ranked"
+    if any(g.get("mode") == "wildcard" for g in games):
+        return "wildcard"
     return None
 
 
