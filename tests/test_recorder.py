@@ -1133,6 +1133,30 @@ def test_squads_left_counter():
     assert HUD.squads_timeline(reads, 0, 400) == [[10, 20], [30, 19], [50, 18], [310, 17]], HUD.squads_timeline(reads, 0, 400)
     assert HUD.squads_timeline(reads, 400, 900) == [[500, 20]]
 
+    # the player's own damage, kills and assists under it: same digits, smaller; a bright bit of the icon before
+    # the number is skipped, anything that is not a clean digit inside the number means no read
+    def strip(damage=None, kills=None, assists=None, junk=False):
+        img = np.full((1440, 2560, 3), 40, np.uint8)
+        def put(x, text, h):
+            for ch in text:
+                w = round(14 * h / 22); g = cells(ch)
+                from PIL import Image
+                g = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 127
+                img[134:134 + h, x:x + w][g] = 255; x += w + 3
+        if damage is not None:
+            img[136:142, 2287:2292] = 255                            # a bright bit of the icon
+            put(2300, str(damage), 17)
+            if junk: img[134:151, 2311:2314] = 255; img[140:143, 2308:2318] = 255
+        if kills is not None: put(2006, str(kills), 22)
+        if assists is not None: put(2089, str(assists), 22)
+        return img
+    assert HUD.OwnStats.read(strip(damage=716, kills=3, assists=1)) == {"damage": 716, "kills": 3, "assists": 1}
+    assert HUD.OwnStats.read(strip(damage=1048)) == {"damage": 1048}
+    assert HUD.OwnStats.read(strip(kills=12, assists=0)) == {"kills": 12, "assists": 0}
+    assert HUD.OwnStats.read(strip()) == {}
+    assert HUD.stat_final([(10, 24), (11, 124), (12, 175), (13, 175), (20, 75), (30, 253), (31, 253), (40, 918)], 0, 100) == (253, 30)
+    assert HUD.stat_final([(10, 5)], 0, 100) is None and HUD.stat_final([(10, 5), (11, 5)], 50, 100) is None
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

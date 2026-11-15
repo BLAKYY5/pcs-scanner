@@ -725,6 +725,58 @@ class SquadsLeft:
         n = int(out)
         return n if 1 <= n <= 60 else None
 
+class OwnStats:
+    """The recording player's own numbers under "SQUADS LEFT": damage (always shown in a game), kills and assists
+    and knocks (shown once one of them is not zero). Same digit shapes as the squads counter, at other sizes."""
+    BOXES = {'damage': (130, 158, 2284, 2376, 15, 19), 'kills': (130, 158, 1994, 2040, 20, 23), 'assists': (130, 158, 2078, 2124, 20, 23)}
+    @staticmethod
+    def number(m, hmin, hmax):
+        """The run of digits in the box -> int or None. Bright bits of the icon left of the number are skipped;
+        from the first digit on, every shape up to the first wide gap must be a clean digit."""
+        col = m.sum(0) > 0; out = ''; x = 0; last = None
+        while x < len(col) and len(out) < 4:
+            if not col[x]:
+                if last is not None and x - last > 9: break   # a gap wider than between two digits: the number is over
+                x += 1; continue
+            e = x
+            while e < len(col) and col[e]: e += 1
+            g = m[:, x:e]; ys = np.where(g.sum(1) > 0)[0]; g = g[ys[0]:ys[-1] + 1]; d = None
+            sized = e < len(col) and hmin <= g.shape[0] <= hmax and 3 <= g.shape[1] <= 16
+            if sized:
+                n = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((12, 16), Image.BOX)) > 110
+                v = int(''.join('1' if b else '0' for b in n.flat), 2)
+                d, dist = min(((d, bin(v ^ t).count('1')) for d, t in SquadsLeft.T), key=lambda r: r[1])
+                if dist > 34: return None                     # digit-sized but not a digit: no clean read
+            if d is None:
+                if out or x > 24: return None                 # not a digit inside or far into the box: no clean read
+                x = e; continue                               # a piece of the icon before the number
+            out += d; last = e; x = e
+        return int(out) if out else None
+    @classmethod
+    def read(cls, a):
+        """a: full 16:9 frame. -> {} or {'damage': n, 'kills': n, 'assists': n} with the numbers that could be read."""
+        if not SquadsLeft.T: return {}
+        out = {}
+        for k, (y0, y1, x0, x1, hmin, hmax) in cls.BOXES.items():
+            try: v = cls.number(a[y0:y1, x0:x1].min(2) > 232, hmin, hmax)
+            except Exception: v = None
+            if v is not None: out[k] = v
+        try:                    # knocks: dark digits on a white plate, right of the assists
+            if (a[128:160, 2120:2230].min(2) > 215).mean() > 0.4:
+                v = cls.number(a[130:158, 2173:2216].max(2) < 90, 14, 18)
+                if v is not None: out['knocks'] = v
+        except Exception: pass
+        return out
+
+def stat_final(reads, t0, t1):
+    """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists).
+    -> (highest value read at least twice in [t0, t1), time it was first seen) or None."""
+    R = [(t, v) for t, v in reads if t0 <= t < t1]; seen = {}
+    for t, v in R: seen.setdefault(v, []).append(t)
+    ok = [v for v, T in seen.items() if len(T) >= 2]
+    if not ok: return None
+    v = max(ok); return v, round(seen[v][0], 2)
+
 def squads_timeline(reads, t0, t1):
     """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.
     The count only goes down during a game; a value counts once it was read twice within 30 s, so one bad read
