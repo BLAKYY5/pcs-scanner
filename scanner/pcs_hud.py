@@ -695,6 +695,47 @@ class Banner:
         return out
 
 
+# ---------- "N SQUADS LEFT" (top right during a game) ----------
+class SquadsLeft:
+    """The number in front of "SQUADS LEFT": white digits 22 px high, right-aligned just left of the words.
+    The words must be there (their box is 17 to 33 % white, starting and ending where they always do), then each
+    digit is compared with the shapes in pcs_banner.json ('digits': 12 x 16 cells each, from our own recordings)."""
+    T = [(d, int(h, 16)) for d, L in BANNER_T.get('digits', {}).items() for h in L]
+    @classmethod
+    def read(cls, a):
+        """a: full 16:9 frame. -> the number (1..60) or None."""
+        if not cls.T: return None
+        w = a[77:99, 2138:2294].min(2) > 232; c = w.sum(0) > 0
+        if not (0.17 < w.mean() < 0.33) or c[:2].any() or not c[2:4].any() or not c[-4:].any(): return None
+        m = a[77:99, 2040:2134].min(2) > 232; col = m.sum(0) > 0; x = len(col) - 1; out = ''
+        while x >= 0 and len(out) < 2:              # from the right: at most two digits, then nothing for 12 columns
+            if not col[x]:
+                if out and not col[max(0, x - 12):x + 1].any(): break
+                x -= 1; continue
+            e = x
+            while x >= 0 and col[x]: x -= 1
+            g = m[:, x + 1:e + 1]; ys = np.where(g.sum(1) > 0)[0]; g = g[ys[0]:ys[-1] + 1]
+            if not (19 <= g.shape[0] <= 22 and 4 <= g.shape[1] <= 18): return None
+            n = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((12, 16), Image.BOX)) > 110
+            v = int(''.join('1' if b else '0' for b in n.flat), 2)
+            d, dist = min(((d, bin(v ^ t).count('1')) for d, t in cls.T), key=lambda r: r[1])
+            if dist > 26: return None
+            out = d + out
+        if not out or col[max(0, x - 12):x + 1].any(): return None       # something else left of the number: not a clean read
+        n = int(out)
+        return n if 1 <= n <= 60 else None
+
+def squads_timeline(reads, t0, t1):
+    """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.
+    The count only goes down during a game; a value counts once it was read twice within 30 s, so one bad read
+    never moves it. The first entry is the number of squads at the start."""
+    R = [(t, n) for t, n in reads if t0 <= t < t1]; out = []
+    for i, (t, n) in enumerate(R):
+        if out and n >= out[-1][1]: continue
+        if any(n2 == n and 0 < t2 - t <= 30 for t2, n2 in R[i + 1:i + 40]): out.append([round(t, 2), n])
+    return out
+
+
 # ---------- game mode: ranked badge (RP panel, top right) ----------
 try: RANK_T = np.load(os.path.join(HERE, 'rank_rp.npy')).astype(np.float32)
 except Exception: RANK_T = None
