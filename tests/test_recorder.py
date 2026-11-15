@@ -1152,7 +1152,7 @@ def test_squads_left_counter():
     assert HUD.OwnStats.read(strip()) == {}
     # the final value is the usual one at the end of the game, not the highest ever read (one misread must not win)
     R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 2), (52, 2)]
-    assert HUD.stat_final(R, 0, 100) == (2, 30), HUD.stat_final(R, 0, 100)
+    assert HUD.stat_final(R, 0, 100) == (2, 30, 52), HUD.stat_final(R, 0, 100)
     assert HUD.stat_final([(10, 5), (11, 5)], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
 
 

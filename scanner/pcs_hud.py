@@ -772,14 +772,15 @@ class OwnStats:
 
 def stat_final(reads, t0, t1, last=25):
     """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists, knocks).
-    -> (final value, time it was first read) or None. The final value is the one read most often among the last
+    -> (final value, time it was first read, time of the last read of any value) or None. When the last read is
+    long before the end of the game the value is only a floor: the number may have grown unseen afterwards. The final value is the one read most often among the last
     25 reads of the game (at least 3 times): a digit misread now and then gives other values, never the same wrong
     one most of the time, so 'the highest value seen' would be wrong where 'the usual value at the end' is right."""
     R = [(t, v) for t, v in reads if t0 <= t < t1]
     if len(R) < 3: return None
     tail = [v for _, v in R[-last:]]; v = max(set(tail), key=lambda x: (tail.count(x), x))
     if tail.count(v) < 3: return None
-    return v, round(next(t for t, x in R if x == v), 2)
+    return v, round(next(t for t, x in R if x == v), 2), round(R[-1][0], 2)
 
 def squads_timeline(reads, t0, t1):
     """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.

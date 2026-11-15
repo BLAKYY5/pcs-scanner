@@ -516,7 +516,7 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
             st = {}
             for k in ('kills', 'assists', 'knocks'):
                 f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi)
-                if f: st[k] = f[0]; st[k + 'At'] = f[1]
+                if f: st[k] = f[0]; st[k + 'At'] = f[1]; st[k + 'LastRead'] = f[2]
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
