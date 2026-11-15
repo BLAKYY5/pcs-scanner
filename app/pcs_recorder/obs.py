@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import re
 import logging
 import subprocess
@@ -16,7 +17,7 @@ import time
 import zipfile
 from pathlib import Path
 
-from .settings import APP_DIR, Settings
+from .settings import APP_DIR, Settings, valid_exe
 
 log = logging.getLogger("recorder.obs")
 OBS_ROOT = APP_DIR / "obs"
@@ -26,6 +27,7 @@ APEX_WINDOW = "Apex Legends:Respawn001:r5apex_dx12.exe"   # matched by executabl
 SCENE, SOURCE, AUDIO = "PCS Apex", "Apex", "Apex audio"
 DISCORD_WINDOW = "Discord:Chrome_WidgetWin_1:Discord.exe"  # matched by executable (priority 2)
 TRACK_INPUTS = {"game": "PCS Game", "discord": "PCS Discord", "mic": "PCS Mic"}   # one source per track
+VOICE_EXTRA = "PCS Voice 2"     # second voice source on track 2 (TeamSpeak: classic and new client)
 TRACK_NAMES = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 FILENAME = "Apex Legends_%CCYY.%MM.%DD-%hh.%mm"           # same naming the scanner already uses
 
@@ -223,9 +225,68 @@ def is_running() -> bool:
     return False
 
 
+def voice_window(exe: str) -> str:
+    """OBS's "title:class:program" window text for an application audio source.
+    Discord keeps its exact text (unchanged for existing installs). For other programs the title and class
+    aren't known in advance: they are left empty, and with priority 2 ("match title, otherwise find window of
+    same executable") OBS takes any window of that program. OBS writes ':' as '#3A' and '#' as '#22'."""
+    if exe.lower() == "discord.exe":
+        return DISCORD_WINDOW
+    return "::" + exe.replace("#", "#22").replace(":", "#3A")
+
+
+def voice_sources(s: Settings) -> list[tuple[str, dict]]:
+    """Track 2's OBS sources: (input name, settings), one per voice program. The first keeps the name
+    "PCS Discord" (saved OBS setups and the mute hotkey use it)."""
+    names = [TRACK_INPUTS["discord"], VOICE_EXTRA]
+    return [(names[i], {"window": voice_window(exe), "priority": 2}) for i, exe in enumerate(s.voice_exes()[:2])]
+
+
+NOT_LISTED = {"textinputhost.exe", "msedgewebview2.exe", "applicationframehost.exe", "systemsettings.exe",
+              "shellexperiencehost.exe", "searchhost.exe", "startmenuexperiencehost.exe", "python.exe", "pythonw.exe"}
+
+
+def window_apps() -> list[dict]:
+    """Programs running now with a visible, titled window: [{exe, title}], one per program, for picking a
+    voice app. Only names are read (no paths are kept or used)."""
+    if os.name != "nt":
+        return []
+    import ctypes
+    from ctypes import wintypes
+    import psutil
+    u = ctypes.windll.user32
+    pids: dict[int, str] = {}
+
+    @ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def each(hwnd, _):
+        if u.IsWindowVisible(hwnd) and not u.GetWindow(hwnd, 4):          # 4 = GW_OWNER: top-level windows only
+            n = u.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                u.GetWindowTextW(hwnd, buf, n + 1)
+                pid = wintypes.DWORD()
+                u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                pids.setdefault(pid.value, buf.value)
+        return True
+    u.EnumWindows(each, 0)
+    out: dict[str, dict] = {}
+    for pid, title in pids.items():
+        try:
+            exe = psutil.Process(pid).name()
+        except (psutil.Error, OSError):
+            continue
+        if exe and exe.lower() not in out and exe.lower() not in NOT_LISTED and valid_exe(exe):
+            out[exe.lower()] = {"exe": exe, "title": title[:80]}
+    return sorted(out.values(), key=lambda d: d["exe"].lower())
+
+
 def config_signature(s: Settings) -> str:
-    """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up)."""
-    return f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}|{s.mic_device}"
+    """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up).
+    The voice app is added only when it isn't Discord, so existing installs keep the same signature."""
+    sig = f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}|{s.mic_device}"
+    if s.voice_app != "discord":
+        sig += "|voice=" + "+".join(s.voice_exes())
+    return sig
 
 
 def close() -> None:
@@ -283,7 +344,7 @@ class OBS:
         if SCENE not in [x["sceneName"] for x in c.get_scene_list().scenes]:
             c.create_scene(SCENE)
         c.set_current_program_scene(SCENE)
-        ours = (SOURCE, AUDIO, *TRACK_INPUTS.values())
+        ours = (SOURCE, AUDIO, *TRACK_INPUTS.values(), VOICE_EXTRA)
         names = {i["inputName"] for i in c.get_input_list().inputs}
         for n in ours:
             if n in names:
@@ -303,18 +364,22 @@ class OBS:
         c.create_input(SCENE, SOURCE, kind, settings, True)
         # sound: one source per track, each recorded on its own track only
         #   game    = Apex's sound only (application audio capture), never the rest of the PC
-        #   discord = Discord's sound only;  mic = the microphone picked in the app (Windows default if none)
+        #   discord = the voice app's sound only (Discord, TeamSpeak or the program picked; key kept from when
+        #             it was always Discord);  mic = the microphone picked in the app (Windows default if none)
+        proc = "wasapi_process_output_capture"
         sources = {
-            "game": ("wasapi_process_output_capture", {"window": APEX_WINDOW, "priority": 2}),
-            "discord": ("wasapi_process_output_capture", {"window": DISCORD_WINDOW, "priority": 2}),
-            "mic": ("wasapi_input_capture", {"device_id": s.mic_device or "default"}),
+            "game": [(TRACK_INPUTS["game"], "wasapi_process_output_capture", {"window": APEX_WINDOW, "priority": 2})],
+            "discord": [(n, proc, st) for n, st in voice_sources(s)],
+            "mic": [(TRACK_INPUTS["mic"], "wasapi_input_capture", {"device_id": s.mic_device or "default"})],
         }
         tracks = s.tracks()
+        self.inputs: dict[str, list[str]] = {}
         for i, t in enumerate(tracks, 1):
-            name = TRACK_INPUTS[t]
-            c.create_input(SCENE, name, *sources[t], True)
-            c.set_input_audio_tracks(name, {str(n): n == i for n in range(1, 7)})
-            c.set_input_mute(name, False)
+            for name, kind, st in sources[t]:
+                c.create_input(SCENE, name, kind, st, True)
+                c.set_input_audio_tracks(name, {str(n): n == i for n in range(1, 7)})
+                c.set_input_mute(name, False)
+                self.inputs.setdefault(t, []).append(name)
         # OBS's own default sources (whole-PC sound, default mic) are never used
         special = c.get_special_inputs()
         for attr in ("desktop1", "desktop2", "mic1", "mic2", "mic3", "mic4"):
@@ -330,7 +395,8 @@ class OBS:
     def mute(self, track: str, muted: bool) -> bool:
         if track not in getattr(self, "tracks", []):
             return False
-        self.c.set_input_mute(TRACK_INPUTS[track], muted)
+        for name in getattr(self, "inputs", {}).get(track) or [TRACK_INPUTS[track]]:
+            self.c.set_input_mute(name, muted)
         return True
 
     def elapsed(self) -> float | None:

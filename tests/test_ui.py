@@ -184,6 +184,53 @@ def test_recorder_settings_and_start_with_windows():
     assert st.Settings().start_with_windows is True                  # on by default
 
 
+def test_voice_app_setting():
+    """Settings → Voice app: saved through the API; "other" needs a program name, never a path."""
+    from pcs_recorder import settings as st
+    b = pcs_server.Backend(_Auto(str(TMP / "recs")))
+    b.set_start_with_windows = lambda on: None
+    st_save = st.save
+    st.save = lambda s: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/settings", {"voice_app": "teamspeak", "voice_exe": ""})
+        assert code == 200 and state["recorder"]["settings"]["voice_app"] == "teamspeak", state
+        code, state, _ = call(srv, "/api/settings", {"voice_app": "other", "voice_exe": " Mumble.exe "})
+        assert code == 200 and (b.auto.s.voice_app, b.auto.s.voice_exe) == ("other", "Mumble.exe")
+        assert state["recorder"]["settings"]["voice_exe"] == "Mumble.exe"
+        for bad in ({"voice_app": "other", "voice_exe": "C:\\Tools\\Mumble.exe"},
+                    {"voice_app": "other", "voice_exe": "mumble"},
+                    {"voice_app": "other", "voice_exe": "x.exe && del *"},
+                    {"voice_app": "skype", "voice_exe": ""}):
+            code, r, _ = call(srv, "/api/settings", dict(bad, keep_days=9))
+            assert code != 200 and r.get("error"), (bad, code, r)
+            assert b.auto.s.voice_exe == "Mumble.exe" and b.auto.s.keep_days != 9      # nothing saved
+        code, _, _ = call(srv, "/api/settings", {"voice_app": "discord", "voice_exe": "x/y.exe"})
+        assert code == 200 and (b.auto.s.voice_app, b.auto.s.voice_exe) == ("discord", "")
+        code, v, _ = call(srv, "/api/voiceapps")
+        assert code == 200 and v["current"] == "discord" and isinstance(v["running"], list)
+        assert all(st.valid_exe(a["exe"]) and "\\" not in a["exe"] for a in v["running"]), v
+    finally:
+        srv.stop()
+        st.save = st_save
+    # a recording made with TeamSpeak names its track 2 after it in the review; older ones say Discord
+    folder = TMP / "voice"
+    folder.mkdir(exist_ok=True)
+    rec = folder / "Apex Legends_ts.mp4"
+    rec.write_bytes(b"x")
+    rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"], "voice": "TeamSpeak"}))
+    import subprocess
+    real = subprocess.run
+    subprocess.run = lambda *a, **k: type("R", (), {"stdout": "0\n1\n2\n"})()
+    try:
+        assert [t["label"] for t in pcs_server.audio_tracks(str(rec))] == ["Game", "TeamSpeak", "Microphone"]
+        rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord"]}))
+        assert [t["label"] for t in pcs_server.audio_tracks(str(rec))] == ["Game", "Discord", "Audio 3"]
+    finally:
+        subprocess.run = real
+
+
 def test_scan_queue_waits_for_apex():
     """A scan asked for by hand never runs while Apex (or the recorder) is busy."""
     from pcs_recorder import core as rcore, runtime

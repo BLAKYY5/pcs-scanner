@@ -299,7 +299,12 @@ async function scan(ids) {
 
 /* ------------------------------------------------------------------ review */
 const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
-const TRACKN = {game: 'Game sound', discord: 'Discord', mic: 'Microphone'};
+const TRACKN = {game: 'Game sound', discord: 'Voice app', mic: 'Microphone'};
+const VOICE_NAMES = {discord: 'Discord', teamspeak: 'TeamSpeak'};
+function voiceName(s) {          /* the voice app recorded on track 2, as the player calls it */
+  if (s.voice_app === 'other') return (s.voice_exe || '').trim().replace(/\.exe$/i, '') || 'Voice app';
+  return VOICE_NAMES[s.voice_app] || 'Discord';
+}
 function buildEvents(d) {
   const ev = [];
   (d.games || []).forEach((g, gi) => {
@@ -661,14 +666,18 @@ function renderSettings() {
         <label class="field"><span>Capture</span><select id="f-capture">${[['window', 'Apex window (recommended)'], ['game', 'Game capture'], ['display', 'Whole screen']].map(([v, l]) => `<option value="${v}" ${v === s.capture ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></section>
     <section class="card section"><h2>Sound and comms</h2>
-      <p class="muted" style="margin:0">Each sound is recorded on its own track, so the review can play the game, Discord and your voice separately.</p>
+      <p class="muted" style="margin:0">Each sound is recorded on its own track, so the review can play the game, the voice app and your voice separately.</p>
       ${switchHTML('f-game_audio', s.game_audio, 'Game sound', 'Apex only, never other programs')}
       <div class="notice ${s.comms_consent ? 'info' : ''}">
         ${switchHTML('f-comms_consent', s.comms_consent, 'My team agreed that our voice comms are recorded',
-          'Recording Discord records your teammates too. Turn this on only once everyone in your calls agreed (in Switzerland and many other countries, recording a private conversation needs everyone\'s consent).')}
+          'Recording the voice app records your teammates too. Turn this on only once everyone in your calls agreed (in Switzerland and many other countries, recording a private conversation needs everyone\'s consent).')}
       </div>
       <div class="form" id="commsBox">
-        <div class="field">${switchHTML('f-discord_audio', s.discord_audio, 'Discord', 'Discord\'s sound only')}</div>
+        <div class="field">${switchHTML('f-discord_audio', s.discord_audio, 'Voice app', voiceName(s) + '\'s sound only')}</div>
+        <label class="field"><span>Voice app</span><select id="f-voice_app">${[['discord', 'Discord'], ['teamspeak', 'TeamSpeak'], ['other', 'Other program']].map(([v, l]) => `<option value="${v}" ${v === (s.voice_app || 'discord') ? 'selected' : ''}>${l}</option>`).join('')}</select>
+          <small>Takes effect the next time Apex starts.</small></label>
+        <label class="field" id="voiceExeBox"><span>Program</span><input id="f-voice_exe" type="text" list="voiceApps" value="${esc(s.voice_exe || '')}" placeholder="Mumble.exe" maxlength="64" spellcheck="false" autocomplete="off"><datalist id="voiceApps"></datalist>
+          <small>Open the voice app first, then pick it from the list (or type its name).</small></label>
         <div class="field">${switchHTML('f-mic_audio', s.mic_audio, 'My microphone', 'Your voice, on its own track')}</div>
         <label class="field"><span>Microphone</span><select id="f-mic_device"><option value="${esc(s.mic_device || 'default')}">Loading…</option></select>
           <small>Takes effect the next time Apex starts.</small></label>
@@ -680,7 +689,7 @@ function renderSettings() {
       <div class="form">
         ${hotkeyField('f-hk_mark', s.hk_mark, 'Mark this moment')}
         ${hotkeyField('f-hk_mute_game', s.hk_mute_game, 'Mute / unmute game sound')}
-        ${hotkeyField('f-hk_mute_discord', s.hk_mute_discord, 'Mute / unmute Discord')}
+        ${hotkeyField('f-hk_mute_discord', s.hk_mute_discord, 'Mute / unmute ' + voiceName(s))}
         ${hotkeyField('f-hk_mute_mic', s.hk_mute_mic, 'Mute / unmute microphone')}
         <div class="field">${switchHTML('f-hk_sounds', s.hk_sounds, 'Beep on hotkeys', 'Only you hear it; it isn\'t recorded')}</div>
       </div></section>
@@ -693,7 +702,7 @@ function renderSettings() {
       ${switchHTML('f-yt_enabled', s.yt_enabled, 'Upload my scrim blocks', 'After the block, once every recording in it is scanned')}
       <div class="form">
         <label class="field"><span>Who can watch</span><select id="f-yt_privacy">${[['unlisted', 'Unlisted (anyone with the link)'], ['private', 'Private (accounts you share it with)']].map(([v, l]) => `<option value="${v}" ${v === s.yt_privacy ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
-        <label class="field"><span>Sound on YouTube</span><select id="f-yt_audio">${[['game', 'Game only'], ['mix', 'Game + comms (Discord and mic)']].map(([v, l]) => `<option value="${v}" ${v === s.yt_audio ? 'selected' : ''} ${v === 'mix' && !s.comms_consent ? 'disabled' : ''}>${l}</option>`).join('')}</select>
+        <label class="field"><span>Sound on YouTube</span><select id="f-yt_audio">${[['game', 'Game only'], ['mix', `Game + comms (${voiceName(s)} and mic)`]].map(([v, l]) => `<option value="${v}" ${v === s.yt_audio ? 'selected' : ''} ${v === 'mix' && !s.comms_consent ? 'disabled' : ''}>${l}</option>`).join('')}</select>
           <small>${s.comms_consent ? 'Comms on YouTube means your team\'s voices are on the channel too.' : 'Comms need the team agreement above.'}</small></label>
         <label class="field"><span>Same block if less than (minutes) apart</span><input id="f-yt_gap_min" type="number" min="10" max="240" value="${s.yt_gap_min}"><small>Restarting Apex mid-block stays one video.</small></label>
         <div class="field">${switchHTML('f-yt_scrims_only', s.yt_scrims_only, 'Scrims only', 'Skip blocks labelled ranked, pubs or wildcard (see the YouTube page)')}</div>
@@ -736,6 +745,19 @@ function renderSettings() {
   const md = $('#f-mic_device'); if (md) api('/api/mics').then(m => {
     md.innerHTML = m.devices.map(d => `<option value="${esc(d.id)}" ${d.id === m.current ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
   }).catch(() => { md.innerHTML = '<option value="default">Windows default microphone</option>'; });
+  const va = $('#f-voice_app'), vx = $('#f-voice_exe');
+  const syncVoice = () => {
+    if (!va) return;
+    const n = voiceName({voice_app: va.value, voice_exe: vx.value});
+    $('#voiceExeBox').hidden = va.value !== 'other';
+    const hint = $('#f-discord_audio').closest('label').querySelector('small'); if (hint) hint.textContent = n + '\'s sound only';
+    const hk = $('#f-hk_mute_discord'); if (hk) hk.closest('label').querySelector('span').textContent = 'Mute / unmute ' + n;
+    const mix = $('#f-yt_audio option[value="mix"]'); if (mix) mix.textContent = `Game + comms (${n} and mic)`;
+  };
+  if (va) {
+    va.onchange = syncVoice; vx.oninput = syncVoice; syncVoice();
+    api('/api/voiceapps').then(v => { $('#voiceApps').innerHTML = (v.running || []).map(a => `<option value="${esc(a.exe)}">${esc(a.title)}</option>`).join(''); }).catch(() => {});
+  }
   const cc = $('#f-comms_consent'), box = $('#commsBox');
   const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input, select', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
@@ -747,7 +769,7 @@ function renderSettings() {
 async function saveSettings() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim()};
   if (S.recorder) {
-    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
+    for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';

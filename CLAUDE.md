@@ -74,8 +74,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   encoder test restarts OBS per candidate; only encoders of GPU vendors actually present are tried (otherwise a
   "missing encoder" dialog blocks). AV1 only on RTX 40/50, RX 7000/9000, Arc. Other capture software running
   (Medal, etc.) can make recording start fail. Sources removed are awaited before being re-created.
-- **Audio tracks**: 1 = Apex only (process capture), 2 = Discord only, 3 = microphone (`mic_device`). A settings
-  change that alters `config_signature` restarts OBS at the next Apex start.
+- **Audio tracks**: 1 = Apex only (process capture), 2 = the voice app only (`voice_app`: Discord by default,
+  TeamSpeak = classic `ts3client_win64.exe` and new `TeamSpeak.exe` both captured on track 2, or another program
+  by exe name `voice_exe`; keys `discord_audio`, `hk_mute_discord`, track key `discord` and OBS input
+  "PCS Discord" kept for compatibility), 3 = microphone (`mic_device`). A settings change that alters
+  `config_signature` restarts OBS at the next Apex start.
 - **Recording file**: OBS writes mkv, then remuxes to mp4. Use the mp4 only when it's ≥ 0.98 × the mkv size and
   stable, else the mkv. A half-written mp4 once produced a "0 games" scan.
 - **Scan validity**: `read_nothing` (no layout votes, no games) = failed scan, retry. `no_game` needs the video
