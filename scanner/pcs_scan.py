@@ -191,10 +191,30 @@ def new_game(t, mp):
     return {'tStart': t, 'tEnd': t, 'map': mp, 'drop': None, 'harvRaw': [], 'mapFrames': 0, 'calib': []}
 
 def assemble(events):
-    games = []; g = None
+    games = []; g = None; events = HUD.select_runs(events); banner = []
+    def titled(g, t):
+        """Give the game the mode and map words of the loading banner seen just before its legend select
+        (the word read most often; a word the scanner doesn't know yet is kept as its shape)."""
+        B = [b for b in banner if 0 <= t - b[0] < 180]; banner.clear()
+        if not B: return
+        out = {'t': B[0][0], 'frames': len(B)}
+        for key in ('mode', 'map'):
+            names = [b[1][key] for b in B if b[1].get(key)]
+            out[key] = max(set(names), key=names.count) if names else None
+            if not names: out[key + 'Sig'] = B[len(B) // 2][1][key + 'Sig']
+        g['banner'] = out
+        if out['map'] in MAPS: g['map'] = out['map']
     for ev in events:
         t, kind, d = ev['t'], ev['kind'], ev['data']
+        if kind == 'banner': banner.append((t, d)); continue
+        if kind == 'select':    # legend select screen: a new game starts here
+            if g and g.get('select') and t - g['select']['tLast'] <= 5: HUD.merge_select(g['select'], d, t); g['tEnd'] = max(g['tEnd'], t); continue
+            if g and g['drop'] and g['mapFrames'] == 0 and not g.get('select') and t - g['drop']['tLast'] < 180:
+                g['select'] = HUD.new_select(d, t); g['tEnd'] = t; continue      # same game: its drop screen came first
+            g = new_game(t, None); g['select'] = HUD.new_select(d, t); titled(g, t); games.append(g); continue
         if kind == 'drop':
+            if g and g.get('select') and not g['drop'] and g['mapFrames'] == 0 and t - g['select']['tLast'] < 180:
+                g['map'] = d['map']; g['tStart'] = g['tEnd'] = t; g['drop'] = dict(d, tFirst=t, tLast=t); continue   # same game: legend select came first
             if g and g['drop'] and t - g['tEnd'] < 60 and g['map'] == d['map']:
                 g['tEnd'] = t; g['drop']['tLast'] = t   # same drop screen, later keyframe: add markers missed before
                 have = {x['poi'] for x in g['drop']['spots']}
@@ -203,6 +223,8 @@ def assemble(events):
                 continue
             g = new_game(t, d['map']); g['drop'] = dict(d, tFirst=t, tLast=t); games.append(g); continue
         # map frame
+        if g is not None and g['map'] is None: g['map'] = d['map']      # game opened by its legend select: first map seen
+        elif g is not None and g.get('banner') and g['mapFrames'] == 0 and g['map'] != d['map']: g['map'] = d['map']   # the full map outranks the banner word
         if g is None or g['map'] != d['map'] or (t - g['tEnd'] > 25 * 60 and not g['drop']):
             g = new_game(t, d['map']); games.append(g)
         elif d['harv'] and len(g['harvRaw']) >= 5 and not any(e['kind'] == 'drop' for e in events):  # ranked only
@@ -216,6 +238,8 @@ def assemble(events):
         if d.get('dropMarks') and len(d['dropMarks']) > len(g.get('dropMap') or []): g['dropMap'] = d['dropMarks']
     out = []
     for g in games:
+        if g.get('select') and not g['drop']: g['tStart'] = g['select']['tLast']     # the game starts when the screen closes
+        if g['map'] is None: g['map'] = '?'
         cl = []
         for x, y, t in g['harvRaw']:
             for c in cl:
@@ -233,6 +257,15 @@ def assemble(events):
         hv.sort(key=lambda h: (h['y'], h['x']))
         out.append({'map': g['map'], 'tStart': g['tStart'], 'tEnd': g['tEnd'], 'mapFrames': g['mapFrames'],
                     'drop': g['drop'], 'dropMap': g.get('dropMap'), 'harvesters': hv, 'calib': g['calib']})
+        if g.get('select'): out[-1]['select'] = {k: v for k, v in g['select'].items() if not k.startswith('_')}
+        if g.get('banner'): out[-1]['banner'] = g['banner']
+    # a game opened by its legend select where nobody opened the full map: same map as the nearest game of the
+    # session (less than 45 min away), marked as a guess
+    known = [g for g in out if g['map'] != '?']
+    for g in out:
+        if g['map'] == '?' and known:
+            n = min(known, key=lambda k: abs(k['tStart'] - g['tStart']))
+            if abs(n['tStart'] - g['tStart']) < 45 * 60: g['map'] = n['map']; g['mapGuessed'] = True
     return out
 
 # ---------- input ----------
@@ -340,13 +373,22 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
+    legends = HUD.Legends()
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
         tp = time.time(); perf['decode'] = perf.get('decode', 0) + tp - tw
         cands = [mode] if mode is not None else ([True, False] if votes[True] > votes[False] else [False, True])
         d = None; hud = None
-        for st in cands:
+        if False in cands:      # legend select screen (16:9 only so far): start of a game, the squad's legends
+            try: d = legends.read(img)
+            except Exception: d = None
+            if d: events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
+            else:               # loading banner before it: the mode and the map in words
+                try: bn = HUD.Banner.read(img)
+                except Exception: bn = None
+                if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
+        for st in ([] if d else cands):
             HUD.LOOSE = st
             d = read_dropscreen((view_drop(img) if st else img).astype(np.int16), st)
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
@@ -425,7 +467,7 @@ def split_restarts(games, samples):
     out = []
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
-        lo = g['tStart'] - (300 if g['drop'] is None else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
+        lo = g['tStart'] - (300 if g['drop'] is None and not g.get('select') else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
         S = HUD.clean_pos([s for s in samples if lo <= s[0] < hi])
         cuts = HUD.restart_cuts(S, HUD.ring_segments(S), g['map'])
         b = [g['tStart']] + cuts + [hi]
@@ -440,7 +482,7 @@ def split_restarts(games, samples):
 def timeline(games, samples, path=None, rank=None, mode=None):
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
-        lo = g['tStart'] - (300 if g['drop'] is None else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
+        lo = g['tStart'] - (300 if g['drop'] is None and not g.get('select') else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
         S = [s for s in samples if lo <= s[0] < hi]
         g['ring'] = HUD.number_rounds(HUD.ring_segments(S), g['map'])
         if path: HUD.refine_phases(path, g['ring'], S)
@@ -456,7 +498,9 @@ def timeline(games, samples, path=None, rank=None, mode=None):
         g['rankedShare'] = round(sum(R) / len(R), 2) if R else None
         # scrim only with evidence: the pre-game drop screen was read and no ranked badge. Without the drop
         # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
-        g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else ('scrim' if g['drop'] else 'unknown'))
+        g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else ('scrim' if g['drop'] else
+                             ('ranked' if (g.get('select') or {}).get('ranked') else       # rank badges on the legend select screen
+                              ((g.get('banner') or {}).get('mode') if (g.get('banner') or {}).get('mode') in ('wildcard',) else 'unknown'))))
         g['samples'] = S
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
@@ -517,7 +561,7 @@ def main():
         if any('event' in l for l in feed_lines):   # our squad's knocks / kills / downs per game, from the kill lines
             for i, gm in enumerate(games):          # a game's lines: from 60 s before it starts to 60 s before the next
                 t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
-                gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1)
+                gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1, (gm.get('select') or {}).get('squad'))
         if feed_lines:
             json.dump({'scanner': VERSION, 'file': os.path.basename(path), 'recStart': st, 'lines': feed_lines},
                       open(os.path.join(A.out, name + '.feed.json'), 'w'))

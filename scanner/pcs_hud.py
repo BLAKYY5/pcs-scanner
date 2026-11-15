@@ -304,6 +304,7 @@ class Weapons:
         try:
             z = np.load(path or weapon_file())
             for n in z.files:
+                if n.startswith('legend_'): continue        # legend portraits live in the same file (see Legends)
                 t = z[n].astype(np.float32); tz = t - t.mean(); pad = np.zeros((self.FH, self.FW), np.float32)
                 if t.shape[0] > self.FH or t.shape[1] > self.FW: continue
                 pad[:t.shape[0], :t.shape[1]] = tz
@@ -419,9 +420,18 @@ def _same_sig(a, b):
     if not a or not b: return a == b
     return bin(int(a, 16) ^ int(b, 16)).count('1') <= 26          # of 144 points
 
-def feed_stats(lines, t0, t1):
-    """What the kill lines between t0 and t1 say about our squad: knocks and kills we made, times we went down."""
+def feed_stats(lines, t0, t1, squad=None):
+    """What the kill lines between t0 and t1 say about our squad: knocks and kills we made, times we went down.
+    squad (the slots read on the game's legend select screen, each with the hue of its colour): the feed writes
+    each squad member's name in that same colour, so the counts are also given per player in 'players'."""
     s = {'squadKnocks': 0, 'squadKills': 0, 'squadKnocked': 0, 'squadKilled': 0, 'headshotKills': 0}
+    P = [{'slot': q['slot'], 'legend': q.get('legend'), 'self': bool(q.get('self')), 'knocks': 0, 'kills': 0, 'knocked': 0,
+          'killed': 0, 'headshotKills': 0, '_h': q['hue']} for q in (squad or []) if q.get('hue') is not None]
+    def who(side):
+        h = (side or {}).get('hue')
+        if h is None or not P: return None
+        d = [min(abs(h - q['_h']), 360 - abs(h - q['_h'])) for q in P]
+        return P[int(np.argmin(d))] if min(d) <= 20 else None
     seen = []
     for l in lines:
         if not (t0 <= l['t'] < t1) or 'event' not in l: continue
@@ -435,9 +445,15 @@ def feed_stats(lines, t0, t1):
         seen.append(l)
         knock = l['event'] == 'knock'
         if k == 'squad':
-            s['squadKnocks' if knock else 'squadKills'] += 1
+            s['squadKnocks' if knock else 'squadKills'] += 1; q = who(l.get('killer'))
             if l.get('headshot'): s['headshotKills'] += 1
-        if v == 'squad': s['squadKnocked' if knock else 'squadKilled'] += 1
+            if q:
+                q['knocks' if knock else 'kills'] += 1
+                if l.get('headshot'): q['headshotKills'] += 1
+        if v == 'squad':
+            s['squadKnocked' if knock else 'squadKilled'] += 1; q = who(l.get('victim'))
+            if q: q['knocked' if knock else 'killed'] += 1
+    if P: s['players'] = [{k_: v_ for k_, v_ in q.items() if k_ != '_h'} for q in P]
     return s
 
 # ---------- kill feed / event feed (top right): every new line saved once, read by Claude at import ----------
@@ -506,6 +522,177 @@ class Feed:
                     except Exception: pass
             except Exception: pass
             self.lines.append(line)
+
+
+# ---------- legend select screen: start of a game + each squad member's legend ----------
+LEGEND_NAMES = {'madmaggie': 'Mad Maggie', 'dummie': 'DUMMIE'}
+class Legends:
+    """The legend select screen before a game: the squad roster at the top left has one slot per player (a portrait
+    in a coloured frame, numbered in pick order). Seeing it marks the start of a game; the portrait in each slot is
+    compared with the game's own legend tiles to name the legend.
+    The tiles come from the same private file as the weapon icons (keys 'legend_<name>': the middle of each tile,
+    grey, at the size the roster draws it on a 2560-wide frame; 0 = transparent). Without them the screen is still
+    recognised by its frames, only the legends stay unnamed.
+    Measured on real frames: the right legend scores 0.53 to 0.90, the best wrong one 0.49 at most (usually < 0.45)."""
+    TOP, STEP = 172, 106.5        # top of slot 1's portrait, distance between slots (px at 1440 high)
+    X0, CW, CH = 170, 256, 128    # search window per slot: x from X0, canvas CW x CH from 22 px above the portrait
+    MIN, GAP = 0.52, 0.06         # accept: score and lead over the second best
+    SHIFTS = (0, -114)            # ranked: a rank badge left of each slot; other modes: none, the roster sits 114 px further left
+    ROW = 31                      # row of the window where the portrait sits (the lobby's party list draws them elsewhere)
+    def __init__(self, path=None):
+        self.T = []
+        try:
+            z = np.load(path or weapon_file())
+            for n in z.files:
+                if not n.startswith('legend_'): continue
+                t = z[n].astype(np.float64); m = (t > 0).astype(np.float64); k = m.sum()
+                if k < 200 or t.shape[0] > self.CH or t.shape[1] > self.CW: continue
+                tz = (t - (t * m).sum() / k) * m
+                pz = np.zeros((self.CH, self.CW)); pz[:t.shape[0], :t.shape[1]] = tz
+                pm = np.zeros((self.CH, self.CW)); pm[:t.shape[0], :t.shape[1]] = m
+                self.T.append((n[7:], t.shape, k, float(np.sqrt((tz * tz).sum())) + 1e-6, np.conj(np.fft.rfft2(pz)), np.conj(np.fft.rfft2(pm))))
+        except Exception: self.T = []
+    @classmethod
+    def frames(cls, a):
+        """Cheap test (well under 1 ms): which roster slots are on screen. Each slot has a small coloured number
+        badge at its lower right corner (always), and its frame takes the same colour once that player is picking
+        or has locked in (grey before). -> list of (slot, hue of the badge, frame coloured) for slots 1..3,
+        empty when this is not the legend select screen."""
+        for dx in cls.SHIFTS:
+            out = []
+            for k in range(3):
+                y0 = int(round(cls.TOP + cls.STEP * k))
+                B = a[y0 + 56:y0 + 80, 296 + dx:328 + dx].reshape(-1, 3); bs = B[(B.max(1) - B.min(1) > 100) & (B.max(1) > 140)]
+                if len(bs) < 60: break
+                hue = _hue(bs)
+                L = a[y0 + 35:y0 + 42, 188 + dx:208 + dx].reshape(-1, 3); ls = L[(L.max(1) - L.min(1) > 100) & (L.max(1) > 140)]
+                lit = len(ls) >= 6 and min(abs(_hue(ls) - hue), 360 - abs(_hue(ls) - hue)) < 25
+                if not lit and (L.min(1) > 150).sum() < 6: break          # grey frame: its bright edge must be there
+                out.append((k + 1, int(round(hue)), bool(lit)))
+            if out: return out, dx
+        return [], 0
+    def name(self, a, slot, dx=0):
+        """-> (legend, score) for the portrait in this slot, or (None, best score)."""
+        if not self.T: return None, 0.0
+        y0 = int(round(self.TOP + self.STEP * (slot - 1))) - 22
+        g = a[y0:y0 + self.CH, self.X0 + dx:self.X0 + dx + self.CW].astype(np.float64)
+        g = 0.299 * g[..., 0] + 0.587 * g[..., 1] + 0.114 * g[..., 2]
+        if g.shape != (self.CH, self.CW): return None, 0.0
+        G = np.fft.rfft2(g); G2 = np.fft.rfft2(g * g); res = []
+        for n, (th, tw), k, tn, F, Fm in self.T:
+            s = (self.CH, self.CW); v = (slice(0, self.CH - th + 1), slice(0, self.CW - tw + 1))
+            num = np.fft.irfft2(G * F, s=s)[v]; S = np.fft.irfft2(G * Fm, s=s)[v]; S2 = np.fft.irfft2(G2 * Fm, s=s)[v]
+            sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * 25.0)) * tn); i = int(sc.argmax())
+            res.append((float(sc.flat[i]), n, i // sc.shape[1], i % sc.shape[1] + tw))
+        res.sort(reverse=True)
+        ok = res[0][0] >= self.MIN and (len(res) < 2 or res[0][0] - res[1][0] >= self.GAP) and abs(res[0][2] - self.ROW) <= 3
+        return (res[0][1] if ok else None), round(res[0][0], 3)
+    def read(self, a):
+        """a: full frame (1440 x 2560 x 3, 16:9). -> None, or {'squad': [{'slot', 'hue', 'locked', 'self', 'legend', 'score'}]}.
+        Without the portraits file the screen needs three slots with three different colours to count."""
+        fr, dx = self.frames(a)
+        if not fr: return None
+        squad = []; whites = []
+        for slot, hue, lit in fr:
+            y0 = int(round(self.TOP + self.STEP * (slot - 1)))
+            nm = a[y0 + 4:y0 + 40, 318 + dx:560 + dx].reshape(-1, 3)
+            col = nm[(nm.max(1) > 150) & (nm.max(1) - nm.min(1) > 80)]              # letters in the slot's own colour
+            mine = len(col) >= 60 and min(abs(_hue(col) - hue), 360 - abs(_hue(col) - hue)) < 25
+            whites.append(int((nm.min(1) > 190).sum()) if mine else 999)            # white name = someone else
+            legend, score = self.name(a, slot, dx)
+            squad.append({'slot': slot, 'hue': hue, 'locked': lit, 'self': False, 'legend': legend, 'score': score})
+        if self.T:
+            if not any(s['legend'] for s in squad): return None
+        elif len(squad) < 3 or min(min(abs(p['hue'] - q['hue']), 360 - abs(p['hue'] - q['hue']))
+                                   for i, p in enumerate(squad) for q in squad[i + 1:]) < 25: return None
+        low = [i for i, w in enumerate(whites) if w < 40]       # the player's own name is coloured, not white
+        if len(low) == 1 and (len(whites) == 1 or sorted(whites)[1] > 100): squad[low[0]]['self'] = True
+        b = a[self.TOP - 2:self.TOP + 82, 72:156].astype(np.float32).mean(2)     # ranked: a rank badge left of each slot
+        return {'squad': squad, 'ranked': bool(dx == 0 and b.std() > 35)}
+
+def select_runs(events, gap=5.0, min_s=8.0, min_frames=5, max_s=120.0):
+    """Keep only the legend select reads that form a real screen: seen for 8 s to 2 min without a hole
+    (the screen lasts about 25 s; a look-alike in the lobby or one odd frame in a game must not start a game)."""
+    runs = []
+    for e in events:
+        if e['kind'] != 'select': continue
+        if runs and e['t'] - runs[-1][-1]['t'] <= gap: runs[-1].append(e)
+        else: runs.append([e])
+    bad = {id(e) for r in runs if not (min_s <= r[-1]['t'] - r[0]['t'] <= max_s and len(r) >= min_frames) for e in r}
+    return [e for e in events if id(e) not in bad]
+
+def new_select(d, t):
+    """First frame of a legend select screen."""
+    sel = {'tFirst': t, 'tLast': t, 'frames': 1, 'squad': [dict(x) for x in d['squad']], 'ranked': bool(d.get('ranked')),
+           '_rk': int(bool(d.get('ranked'))), '_own': {x['slot']: int(x['self']) for x in d['squad']}}
+    return sel
+
+def merge_select(sel, d, t):
+    """Add one more frame of the same legend select screen. Before a player's turn their slot shows a legend they
+    may not end up with, so a read with the coloured frame (picking or locked in) beats one without, and among
+    equals the latest wins. 'self' (which slot is the recording player) and 'ranked' are votes over all frames."""
+    sel['tLast'] = t; sel['frames'] += 1; sel['_rk'] += int(bool(d.get('ranked')))
+    have = {x['slot']: x for x in sel['squad']}
+    for x in d['squad']:
+        sel['_own'][x['slot']] = sel['_own'].get(x['slot'], 0) + int(x['self'])
+        o = have.get(x['slot'])
+        if o is None: sel['squad'].append(dict(x)); continue
+        if x['legend'] and (x['locked'] or not o['locked'] or not o['legend']): o.update(x)
+    sel['squad'].sort(key=lambda x: x['slot'])
+    top = max(sel['_own'].values())
+    for x in sel['squad']: x['self'] = top >= 2 and sel['_own'].get(x['slot'], 0) == top and list(sel['_own'].values()).count(top) == 1
+    sel['ranked'] = sel['_rk'] * 2 >= sel['frames']
+    return sel
+
+
+# ---------- loading banner before a game: the mode and the map in big white letters, top left ----------
+try: BANNER_T = json.load(open(os.path.join(HERE, 'pcs_banner.json')))
+except Exception: BANNER_T = {'mode': {}, 'map': {}}
+class Banner:
+    """While players connect (the 20 to 40 s before the legend select screen) a banner at the top left gives the
+    mode ("RANKED", "WILDCARD") and under it the map ("STORM POINT"). Each word is recognised by its shape: the
+    white letters, squeezed to 10 x 60 cells, against the shapes in pcs_banner.json (a table we built from our own
+    recordings, in English; a word not in the table is returned as its shape so it can be named later)."""
+    ROWS = {'mode': (138, 198), 'map': (273, 298)}
+    X0 = 180
+    @staticmethod
+    def shape(m):
+        """White letters (rows x cols of True/False) -> (150 hex digits, width / height) or None."""
+        ys = np.where(m.sum(1) > 1)[0]; xs = np.where(m.sum(0) > 0)[0]
+        if len(ys) < 8 or len(xs) < 40: return None
+        m = m[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1].astype(np.uint8) * 255
+        g = np.asarray(Image.fromarray(m).resize((60, 10), Image.BOX)) > 110
+        return ''.join('%x' % int(''.join('1' if v else '0' for v in g.flat[i:i + 4]), 2) for i in range(0, 600, 4)), round(m.shape[1] / m.shape[0], 2)
+    @staticmethod
+    def near(sig, ratio, table):
+        best = None
+        for word, L in table.items():
+            for s2, r2 in L:
+                if abs(r2 - ratio) > 0.08 * r2: continue
+                d = bin(int(sig, 16) ^ int(s2, 16)).count('1')
+                if best is None or d < best[1]: best = (word, d)
+        return best[0] if best and best[1] <= 60 else None       # 600 cells: a tenth may differ
+    @classmethod
+    def read(cls, a):
+        """a: full 16:9 frame. -> None or {'mode', 'modeSig', 'map', 'mapSig'} (a name is None when the word is unknown)."""
+        if (a[150:190:4, 20:60:4].max(2) > 215).mean() > 0.2: return None       # the plate left of the icon is never white
+        out = {}
+        for key, (y0, y1) in cls.ROWS.items():
+            m = a[y0:y1, cls.X0:1100].min(2) > 215; col = m.sum(0) > 0; xs = np.where(col)[0]
+            if not len(xs) or not (6 <= xs[0] <= 22): return None                # both words start at the same column
+            end = xs[0]; gap = 0
+            for x in range(xs[0], len(col)):                                     # the word ends at the first wide gap
+                if col[x]: end = x; gap = 0
+                else:
+                    gap += 1
+                    if gap >= 30: break
+            m = m[:, xs[0]:end + 1]
+            if m.sum(1).min() == 0 and key == 'mode': return None                # capital letters fill every row
+            if m.mean() < 0.25 or m.mean() > 0.75: return None
+            sh = cls.shape(m)
+            if not sh: return None
+            out[key] = cls.near(sh[0], sh[1], BANNER_T.get(key, {})); out[key + 'Sig'] = [sh[0], sh[1]]
+        return out
 
 
 # ---------- game mode: ranked badge (RP panel, top right) ----------

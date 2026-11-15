@@ -971,6 +971,14 @@ def test_feed_weapon_icon():
     again = sorted(L + [dict(L[0], t=104.0, y=340), dict(L[2], t=158.0)], key=lambda l: l["t"])   # the feed scrolls: the
     assert HUD.feed_stats(again, 0, 1000) == want                    # same line caught twice is counted once
     assert HUD.feed_stats(L, 0, 140)["squadKills"] == 1              # only the lines of that game's time window
+    # with the legend select read, each slot's colour is the colour of that player's name in the feed
+    squad = [{"slot": 1, "legend": "alpha", "self": True, "hue": L[0]["killer"]["hue"] + 4},
+             {"slot": 2, "legend": "bravo", "self": False, "hue": L[2]["victim"]["hue"] - 3},
+             {"slot": 3, "legend": "charlie", "self": False, "hue": 180}]
+    pl = HUD.feed_stats(L, 0, 1000, squad)["players"]
+    assert [(q["legend"], q["knocks"], q["kills"], q["knocked"], q["headshotKills"]) for q in pl] == \
+        [("alpha", 1, 1, 0, 0), ("bravo", 0, 1, 1, 1), ("charlie", 0, 0, 0, 0)], pl
+    assert "players" not in HUD.feed_stats(L, 0, 1000) and pl[0]["self"] is True
     old = {k: os.environ.pop(k, None) for k in ("PCS_WEAPON_ICONS", "PCS_DATA_DIR")}
     try:                                                             # the app's data folder is where the app puts the file
         d = TMP / "data-icons"; d.mkdir(exist_ok=True)
@@ -986,6 +994,111 @@ def test_feed_weapon_icon():
     plain = HUD.Feed(HUD.Weapons(str(TMP / "missing.npz")))          # no icons file: same lines, no weapon
     plain.read(frame("alpha_gun", arrow=True), 10.0)
     assert len(plain.lines) == 1 and set(plain.lines[0]) == {"t", "y", "jpg"}
+
+
+def test_legend_select_starts_a_game():
+    """The legend select screen starts a game and gives each squad member's legend: the last read of a slot whose
+    frame is coloured (picking or locked in) wins, the recording player is the slot whose name is not white, rank
+    badges mean ranked. One odd frame, or a look-alike drawn at another height, starts nothing."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    rng = np.random.default_rng(11)
+    names = ["alpha", "bravo", "charlie", "delta"]
+    tiles = {n: np.clip(rng.integers(1, 255, (16, 25)).repeat(4, 0).repeat(4, 1), 1, 255).astype(np.uint8) for n in names}
+    f = TMP / "legends.npz"
+    np.savez_compressed(f, some_gun=np.full((20, 40), 200, np.uint8), **{"legend_" + n: t for n, t in tiles.items()})
+    assert [t[0] for t in HUD.Weapons(str(f)).T] == ["some_gun"]              # portraits are not weapons
+    L = HUD.Legends(str(f))
+    assert sorted(t[0] for t in L.T) == names
+    COL = [(240, 160, 40), (40, 180, 190), (140, 200, 50)]
+
+    def screen(picks, locked=(True, True, True), own=1, ranked=True, dy=0, dx=0):
+        img = np.full((1440, 2560, 3), 60, np.uint8)
+        for k, n in enumerate(picks):
+            y0 = int(round(172 + 106.5 * k)) + dy
+            img[y0 + 9:y0 + 73, 215 + dx:315 + dx] = tiles[n][..., None]                 # the portrait
+            img[y0 + 56:y0 + 80, 296 + dx:328 + dx] = COL[k]                             # numbered badge, always coloured
+            img[y0 + 30:y0 + 46, 188 + dx:208 + dx] = COL[k] if locked[k] else (200, 200, 200)
+            for x in range(330 + dx, 520 + dx, 6): img[y0 + 10:y0 + 30, x:x + 3] = COL[k] if k == own else (255, 255, 255)
+        if ranked: img[170:254:6, 72:156] = 230
+        return img
+    d = L.read(screen(["alpha", "bravo", "charlie"]).astype(np.int16))
+    assert d and [s["legend"] for s in d["squad"]] == ["alpha", "bravo", "charlie"], d
+    assert [s["self"] for s in d["squad"]] == [False, True, False] and d["ranked"] is True, d
+    assert all(s["locked"] for s in d["squad"]) and d["squad"][0]["hue"] != d["squad"][1]["hue"], d
+    assert L.read(screen(["alpha", "bravo", "charlie"], dy=40).astype(np.int16)) is None     # the lobby's party list
+    d = L.read(screen(["delta", "alpha"], ranked=False, dx=-114, own=0).astype(np.int16))    # not ranked: no rank badges,
+    assert d and [s["legend"] for s in d["squad"]] == ["delta", "alpha"] and d["ranked"] is False, d   # roster further left
+    assert [s["self"] for s in d["squad"]] == [True, False], d
+    assert L.read(np.full((1440, 2560, 3), 60, np.int16)) is None
+    assert HUD.Legends(str(TMP / "missing.npz")).read(screen(["alpha", "bravo"]).astype(np.int16)) is None
+
+    # a whole screen: slot 3 looks at "delta" first, locks "charlie", then the screen fades (slot read without lock)
+    old = os.environ.get("PCS_WEAPON_ICONS"); os.environ["PCS_WEAPON_ICONS"] = str(f)
+    try:
+        frames = [(50.0, screen(["delta", "delta", "delta"]))]                # one odd frame long before: ignored
+        frames += [(100.0 + k, screen(["alpha", "bravo", "delta"], locked=(True, k > 3, False), ranked=False)) for k in range(8)]
+        frames += [(108.0 + k, screen(["alpha", "bravo", "charlie"], ranked=False)) for k in range(6)]
+        frames += [(114.0, screen(["alpha", "bravo", "delta"], locked=(True, True, False), ranked=False))]
+        events, samples, _ = SCAN.scan_frames(frames, quiet=True)
+    finally:
+        os.environ.pop("PCS_WEAPON_ICONS", None)
+        if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
+    assert [e["kind"] for e in events] == ["select"] * 16, [e["kind"] for e in events]
+    games = SCAN.assemble(events)
+    assert len(games) == 1, games
+    g = games[0]; sel = g["select"]
+    assert g["tStart"] == 114.0 and g["map"] == "?" and g["drop"] is None, g
+    assert (sel["tFirst"], sel["tLast"], sel["frames"]) == (100.0, 114.0, 15), sel
+    assert [s["legend"] for s in sel["squad"]] == ["alpha", "bravo", "charlie"], sel
+    assert [s["self"] for s in sel["squad"]] == [False, True, False] and sel["ranked"] is False, sel
+    assert not any(k.startswith("_") for k in sel), sel
+    SCAN.timeline(games, samples)
+    assert g["mode"] == "unknown", g["mode"]
+
+    # the loading banner just before the legend select names the mode and the map in big white letters
+    def word(img, y0, y1, seed, n):                                  # made-up block letters starting at x = 194
+        r = np.random.default_rng(seed); h = y1 - y0
+        for k in range(n):
+            x = 194 + k * (h + 8)
+            img[y0:y1, x:x + h] = 255
+            for _ in range(2):
+                yy, xx = int(r.integers(0, h - h // 3)), int(r.integers(h // 4, h - h // 3))
+                img[y0 + yy:y0 + yy + h // 3, x + xx:x + h] = 60
+    def banner(mode_seed, mode_n, map_seed, map_n):
+        img = np.full((1440, 2560, 3), 60, np.uint8)
+        word(img, 138, 198, mode_seed, mode_n); word(img, 273, 298, map_seed, map_n)
+        return img
+    b = HUD.Banner.read(banner(1, 6, 2, 9))
+    assert b and b["mode"] is None and b["map"] is None and len(b["modeSig"][0]) == 150, b    # unknown words: their shapes
+    assert HUD.Banner.read(np.full((1440, 2560, 3), 60, np.uint8)) is None
+    assert HUD.Banner.read(screen(["alpha", "bravo", "charlie"])) is None
+    keep = HUD.BANNER_T
+    try:
+        HUD.BANNER_T = {"mode": {"wildcard": [b["modeSig"]]}, "map": {"SP": [b["mapSig"]]}}
+        b2 = HUD.Banner.read(banner(1, 6, 2, 9)); other = HUD.Banner.read(banner(5, 8, 2, 9))
+        assert (b2["mode"], b2["map"]) == ("wildcard", "SP") and (other["mode"], other["map"]) == (None, "SP"), (b2, other)
+        frames = [(80.0 + k, banner(1, 6, 2, 9)) for k in range(6)]
+        frames += [(100.0 + k, screen(["alpha", "bravo", "charlie"], ranked=False, dx=-114)) for k in range(12)]
+        os.environ["PCS_WEAPON_ICONS"] = str(f)
+        try: events, samples, _ = SCAN.scan_frames(frames, quiet=True)
+        finally:
+            os.environ.pop("PCS_WEAPON_ICONS", None)
+            if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
+        assert [e["kind"] for e in events] == ["banner"] * 6 + ["select"] * 12, [e["kind"] for e in events]
+        games = SCAN.assemble(events); SCAN.timeline(games, samples)
+        g = games[0]
+        assert len(games) == 1 and g["map"] == "SP" and g["mode"] == "wildcard" and not g.get("mapGuessed"), g
+        assert g["banner"]["mode"] == "wildcard" and g["banner"]["frames"] == 6 and "modeSig" not in g["banner"], g["banner"]
+        from pcs_recorder import labels
+        assert labels.auto({"games": games}) == "wildcard"
+    finally:
+        HUD.BANNER_T = keep
+    import json as _json
+    real = _json.loads((Path(__file__).resolve().parent.parent / "scanner" / "pcs_banner.json").read_text())
+    assert {"ranked", "wildcard"} <= set(real["mode"]) and set(real["map"]) <= set(SCAN.MAPS), real.keys()
 
 
 if __name__ == "__main__":
