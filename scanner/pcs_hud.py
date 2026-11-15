@@ -595,7 +595,10 @@ class Legends:
         squad = []; whites = []
         for slot, hue, lit in fr:
             y0 = int(round(self.TOP + self.STEP * (slot - 1)))
-            whites.append(int((a[y0 + 4:y0 + 40, 318 + dx:560 + dx].min(2) > 190).sum()))      # white name = someone else
+            nm = a[y0 + 4:y0 + 40, 318 + dx:560 + dx].reshape(-1, 3)
+            col = nm[(nm.max(1) > 150) & (nm.max(1) - nm.min(1) > 80)]              # letters in the slot's own colour
+            mine = len(col) >= 60 and min(abs(_hue(col) - hue), 360 - abs(_hue(col) - hue)) < 25
+            whites.append(int((nm.min(1) > 190).sum()) if mine else 999)            # white name = someone else
             legend, score = self.name(a, slot, dx)
             squad.append({'slot': slot, 'hue': hue, 'locked': lit, 'self': False, 'legend': legend, 'score': score})
         if self.T:
