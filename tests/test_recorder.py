@@ -1086,28 +1086,41 @@ def test_legend_select_starts_a_game():
     assert HUD.Banner.read(screen(["alpha", "bravo", "charlie"])) is None
     keep = HUD.BANNER_T
     try:
-        HUD.BANNER_T = {"mode": {"wildcard": [b["modeSig"]]}, "map": {"SP": [b["mapSig"]]}}
-        b2 = HUD.Banner.read(banner(1, 6, 2, 9)); other = HUD.Banner.read(banner(5, 8, 2, 9))
-        assert (b2["mode"], b2["map"]) == ("wildcard", "SP") and (other["mode"], other["map"]) == (None, "SP"), (b2, other)
-        frames = [(80.0 + k, banner(1, 6, 2, 9)) for k in range(6)]
-        frames += [(100.0 + k, screen(["alpha", "bravo", "charlie"], ranked=False, dx=-114)) for k in range(12)]
-        os.environ["PCS_WEAPON_ICONS"] = str(f)
-        try: events, samples, _ = SCAN.scan_frames(frames, quiet=True)
-        finally:
-            os.environ.pop("PCS_WEAPON_ICONS", None)
-            if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
-        assert [e["kind"] for e in events] == ["banner"] * 6 + ["select"] * 12, [e["kind"] for e in events]
-        games = SCAN.assemble(events); SCAN.timeline(games, samples)
-        g = games[0]
-        assert len(games) == 1 and g["map"] == "SP" and g["mode"] == "wildcard" and not g.get("mapGuessed"), g
-        assert g["banner"]["mode"] == "wildcard" and g["banner"]["frames"] == 6 and "modeSig" not in g["banner"], g["banner"]
-        from pcs_recorder import labels
-        assert labels.auto({"games": games}) == "wildcard"
+        # the table's mode keys are the scanner's modes: the same word gives wildcard or pubs (pubs trios says TRIOS)
+        for name in ("wildcard", "pubs"):
+            HUD.BANNER_T = {"mode": {name: [b["modeSig"]]}, "map": {"SP": [b["mapSig"]]}}
+            b2 = HUD.Banner.read(banner(1, 6, 2, 9)); other = HUD.Banner.read(banner(5, 8, 2, 9))
+            assert (b2["mode"], b2["map"]) == (name, "SP") and (other["mode"], other["map"]) == (None, "SP"), (b2, other)
+            frames = [(80.0 + k, banner(1, 6, 2, 9)) for k in range(6)]
+            frames += [(100.0 + k, screen(["alpha", "bravo", "charlie"], ranked=False, dx=-114)) for k in range(12)]
+            os.environ["PCS_WEAPON_ICONS"] = str(f)
+            try: events, samples, _ = SCAN.scan_frames(frames, quiet=True)
+            finally:
+                os.environ.pop("PCS_WEAPON_ICONS", None)
+                if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
+            assert [e["kind"] for e in events] == ["banner"] * 6 + ["select"] * 12, [e["kind"] for e in events]
+            games = SCAN.assemble(events); SCAN.timeline(games, samples)
+            g = games[0]
+            assert len(games) == 1 and g["map"] == "SP" and g["mode"] == name and not g.get("mapGuessed"), g
+            assert g["banner"]["mode"] == name and g["banner"]["frames"] == 6 and "modeSig" not in g["banner"], g["banner"]
+            from pcs_recorder import labels
+            assert labels.auto({"games": games}) == name
+        # priority: scrims, ranked, wildcard, then pubs
+        assert labels.auto({"games": [{"mode": "pubs"}, {"mode": "wildcard"}]}) == "wildcard"
+        assert labels.auto({"games": [{"mode": "pubs"}, {"mode": "ranked"}]}) == "ranked"
+        assert labels.auto({"games": [{"mode": "pubs"}, {"mode": "unknown"}]}) == "pubs"
     finally:
         HUD.BANNER_T = keep
     import json as _json
     real = _json.loads((Path(__file__).resolve().parent.parent / "scanner" / "pcs_banner.json").read_text())
-    assert {"ranked", "wildcard"} <= set(real["mode"]) and set(real["map"]) <= set(SCAN.MAPS), real.keys()
+    assert {"ranked", "wildcard", "pubs"} <= set(real["mode"]) and set(real["map"]) <= set(SCAN.MAPS), real.keys()
+    pubs = real["mode"]["pubs"]
+    assert pubs and all(len(s[0]) == 150 and int(s[0], 16) >= 0 for s in pubs), pubs
+    cells = lambda a, b: bin(int(a, 16) ^ int(b, 16)).count("1")                # 150 hex = 600 cells
+    for other_mode in ("ranked", "wildcard"):
+        for s in pubs:
+            for o in real["mode"][other_mode]:
+                assert cells(s[0], o[0]) > 150, (other_mode, cells(s[0], o[0]))
 
 
 def test_squads_left_counter():

@@ -81,8 +81,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
 - **Scan validity**: `read_nothing` (no layout votes, no games) = failed scan, retry. `no_game` needs the video
   to have been read, no games and no feed lines; those recordings are deleted first by retention.
 - **Game mode**: the ranked badge share alone is unreliable. A scrim needs proof: the scrim drop screen (all 20
-  spots). Labels (scrims / ranked / pubs / wildcard) come from the scan or are set by hand; pubs and wildcard
-  can't be detected yet.
+  spots). Labels (scrims / ranked / pubs / wildcard) come from the scan or are set by hand. Wildcard and pubs
+  come from the loading banner's mode word (pubs: trios only, word TRIOS); duos or other playlists show another
+  word and stay `unknown` (with `banner.modeSig`) until that word is named in the table.
 - **YouTube**: blocks = recordings less than `yt_gap_min` apart, one video per block per player, ffmpeg concat
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
@@ -112,8 +113,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   lobby's party list (rejected by position) and odd single frames (rejected by duration). 16:9 only so far.
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
-  only: ranked, wildcard; SP, ED, BM so far). It gives `games[].banner`, the map when nobody opens it, and the
-  `wildcard` mode/label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to teach it.
+  only: ranked, wildcard, pubs (the word TRIOS of pubs trios); SP, ED, BM so far). The table's mode keys are the
+  scanner's mode values, not the on-screen words. It gives `games[].banner`, the map when nobody opens it, and the
+  `wildcard` / `pubs` mode and label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to
+  teach it (pubs duos and other playlists are still unknown).
 - **Squads left**: `pcs_hud.SquadsLeft` reads the number in front of "SQUADS LEFT" (top right) once a second,
   digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
   time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close

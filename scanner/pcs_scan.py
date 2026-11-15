@@ -508,7 +508,7 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
         g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else ('scrim' if g['drop'] else
                              ('ranked' if (g.get('select') or {}).get('ranked') else       # rank badges on the legend select screen
-                              ((g.get('banner') or {}).get('mode') if (g.get('banner') or {}).get('mode') in ('wildcard',) else 'unknown'))))
+                              ((g.get('banner') or {}).get('mode') if (g.get('banner') or {}).get('mode') in ('wildcard', 'pubs') else 'unknown'))))
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
