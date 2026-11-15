@@ -991,6 +991,15 @@ def test_feed_weapon_icon():
             os.environ.pop(k, None)
             if v is not None: os.environ[k] = v
     assert HUD.WEAPON_NAMES["r97"] == "R-99"
+    # a dual-wield icon is the single one drawn twice: the single icon fits it too, the bigger one must win
+    one = icons["beta_gun"]; two = np.concatenate([one, one[:, 3:]], 1)
+    f2 = TMP / "weapons-dual.npz"
+    np.savez_compressed(f2, beta_gun=one, beta_gun_akimbo_active=two)
+    W2 = HUD.Weapons(str(f2))
+    line = np.zeros((40, 400, 3), np.uint8); line[6:6 + two.shape[0], 150:150 + two.shape[1]] = two[..., None]
+    assert W2.match(line)["weapon"] == "beta_gun_akimbo_active", W2.match(line)
+    line = np.zeros((40, 400, 3), np.uint8); line[6:6 + one.shape[0], 150:150 + one.shape[1]] = one[..., None]
+    assert W2.match(line)["weapon"] == "beta_gun", W2.match(line)
     plain = HUD.Feed(HUD.Weapons(str(TMP / "missing.npz")))          # no icons file: same lines, no weapon
     plain.read(frame("alpha_gun", arrow=True), 10.0)
     assert len(plain.lines) == 1 and set(plain.lines[0]) == {"t", "y", "jpg"}
