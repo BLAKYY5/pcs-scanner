@@ -112,7 +112,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   lobby's party list (rejected by position) and odd single frames (rejected by duration). 16:9 only so far.
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
-  only: ranked, wildcard; SP, ED so far). It gives `games[].banner`, the map when nobody opens it, and the
+  only: ranked, wildcard; SP, ED, BM so far). It gives `games[].banner`, the map when nobody opens it, and the
   `wildcard` mode/label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to teach it.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
