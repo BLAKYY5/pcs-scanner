@@ -1133,6 +1133,28 @@ def test_squads_left_counter():
     assert HUD.squads_timeline(reads, 0, 400) == [[10, 20], [30, 19], [50, 18], [310, 17]], HUD.squads_timeline(reads, 0, 400)
     assert HUD.squads_timeline(reads, 400, 900) == [[500, 20]]
 
+    # the player's own kills, assists and knocks under it: same digits; knocks are dark on a white plate
+    def strip(kills=None, assists=None, knocks=None):
+        img = np.full((1440, 2560, 3), 40, np.uint8)
+        def put(x, text, h, colour=255):
+            from PIL import Image
+            for ch in text:
+                w = round(14 * h / 22)
+                g = np.asarray(Image.fromarray(cells(ch).astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 127
+                img[134:134 + h, x:x + w][g] = colour; x += w + 3
+        if kills is not None: put(2006, str(kills), 22)
+        if assists is not None: put(2089, str(assists), 22)
+        if knocks is not None:
+            img[128:160, 2125:2230] = 250; put(2176, str(knocks), 16, 20)
+        return img
+    assert HUD.OwnStats.read(strip(kills=3, assists=1, knocks=2)) == {"kills": 3, "assists": 1, "knocks": 2}
+    assert HUD.OwnStats.read(strip(kills=12, assists=0)) == {"kills": 12, "assists": 0}
+    assert HUD.OwnStats.read(strip()) == {}
+    # the final value is the usual one at the end of the game, not the highest ever read (one misread must not win)
+    R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 2), (52, 2)]
+    assert HUD.stat_final(R, 0, 100) == (2, 30, 52), HUD.stat_final(R, 0, 100)
+    assert HUD.stat_final([(10, 5), (11, 5)], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
+
 
 if __name__ == "__main__":
     for name, fn in list(globals().items()):

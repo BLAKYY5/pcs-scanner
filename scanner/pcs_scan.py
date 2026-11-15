@@ -412,6 +412,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 try: sq = HUD.SquadsLeft.read(img)
                 except Exception: sq = None
                 if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
+                try: own = HUD.OwnStats.read(img)
+                except Exception: own = {}
+                if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
+                    perf.setdefault('_own', []).append((round(t, 2), own))
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -449,9 +453,9 @@ def scan_video(path, snap=None, workers=0):
             for k, r in enumerate(pool.imap_unordered(_segment, jobs), 1):
                 out.append(r); print(f'  chunk {k}/{workers} done  [{time.time() - t0:.0f}s]', flush=True)
     out.sort(key=lambda r: r[0])
-    labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []
+    labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
     for start, ev, sm, reps, pf in out:
-        feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', [])
+        feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -463,7 +467,7 @@ def scan_video(path, snap=None, workers=0):
     HUD.STRETCH = LAYOUT if LAYOUT is not None else v43 > v169; HUD.LOOSE = HUD.STRETCH
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
-    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads)
+    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -483,7 +487,7 @@ def split_restarts(games, samples):
             out.append(part)
     return out
 
-def timeline(games, samples, path=None, rank=None, mode=None, squads=None):
+def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=None):
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
         lo = g['tStart'] - (300 if g['drop'] is None and not g.get('select') else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
@@ -508,6 +512,12 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None):
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
+        if own:                 # the recording player's own kills / assists / knocks: the value shown most at the end
+            st = {}
+            for k in ('kills', 'assists', 'knocks'):
+                f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi)
+                if f: st[k] = f[0]; st[k + 'At'] = f[1]; st[k + 'LastRead'] = f[2]
+            if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
     prev = None
@@ -545,7 +555,7 @@ def main():
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
         if kind == 'video': games = split_restarts(games, samples)
-        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []))
+        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []))
         perf['refine'] = time.time() - t_tl
         audio = None
         if kind == 'video':     # sound cues from the game track back up what was read on screen
