@@ -381,7 +381,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
         cands = [mode] if mode is not None else ([True, False] if votes[True] > votes[False] else [False, True])
         d = None; hud = None
         if False in cands:      # legend select screen (16:9 only so far): start of a game, the squad's legends
-            try: d = legends.read(img.astype(np.int16))
+            try: d = legends.read(img)
             except Exception: d = None
             if d: events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
             else:               # loading banner before it: the mode and the map in words
