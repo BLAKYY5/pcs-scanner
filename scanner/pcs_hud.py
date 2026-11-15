@@ -319,16 +319,23 @@ class Weapons:
         if not self.T: return None
         g = np.asarray(rgb, np.float32).min(2)[:self.FH, :self.FW]     # white icon stays bright, coloured names drop
         H, Wd = g.shape; c = np.zeros((self.FH, self.FW), np.float64); c[:H, :Wd] = g
-        G = np.fft.rfft2(c); best = None
+        G = np.fft.rfft2(c); best = None; good = []
         for n, (th, tw), tn, F in self.T:
             if th > H or tw > Wd: continue
             num = np.fft.irfft2(G * F, s=(self.FH, self.FW))[:H - th + 1, :Wd - tw + 1]
             k = th * tw; S = self._box(c[:H, :Wd], th, tw); S2 = self._box(c[:H, :Wd] ** 2, th, tw)
             sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * self.STD ** 2)) * tn)
             i = int(sc.argmax()); y, x = divmod(i, sc.shape[1])
-            if best is None or sc[y, x] > best['score']:
-                best = {'weapon': n, 'score': float(sc[y, x]), 'x': x, 'y': y, 'w': tw, 'h': th}
-        return best if best and best['score'] >= self.MIN else None
+            r = {'weapon': n, 'score': float(sc[y, x]), 'x': x, 'y': y, 'w': tw, 'h': th}
+            if r['score'] >= self.MIN: good.append(r)
+            if best is None or r['score'] > best['score']: best = r
+        if not best or best['score'] < self.MIN: return None
+        # A dual-wield icon is the single one drawn twice, so the single icon also fits a dual line (and can score
+        # a hair higher). When a clearly bigger icon fits the same spot almost as well, it is the bigger one.
+        for r in sorted(good, key=lambda r: -r['w'] * r['h']):
+            if r['w'] * r['h'] >= 1.4 * best['w'] * best['h'] and r['score'] >= best['score'] - 0.06 \
+               and r['x'] <= best['x'] + 2 and r['x'] + r['w'] >= best['x'] + best['w'] - 2: return r
+        return best
 
 def red_arrow(rgb, x0, x1):
     """The red down arrow the feed draws between the weapon and the victim (columns x0..x1 of a line)."""
