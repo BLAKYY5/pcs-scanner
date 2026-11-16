@@ -103,8 +103,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
   → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
-  minimap, so a map's game transform (`_game_tx`) works directly. WE / ED / SP use values fitted in Oct 2026, BM the
-  game transform checked on 12 own-arrow / POS pairs (rms < 0.8 %), KC the game transform unchecked
+  minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
+  game transform checked on 12 own-arrow / POS pairs (rms < 0.8 %), ED the game transform since 16 Nov 2026 (coach's
+  decision: 13 pairs, rms 0.33 / 0.49 % against 0.74 / 0.69 % for the Oct fit; none of the 16 known ED landings changed
+  place; Oct values kept in a comment), KC the game transform unchecked
   (`mapCalibrated: false`), OL none yet. Each `games[].calib` entry (own arrow on the full map) paired with `POS`
   just before and after it is a calibration pair; the arrow blob is sometimes wrong (reject outliers). BM and KC
   have POI centres only: a landing more than `POI_NEAR` (12 %) from every centre gets no name (Broken Moon's middle

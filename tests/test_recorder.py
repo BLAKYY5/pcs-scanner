@@ -1474,6 +1474,24 @@ def test_landing_place_broken_moon():
         assert SCAN.landing_poi("WE", mx, my) == SCAN.poi_at("WE", mx, my)[0]
 
 
+def test_landing_place_e_district():
+    """E-District uses the game's own minimap transform (coach's decision, 16 Nov 2026): the map's centre is world 0, 0,
+    own-arrow / POS pairs fit within half a percent, and the known landings keep their place."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    assert HUD.CAL["ED"] == HUD._game_tx(-43008, 43008, 21) and "ED" not in HUD.CAL_UNCHECKED
+    assert HUD.to_map("ED", 0, 0) == (50.0, 50.0)
+    ax, ay = HUD.to_map("ED", -11889, 8641)                   # 4 Nov: own arrow on the full map at 36.24, 40.35
+    assert abs(ax - 36.24) < 0.5 and abs(ay - 40.35) < 0.5, (ax, ay)
+    x, y = HUD.to_map("ED", 26519.45, 8113.98)                # 15 Nov, landed in The Heights (east edge: moved most)
+    assert abs(x - 80.83) < 0.05 and abs(y - 40.57) < 0.05, (x, y)
+    assert SCAN.landing_poi("ED", x, y) == "ed-heights"
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", 4103.86, 6782.84)) == "ed-energy-bank"     # 4 Nov
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", -23252.34, -8508.78)) == "ed-neon-square"  # 4 Nov
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", -4046.32, -33641.3)) == "ed-shipyard-arcade"  # 3 Nov, south edge
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
