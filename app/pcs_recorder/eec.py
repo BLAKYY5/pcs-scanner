@@ -104,11 +104,9 @@ def match_game(res: dict, abs_time: float, index: int) -> dict | None:
 
 
 def from_hub(hub_url: str, team: str, start: float, end: float) -> dict | None:
-    """Ask the team hub for an imported lobby that was played during this block."""
-    import requests
-    r = requests.get(f"{hub_url}/api/db/scrims", timeout=10)
-    r.raise_for_status()
-    for d in r.json():
+    """Ask the team hub for an imported lobby that was played during this block (with the player's key)."""
+    from . import hub
+    for d in hub.get_json(hub_url, "/api/db/scrims"):
         doc = d.get("data", d)
         lobby = from_hub_doc(doc)
         starts = [g["start"] for g in lobby["games"] if g["start"]]

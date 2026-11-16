@@ -1456,6 +1456,36 @@ def test_check_set_scoring():
     assert len(CS.load(str(ex))) >= 2
 
 
+def test_hub_answer_shown_on_recording():
+    """What the hub answered for a recording ("Sent to hub: 11 games") is kept on it (Recordings list) and told."""
+    from pcs_recorder.runtime import Sent
+
+    class HubWithAnswer(FakeHub):
+        def upload(self, files):
+            self.uploads.append([f.name for f in files])
+            out = Sent(["the team hub"])
+            out.hub_note = "Sent to hub: 11 games"
+            return out
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"vids-{time.time_ns()}")
+    v = make_file(s.folder_path, "Apex Legends_hub.mp4", UNIT)
+    out = v.with_suffix(".scan")
+    out.mkdir()
+    (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}]}')
+    (out / (v.stem + ".feed.json")).write_text("{}")
+    hub, ui = HubWithAnswer(), FakeUI()
+    r = Recorder(s, FakeOBS(s.folder_path), hub, ui, fake_scan, is_apex_running=lambda: False)
+    r.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
+    r._retry_uploads()
+    e = r.idx["k"]
+    assert e.status == "uploaded" and e.note == "Sent to hub: 11 games", vars(e)
+    assert hub.uploads == [[v.stem + ".feed.json", v.stem + ".scan.json"]], hub.uploads   # one upload, both files
+    assert any(t == "Results sent" and "11 games" in m for t, m, *_ in ui.notes), ui.notes
+    r._retry_uploads()
+    assert len(hub.uploads) == 1                                                       # never sent twice
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

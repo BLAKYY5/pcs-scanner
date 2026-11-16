@@ -15,6 +15,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from . import hub as hubmod
 from . import obs as obsmod
 from . import settings as st
 from .core import NeedsSignIn, Recorder
@@ -192,9 +193,15 @@ class Hotkeys:
                 pass
 
 
+class Sent(list):
+    """Where the results went (["the team hub", "Google Drive"]), plus the hub's answer in one line."""
+    hub_note = ""
+
+
 class Sender:
     """Results go to the team hub when one is set, and to Google Drive when the player is signed in.
-    It succeeds if at least one of them took the files; otherwise the recorder retries later."""
+    It succeeds if at least one of them took the files; otherwise the recorder retries later.
+    Hub requests carry the player's key (pcs_recorder.hub); a refused key stops hub uploads until it changes."""
 
     def __init__(self, s: st.Settings, drive_upload):
         self.s, self.drive_upload = s, drive_upload
@@ -202,30 +209,26 @@ class Sender:
     def report(self, data: dict) -> None:
         if not self.s.hub_url:
             return
-        import requests
         try:
-            requests.post(f"{self.s.hub_url}/api/recorder/sessions", json=data, timeout=5)
+            hubmod.report(self.s.hub_url, data)
         except Exception as e:
             log.info("hub report not sent: %s", e)
 
-    def upload(self, files: list[Path]) -> None:
+    def upload(self, files: list[Path]) -> "Sent":
         if not files:
-            return []
-        sent, errors, where = False, [], []
+            return Sent()
+        sent, errors, where = False, [], Sent()
         if self.s.hub_url:
-            import requests
-            handles = [("files", (f.name, open(f, "rb"))) for f in files]
             try:
-                r = requests.post(f"{self.s.hub_url}/api/scans", files=handles, data={"uploader": self.s.player}, timeout=300)
-                r.raise_for_status()
+                answer = hubmod.upload(self.s.hub_url, files, self.s.player)   # all files in one request
                 sent = True
+                where.append("the team hub")
+                where.hub_note = hubmod.summary(answer)
+            except hubmod.HubError as e:
+                errors.append(str(e))
+                where.hub_note = "Not sent to hub: " + ("key refused" if e.kind == "refused" else str(e))
             except Exception as e:
                 errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
-            finally:
-                for _, (_, h) in handles:
-                    h.close()
-            if sent:
-                where.append("the team hub")
         try:
             if self.drive_upload([str(f) for f in files]):
                 sent = True
