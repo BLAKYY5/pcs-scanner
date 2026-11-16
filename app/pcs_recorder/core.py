@@ -208,6 +208,8 @@ class Recorder:
         import json
         e = self.idx[key]
         data = {"tracks": self.s.tracks(), "events": self.events, "player": self.s.player}
+        if "discord" in data["tracks"]:
+            data["voice"] = self.s.voice_name()          # the voice app on that track: Discord, TeamSpeak…
         try:
             Path(e.path).with_suffix(".events.json").write_text(json.dumps(data, indent=1), encoding="utf-8")
         except OSError as ex:

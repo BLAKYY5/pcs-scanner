@@ -30,7 +30,8 @@ VIDEO_EXT = (".mp4", ".mkv", ".mov")
 UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
-              "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "mic_audio", "mic_device", "send_mic",
+              "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
+              "mic_audio", "mic_device", "send_mic",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
@@ -67,15 +68,18 @@ def audio_tracks(video: str) -> list[dict]:
         n = len([x for x in r.stdout.split() if x.strip()])
     except Exception:
         n = 1
-    names = []
+    names, label = [], dict(TRACK_LABEL)
     ev = Path(video).with_suffix(".events.json")
     if ev.exists():
         try:
-            names = json.loads(ev.read_text(encoding="utf-8")).get("tracks", [])
+            d = json.loads(ev.read_text(encoding="utf-8"))
+            names = d.get("tracks", [])
+            if isinstance(d.get("voice"), str) and d["voice"].strip():
+                label["discord"] = d["voice"].strip()[:40]        # the voice app recorded: TeamSpeak, Mumble…
         except Exception:
             pass
     return [{"n": i, "key": names[i] if i < len(names) else f"track{i + 1}",
-             "label": TRACK_LABEL.get(names[i], names[i]) if i < len(names) else f"Audio {i + 1}"} for i in range(n)]
+             "label": label.get(names[i], names[i]) if i < len(names) else f"Audio {i + 1}"} for i in range(n)]
 
 
 def track_file(video: str, n: int) -> Path:
@@ -302,6 +306,16 @@ class Backend:
         if cur and cur != "default" and cur not in {d["id"] for d in devs}:
             devs.append({"id": cur, "name": "Saved microphone (not plugged in)"})
         return {"current": cur or "default", "devices": [{"id": "default", "name": "Windows default microphone"}] + devs}
+
+    def voice_apps(self) -> dict:
+        """Programs running now with a window, to pick the voice app recorded on track 2."""
+        from pcs_recorder import obs
+        s = self.auto.s if self.auto else None
+        try:
+            running = obs.window_apps()
+        except Exception:
+            running = []
+        return {"current": getattr(s, "voice_app", "discord"), "exe": getattr(s, "voice_exe", ""), "running": running}
 
     def signin(self) -> None:
         def go():
@@ -631,7 +645,23 @@ class Backend:
         if role is not None:                                 # last: refusing Coach must not lose the rest
             self._save_settings({"role": role})
 
+    @staticmethod
+    def _check_voice(body: dict) -> None:
+        """The voice app: Discord, TeamSpeak, or another program given by its name only (e.g. Mumble.exe)."""
+        from pcs_recorder import settings as st
+        if "voice_app" not in body and "voice_exe" not in body:
+            return
+        app = body.get("voice_app", "discord")
+        if app not in st.VOICE_APPS:
+            raise ValueError("Unknown voice app.")
+        exe = str(body.get("voice_exe") or "").strip()
+        if app == "other" and not st.valid_exe(exe):
+            raise ValueError("Pick the voice app's program, or type its name (like Mumble.exe).")
+        if "voice_exe" in body:
+            body["voice_exe"] = st.valid_exe(exe) or ""      # Discord / TeamSpeak: a leftover typed name is dropped
+
     def _save_settings(self, body: dict) -> None:
+        self._check_voice(body)                              # before anything is saved
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
         if "team_link" in body:
@@ -845,6 +875,8 @@ class Server:
                         return self._json(b.yt_queue())
                     if path == "/api/mics":
                         return self._json(b.mics())
+                    if path == "/api/voiceapps":
+                        return self._json(b.voice_apps())
                     if path.startswith("/api/library/") and path.endswith("/levels"):
                         d = b.levels(path.split("/")[3])
                         return self._json(d) if d else self._json({"error": "not found"}, 404)

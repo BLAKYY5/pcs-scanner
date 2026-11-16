@@ -844,6 +844,90 @@ def test_microphone_choice():
     assert created["PCS Mic"]["device_id"] == s.mic_device, created
 
 
+def test_voice_app_choice():
+    """Track 2 records the voice app the player picked: Discord (default, unchanged), TeamSpeak (classic and new
+    client both listened to), or another program given by its name only. Changing it restarts OBS."""
+    import json
+    from pcs_recorder import obs as obsmod
+    v = settings.valid_exe
+    assert v("Mumble.exe") == "Mumble.exe" and v(" TeamSpeak.exe ") == "TeamSpeak.exe" and v("ts3client_win64.exe")
+    for bad in ("", "mumble", "C:\\x\\Mumble.exe", "..\\Mumble.exe", "a/b.exe", "x.exe & calc", "x.exe\"", "a:b.exe",
+                "#x.exe", "r5apex_dx12.exe", "OBS64.EXE", "x" * 70 + ".exe", None, 5):
+        assert v(bad) is None, bad
+    # defaults: Discord, same OBS source text as before, same signature as before this setting existed
+    s = settings.Settings(comms_consent=True)
+    assert s.voice_app == "discord" and s.voice_exes() == ["Discord.exe"] and s.voice_name() == "Discord"
+    assert obsmod.voice_sources(s) == [("PCS Discord", {"window": obsmod.DISCORD_WINDOW, "priority": 2})]
+    sig = obsmod.config_signature(s)
+    assert sig == f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|game,discord,mic|{s.mic_device}"
+
+    def prepared(s):
+        created, tracks, mutes = {}, {}, []
+
+        class C:
+            def __getattr__(self, name):
+                def f(*a, **k):
+                    if name == "create_input":
+                        created[a[1]] = (a[2], a[3])
+                    if name == "set_input_audio_tracks":
+                        tracks[a[0]] = [n for n, on in a[1].items() if on]
+                    if name == "set_input_mute":
+                        mutes.append(a)
+                    if name == "get_scene_list":
+                        return type("x", (), {"scenes": []})()
+                    if name == "get_input_list":
+                        return type("x", (), {"inputs": []})()
+                    if name == "get_special_inputs":
+                        return type("x", (), {})()
+                return f
+        o = obsmod.OBS(s)
+        o.c = C()
+        o.prepare(1920, 1080)
+        return o, created, tracks, mutes
+    o, created, tracks, _ = prepared(s)
+    assert created["PCS Discord"] == ("wasapi_process_output_capture",
+                                      {"window": "Discord:Chrome_WidgetWin_1:Discord.exe", "priority": 2})
+    assert "PCS Voice 2" not in created and tracks["PCS Discord"] == ["2"] and tracks["PCS Mic"] == ["3"]
+    # TeamSpeak: both clients on track 2, matched by program (title and class unknown: left empty)
+    s.voice_app = "teamspeak"
+    assert s.clamp().voice_name() == "TeamSpeak" and obsmod.config_signature(s) != sig
+    o, created, tracks, mutes = prepared(s)
+    assert created["PCS Discord"] == ("wasapi_process_output_capture", {"window": "::ts3client_win64.exe", "priority": 2})
+    assert created["PCS Voice 2"] == ("wasapi_process_output_capture", {"window": "::TeamSpeak.exe", "priority": 2})
+    assert tracks["PCS Discord"] == tracks["PCS Voice 2"] == ["2"] and tracks["PCS Mic"] == ["3"]
+    mutes.clear()
+    assert o.mute("discord", True) and mutes == [("PCS Discord", True), ("PCS Voice 2", True)]
+    # another program
+    s.voice_app, s.voice_exe = "other", "Mumble.exe"
+    sig_ts = obsmod.config_signature(s)
+    assert s.clamp().voice_name() == "Mumble" and s.voice_exes() == ["Mumble.exe"]
+    o, created, tracks, _ = prepared(s)
+    assert created["PCS Discord"] == ("wasapi_process_output_capture", {"window": "::Mumble.exe", "priority": 2})
+    assert "PCS Voice 2" not in created
+    s.voice_exe = "Vesktop.exe"
+    assert obsmod.config_signature(s) not in (sig, sig_ts)
+    # "other" without a valid program: no voice track (the mic moves up), never something else recorded
+    s.voice_exe = "C:\\evil\\x.exe"
+    s.clamp()
+    assert s.voice_exe == "" and s.voice_exes() == [] and s.tracks() == ["game", "mic"]
+    _, created, tracks, _ = prepared(s)
+    assert "PCS Discord" not in created and tracks["PCS Mic"] == ["2"]
+    # unknown app falls back to Discord; the voice track needs the team's consent, whatever the app
+    assert settings.Settings(voice_app="skype").clamp().voice_app == "discord"
+    assert settings.Settings(voice_app="teamspeak", comms_consent=False).tracks() == ["game"]
+    # saved and loaded like the other settings
+    settings.save(settings.Settings(voice_app="other", voice_exe="Mumble.exe"))
+    saved = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+    assert saved["voice_app"] == "other" and saved["voice_exe"] == "Mumble.exe" and "discord_audio" in saved
+    s2 = settings.load()
+    assert (s2.voice_app, s2.voice_exe) == ("other", "Mumble.exe")
+    # running programs with a window: names only, valid ones
+    apps = obsmod.window_apps()
+    assert isinstance(apps, list) and all(settings.valid_exe(a["exe"]) for a in apps), apps
+    print("  programs with a window:", [a["exe"] for a in apps][:12])
+    settings.save(settings.Settings())
+
+
 def test_sound_ring_moving():
     """The ring alarm (steady 374 + 533 Hz tones, pulsing) is found in noisy game sound, and matched to the rings
     read on screen; other tones and plain noise don't trigger it."""

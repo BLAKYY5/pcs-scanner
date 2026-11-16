@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -14,7 +15,23 @@ SETTINGS_FILE = APP_DIR / "recorder.json"
 MIN_MAX_GB = 20          # below this a single scrim block may not fit
 MAX_KEEP_DAYS = 90
 MIN_MBPS, MAX_MBPS = 8, 60   # 8 = the floor that keeps HUD text readable (Twitch VODs are 8-10)
+# voice app on track 2: name shown to the player, program(s) whose sound is recorded.
+# TeamSpeak: the classic client (TeamSpeak 3) and the newer one (TeamSpeak 5/6) have different programs;
+# both are listened to, only the one that runs makes sound.
+VOICE_APPS = {"discord": ("Discord", ("Discord.exe",)),
+              "teamspeak": ("TeamSpeak", ("ts3client_win64.exe", "TeamSpeak.exe")),
+              "other": ("", ())}
+_EXE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ._()+\-]{0,59}\.exe", re.IGNORECASE)
+NOT_VOICE = {"r5apex.exe", "r5apex_dx12.exe", "obs64.exe", "explorer.exe", "pcs-scanner.exe"}
 
+
+def valid_exe(name) -> str | None:
+    """A program name like "Mumble.exe": a file name only (no folder, no drive, nothing a shell would read),
+    ending in .exe; None otherwise. Apex, OBS and Explorer are refused (track 2 is for voice comms)."""
+    n = str(name or "").strip()
+    if not _EXE_RE.fullmatch(n) or n.lower() in NOT_VOICE:
+        return None
+    return n
 
 @dataclass
 class Settings:
@@ -28,7 +45,9 @@ class Settings:
     bitrate_mbps: int = 12                             # constant bitrate; 12 Mbit/s ~ 5.4 GB per hour
     game_audio: bool = True                            # track 1: Apex's own sound only
     comms_consent: bool = False                        # the team agreed that voice comms are recorded
-    discord_audio: bool = True                         # track 2: Discord only (needs comms_consent)
+    discord_audio: bool = True                         # track 2: the voice app only (needs comms_consent)
+    voice_app: str = "discord"                         # track 2's program: discord | teamspeak | other
+    voice_exe: str = ""                                # for "other": its program name, e.g. "Mumble.exe"
     mic_audio: bool = True                             # track 3: the player's microphone (needs comms_consent)
     mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
@@ -83,13 +102,31 @@ class Settings:
         self.night_idle_min = max(5, min(180, int(self.night_idle_min)))
         if self.capture not in ("window", "game", "display"):
             self.capture = "window"
+        self.voice_app = self.voice_app if self.voice_app in VOICE_APPS else "discord"
+        self.voice_exe = valid_exe(self.voice_exe) or ""
         return self
 
+    def voice_exes(self) -> list[str]:
+        """The program(s) whose sound goes on track 2 (none when "other" has no valid program yet)."""
+        if self.voice_app == "other":
+            exe = valid_exe(self.voice_exe)
+            return [exe] if exe else []
+        return list(VOICE_APPS.get(self.voice_app, VOICE_APPS["discord"])[1])
+
+    def voice_name(self) -> str:
+        """The voice app's name as the player reads it: "Discord", "TeamSpeak", "Mumble"…"""
+        if self.voice_app == "other":
+            exe = valid_exe(self.voice_exe)
+            return exe[:-4] if exe else "Voice app"
+        return VOICE_APPS.get(self.voice_app, VOICE_APPS["discord"])[0]
+
     def tracks(self) -> list[str]:
-        """Audio tracks recorded, in file order (track 1, 2, 3)."""
+        """Audio tracks recorded, in file order (track 1, 2, 3). "discord" = the voice app's track (key kept so
+        saved recordings and settings stay readable)."""
         t = ["game"] if self.game_audio else []
         if self.comms_consent:
-            t += [n for n, on in (("discord", self.discord_audio), ("mic", self.mic_audio)) if on]
+            voice = self.discord_audio and bool(self.voice_exes())
+            t += [n for n, on in (("discord", voice), ("mic", self.mic_audio)) if on]
         return t
 
     @property
