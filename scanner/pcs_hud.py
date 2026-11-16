@@ -546,6 +546,8 @@ class Legends:
     MIN, GAP = 0.52, 0.06         # accept: score and lead over the second best
     SHIFTS = (0, -114)            # ranked: a rank badge left of each slot; other modes: none, the roster sits 114 px further left
     ROW = 31                      # row of the window where the portrait sits (the lobby's party list draws them elsewhere)
+    LIT = (20, 80)                # frame coloured: pixels of its left edge window (of 140) within RGB distance 60 of the badge colour
+    BADGE = 680                   # a badge (with its digit) colours at most 620 of its window's 768 pixels; more = a coloured background
     def __init__(self, path=None):
         self.T = []
         try:
@@ -564,20 +566,35 @@ class Legends:
         """Cheap test (well under 1 ms): which roster slots are on screen. Each slot has a small coloured number
         badge at its lower right corner (always), and its frame takes the same colour once that player is picking
         or has locked in (grey before). -> list of (slot, hue of the badge, frame coloured) for slots 1..3,
-        empty when this is not the legend select screen."""
+        empty when this is not the legend select screen.
+        The frame counts as coloured when enough pixels of its left edge have the badge's own colour (RGB distance):
+        the window also holds the screen's background, which is often a saturated orange, so a median hue over the
+        window drifted between the two colours and a frame read as coloured or not by a few degrees, which the CPU and
+        GPU decoders did not agree on (a locked legend could be missed on every frame, or an orange player's grey frame
+        read as coloured). Measured: coloured frame 33 to 60 of the 140 pixels, grey frame 0 to 2; 90 or more = the
+        whole window is the background's colour. Same for the badge: an orange background fills the whole badge window
+        at the wrong roster position (ranked vs other modes), a real badge with its digit at most 620 of 768 pixels."""
         for dx in cls.SHIFTS:
             out = []
             for k in range(3):
                 y0 = int(round(cls.TOP + cls.STEP * k))
-                B = a[y0 + 56:y0 + 80, 296 + dx:328 + dx].reshape(-1, 3); bs = B[(B.max(1) - B.min(1) > 100) & (B.max(1) > 140)]
-                if len(bs) < 60: break
-                hue = _hue(bs)
-                L = a[y0 + 35:y0 + 42, 188 + dx:208 + dx].reshape(-1, 3); ls = L[(L.max(1) - L.min(1) > 100) & (L.max(1) > 140)]
-                lit = len(ls) >= 6 and min(abs(_hue(ls) - hue), 360 - abs(_hue(ls) - hue)) < 25
+                bs = cls._badge(a, y0, dx)
+                if not 60 <= len(bs) <= cls.BADGE: break
+                L = a[y0 + 35:y0 + 42, 188 + dx:208 + dx].reshape(-1, 3)
+                lit = cls.LIT[0] <= cls._near(L, bs) <= cls.LIT[1]          # the frame's edge is a stripe, not the whole window
                 if not lit and (L.min(1) > 150).sum() < 6: break          # grey frame: its bright edge must be there
-                out.append((k + 1, int(round(hue)), bool(lit)))
+                out.append((k + 1, int(round(_hue(bs))), bool(lit)))
             if out: return out, dx
         return [], 0
+    @staticmethod
+    def _badge(a, y0, dx):
+        """Coloured pixels of a slot's number badge (n x 3)."""
+        B = a[y0 + 56:y0 + 80, 296 + dx:328 + dx].reshape(-1, 3)
+        return B[(B.max(1) - B.min(1) > 100) & (B.max(1) > 140)]
+    @staticmethod
+    def _near(px, badge):
+        """How many of the pixels px (n x 3) have the badge's colour (RGB distance < 60 to its median)."""
+        return int((((px.astype(np.float32) - np.median(badge, 0).astype(np.float32)) ** 2).sum(1) < 60 ** 2).sum())
     def name(self, a, slot, dx=0):
         """-> (legend, score) for the portrait in this slot, or (None, best score)."""
         if not self.T: return None, 0.0
@@ -603,8 +620,9 @@ class Legends:
         for slot, hue, lit in fr:
             y0 = int(round(self.TOP + self.STEP * (slot - 1)))
             nm = a[y0 + 4:y0 + 40, 318 + dx:560 + dx].reshape(-1, 3)
-            col = nm[(nm.max(1) > 150) & (nm.max(1) - nm.min(1) > 80)]              # letters in the slot's own colour
-            mine = len(col) >= 60 and min(abs(_hue(col) - hue), 360 - abs(_hue(col) - hue)) < 25
+            # letters in the slot's own colour: own name 211 to 600 such pixels, white names 0 (the background behind
+            # the names is often orange too, which is why this compares with the badge's colour, not a median hue)
+            mine = self._near(nm, self._badge(a, y0, dx)) >= 100
             whites.append(int((nm.min(1) > 190).sum()) if mine else 999)            # white name = someone else
             legend, score = self.name(a, slot, dx)
             squad.append({'slot': slot, 'hue': hue, 'locked': lit, 'self': False, 'legend': legend, 'score': score})

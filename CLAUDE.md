@@ -112,8 +112,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   2 min starts a game (`games[].select`: `tFirst`, `tLast`, `ranked`, `squad[]` with `slot`, `legend`, `self`,
   `hue`), so games no longer merge when nobody opens the map. Legend names need the portraits, stored in the same
   private file as the weapon icons under `legend_<name>`; without them the screen still starts a game. A slot shows
-  the legend a player is looking at before their turn: the last read with a coloured frame wins. Look-alikes: the
-  lobby's party list (rejected by position) and odd single frames (rejected by duration). 16:9 only so far.
+  the legend a player is looking at before their turn: the last read with a coloured frame wins. The coloured frame
+  and the player's own (coloured) name are found by pixels of the number badge's colour, never by a median hue over
+  a window: the screen's background is often a saturated orange right behind them, and the hue test flipped with tiny
+  pixel differences between the CPU and GPU decoders (7 Nov, one game: octane on CPU, pathfinder on GPU; the screen
+  says octane). Look-alikes: the lobby's party list (rejected by position), odd single frames (rejected by duration),
+  and the orange background filling the badge window at the wrong roster position (rejected by size). 16:9 only so far.
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
   only: ranked, wildcard, pubs (the word TRIOS of pubs trios); SP, ED, BM so far). The table's mode keys are the
