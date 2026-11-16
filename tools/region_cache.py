@@ -37,8 +37,10 @@ BOXES = {
                                           # Banner: the plate a[150:190, 20:60] and the start of both words;
                                           # read_ring: clock rows 417..478 (+85 while spectating), x < 380
     'banner':   (138, 298, 560, 1100),    # Banner: the rest of the word rows (138..198 and 273..298, x to 1100)
-    'counters': (70, 192, 1990, 2560),    # SquadsLeft a[77:99, 2040:2294], OwnStats a[128:160, 1994:2230]
-                                          #   (+ the damage digits right of it), ranked() a[120:190, 2480:2545]
+    'counters': (70, 192, 1900, 2560),    # SquadsLeft a[77:99, 2040:2294], OwnStats a[128:162, 1900:2380]
+                                          #   (the strip grows to the left), ranked() a[120:190, 2480:2545].
+                                          #   Caches built before 16 Nov 2026 start at x = 1990: ranked kills there
+                                          #   lose their skull icon, so OwnStats leaves them unread on those caches.
     'feed':     (260, 640, 1820, 2470),   # Feed: a[260:640, 1820:2470]
 }
 CODEC = 'webp-lossless'

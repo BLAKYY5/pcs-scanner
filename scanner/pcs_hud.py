@@ -732,62 +732,215 @@ class SquadsLeft:
         n = int(out)
         return n if 1 <= n <= 60 else None
 
+def _strip_table(table):
+    """pcs_banner.json 'strip': {font: [[label, 216 hex digits (12 x 18 grey cells, 0..f), width in px], ...]}."""
+    out = {}
+    for f, L in table.get('strip', {}).items():
+        out[f] = (np.array([r[0] for r in L]), np.array([[int(c, 16) / 15.0 for c in r[1]] for r in L], np.float32),
+                  np.array([r[2] for r in L], np.float32))
+    return out
+
+_LIN = {}
+def _lin(n, m):
+    """n x m matrix that resamples m values to n (linear, pixel centres aligned): a cheap bilinear resize."""
+    if (n, m) not in _LIN:
+        R = np.zeros((n, m), np.float32); x = (np.arange(n) + 0.5) * m / n - 0.5
+        x0 = np.clip(np.floor(x).astype(int), 0, m - 1); x1 = np.clip(x0 + 1, 0, m - 1); f = np.clip(x - x0, 0, 1)
+        np.add.at(R, (np.arange(n), x0), 1 - f); np.add.at(R, (np.arange(n), x1), f)
+        _LIN[(n, m)] = R
+    return _LIN[(n, m)]
+
 class OwnStats:
-    """The recording player's own kills, assists and knocks, in the strip under "SQUADS LEFT" (shown once one of
-    them is not zero). Same digit shapes as the squads counter; knocks are dark digits on a white plate.
-    Damage is in the same strip but NOT read: its digits are smaller (17 px, thin strokes) and were misread too often
-    in the last seconds of a game (355 as 375, 262 as 297), exactly when the final value matters."""
-    BOXES = {'kills': (130, 158, 1994, 2040, 20, 23), 'assists': (130, 158, 2078, 2124, 20, 23)}
+    """The recording player's own numbers in the strip under "SQUADS LEFT": kills (skull), assists (handshake),
+    knocks (dark digits on a white plate, ranked) and damage (its own plate, right).
+
+    Nothing is at a fixed place: the strip is built from the right (the damage plate's digits end at x = 2336, the
+    plate grows to the left with the number), and the other plates come and go (kills + assists once one is not zero,
+    the knocks plate in ranked, none of them in pubs where kills + assists use the small digits). So the strip is
+    parsed from what is on screen: in rows 131..157, white shapes (brighter than the plate behind them, measured in
+    the plate rows above and below the digits) and dark shapes on bright plates are cut into blobs, and each number is
+    found next to its icon: damage right of the damage icon (37 x 24, digits ending at 2330..2342), assists right of
+    the handshake (38 x 27), kills ending 16..34 px before the handshake and right of the skull, knocks right of the
+    dark knocks icon (36 x 26). Three digit sizes: 'B' 22 px white (ranked kills / assists), 'S' 17 px white (damage,
+    pubs kills / assists), 'K' 16 px dark (knocks).
+
+    Each digit is cut at its own contrast (ink between the plate behind it and the brightest stroke, so thin strokes
+    survive a bright scene behind the translucent plate), squeezed to 12 x 18 grey cells and compared with the shapes in
+    pcs_banner.json ('strip': several per digit and size, averaged from our own recordings, labelled from frames read
+    by eye). A digit counts only when the nearest shape is close AND clearly closer than any other digit's; one
+    doubtful digit = no number. Shapes that are not digits (pieces of icons, plate edges) are in the table as 'X'."""
+    Y0, Y1, X0, X1 = 128, 162, 1900, 2380
+    REF = [1, 2, 3, 28, 29, 30]              # rows 129..131 and 156..158 (of the band): plate, no digits
+    T = _strip_table(BANNER_T)               # font -> (labels, shapes n x 216, widths)
+    ACCEPT, MARGIN = 0.16, 0.03             # mean grey difference to the nearest shape; lead over another digit
     @staticmethod
-    def number(m, hmin, hmax, table=None):
-        """The run of digits in the box -> int or None. Bright bits of the icon left of the number are skipped;
-        from the first digit on, every shape up to the first wide gap must be a clean digit."""
-        col = m.sum(0) > 0; out = ''; x = 0; last = None
-        while x < len(col) and len(out) < 4:
-            if not col[x]:
-                if last is not None and x - last > 9: break   # a gap wider than between two digits: the number is over
-                x += 1; continue
-            e = x
-            while e < len(col) and col[e]: e += 1
-            g = m[:, x:e]; ys = np.where(g.sum(1) > 0)[0]; g = g[ys[0]:ys[-1] + 1]; d = None
-            sized = e < len(col) and hmin <= g.shape[0] <= hmax and 3 <= g.shape[1] <= 16
-            if sized:
-                n = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((12, 16), Image.BOX)) > 110
-                v = int(''.join('1' if b else '0' for b in n.flat), 2)
-                d, dist = min(((d, bin(v ^ t).count('1')) for d, t in (table or SquadsLeft.T)), key=lambda r: r[1])
-                if dist > 34: return None                     # digit-sized but not a digit: no clean read
-            if d is None:
-                if out or x > 24: return None                 # not a digit inside or far into the box: no clean read
-                x = e; continue                               # a piece of the icon before the number
-            out += d; last = e; x = e
-        return int(out) if out else None
+    def _medfilt(v, k=15, step=3):
+        """Running median over k columns, taken every 'step' columns (the plate changes slowly)."""
+        p = np.pad(v, k // 2, mode='edge')
+        w = np.lib.stride_tricks.sliding_window_view(p, k)[::step]
+        return np.repeat(np.partition(w, k // 2, axis=1)[:, k // 2], step)[:len(v)]
+    @staticmethod
+    def _runs(m, x0, y0):
+        """Runs of columns with ink -> [(x0, x1, y0, y1)] (absolute, end excluded)."""
+        col = m.any(0)
+        d = np.diff(np.concatenate(([0], col.view(np.int8), [0])))
+        st = np.flatnonzero(d == 1); en = np.flatnonzero(d == -1)
+        if not len(st): return []
+        top = np.where(col, m.argmax(0), 999); bot = np.where(col, m.shape[0] - m[::-1].argmax(0), 0)
+        t = np.minimum.reduceat(top, st); b = np.maximum.reduceat(bot, st)
+        return [(x0 + int(s), x0 + int(e), y0 + int(u), y0 + int(v)) for s, e, u, v in zip(st, en, t, b)]
+    @classmethod
+    def white(cls, a):
+        """White shapes brighter than the plate behind them (measured per column in the plate rows without digits;
+        not on a bright plate) -> blobs (x0, x1, y0, y1) sorted by x."""
+        b = a[cls.Y0:cls.Y1, cls.X0:cls.X1]
+        mn = np.minimum(np.minimum(b[..., 0], b[..., 1]), b[..., 2]).astype(np.int16)     # (much faster than .min(2))
+        bg = cls._medfilt(np.median(mn[cls.REF], axis=0))
+        return cls._split(((mn > bg + np.maximum(35, (255 - bg) * 0.5)) & (bg <= 185))[3:30], False)
+    @classmethod
+    def dark(cls, a):
+        """Dark shapes on a bright plate (the knocks plate, white or tinted) -> blobs sorted by x."""
+        b = a[cls.Y0:cls.Y1, cls.X0:cls.X1]
+        mx = np.maximum(np.maximum(b[..., 0], b[..., 1]), b[..., 2]).astype(np.int16)
+        hi = cls._medfilt(np.median(mx[cls.REF], axis=0))
+        return cls._split(((mx < (hi + 30) / 2) & (hi > 190))[3:30], True)
+    @classmethod
+    def blobs(cls, a):
+        return cls.white(a), cls.dark(a)
+    @classmethod
+    def _split(cls, m, dark):
+        """Blobs of the mask (rows 131..157); two digits that touch (71, 11...) are cut where the ink is thinnest."""
+        out = []
+        for b in cls._runs(m, cls.X0, cls.Y0 + 3):
+            w = b[1] - b[0]; h = b[3] - b[2]
+            if (14 <= h <= 24) and (16 if h < 20 else 19) <= w <= 34 and cls.kind((b[0], b[0] + 8, b[2], b[3]), dark):
+                ink = m[:, b[0] - cls.X0 + 4:b[1] - cls.X0 - 4].sum(0)
+                x = b[0] + 4 + int(ink.argmin())
+                for x0, x1 in ((b[0], x), (x + 1, b[1])):
+                    ys = np.where(m[:, x0 - cls.X0:x1 - cls.X0].any(1))[0]
+                    if len(ys): out.append((x0, x1, cls.Y0 + 3 + int(ys[0]), cls.Y0 + 4 + int(ys[-1])))
+            else: out.append(b)
+        return out
+    @staticmethod
+    def kind(b, dark=False):
+        """'S' / 'B' / 'K' for a digit-sized blob, else None."""
+        w = b[1] - b[0]; h = b[3] - b[2]
+        if dark: return 'K' if 14 <= h <= 18 and 3 <= w <= 14 and 133 <= b[2] <= 138 else None
+        if 15 <= h <= 19 and 3 <= w <= 15 and 133 <= b[2] <= 138: return 'S'
+        if 20 <= h <= 24 and 3 <= w <= 18 and 130 <= b[2] <= 135: return 'B'
+        return None
+    @staticmethod
+    def _icon(b, w0, w1, h0, h1, dark=False):
+        return b is not None and OwnStats.kind(b, dark) is None and w0 <= b[1] - b[0] <= w1 and h0 <= b[3] - b[2] <= h1
+    @classmethod
+    def _chain(cls, L, j, step, font, dark=False, maxn=4):
+        """Digit-sized blobs from L[j] on (step +1: to the right, -1: to the left), at most 6 px apart."""
+        out = [L[j]]; k = j + step
+        while 0 <= k < len(L) and cls.kind(L[k], dark) == font and len(out) <= maxn:
+            gap = L[k][0] - out[-1][1] if step > 0 else out[-1][0] - L[k][1]
+            if gap > 6: break
+            out.append(L[k]); k += step
+        return out if step > 0 else out[::-1]
+    @classmethod
+    def layout(cls, a):
+        """-> {field: (font, [blob, ...])}: where each number of the strip is, from the icons on screen."""
+        Wl = cls.white(a); out = {}
+        di = [b for b in Wl if cls._icon(b, 34, 41, 22, 27) and 2235 <= b[0] <= 2280]
+        if not di: return out                                         # no damage plate: no strip
+        Dl = cls.dark(a)
+        dic = di[-1]; j = Wl.index(dic)
+        if j + 1 < len(Wl) and cls.kind(Wl[j + 1]) == 'S' and Wl[j + 1][0] - dic[1] <= 6:
+            ch = cls._chain(Wl, j + 1, 1, 'S')
+            if 2330 <= ch[-1][1] <= 2342: out['damage'] = ('S', ch)
+        for j, b in enumerate(Wl):                                    # assists, then kills left of the handshake
+            if b[1] > dic[0]: break
+            if not (cls._icon(b, 35, 41, 24, 28) and j + 1 < len(Wl) and Wl[j + 1][0] - b[1] <= 6): continue
+            font = cls.kind(Wl[j + 1])
+            if font not in ('S', 'B'): continue
+            ch = cls._chain(Wl, j + 1, 1, font, maxn=2)
+            if ch[-1][1] < dic[0]: out['assists'] = (font, ch)
+            ks = [m for m in range(j) if cls.kind(Wl[m]) == font and 16 <= b[0] - Wl[m][1] <= 34]
+            if ks:                                                    # the skull (crowned from 4 kills): 4..14 px left
+                kc = cls._chain(Wl, ks[-1], -1, font, maxn=2); m = Wl.index(kc[0]) - 1
+                if len(kc) > 1 and kc[0][1] - kc[0][0] >= 8 and cls.digit(a, kc[0], font)[0] == 'X': kc = kc[1:]; skull = True
+                else:                                                 # the skull may fall apart in pieces (its eyes)
+                    q = m
+                    while q > 0 and Wl[q][0] - Wl[q - 1][1] <= 12: q -= 1
+                    skull = m >= 0 and 4 <= kc[0][0] - Wl[m][1] <= 14 and Wl[m][1] - Wl[q][0] >= 16 and max(Wl[x][3] - Wl[x][2] for x in range(q, m + 1)) >= 20
+                if skull: out['kills'] = (font, kc)
+        for j, b in enumerate(Dl):                                    # knocks: right of the dark knocks icon
+            if b[1] > dic[0]: break
+            if cls._icon(b, 33, 38, 24, 28, True) and j + 1 < len(Dl) and cls.kind(Dl[j + 1], True) == 'K' and Dl[j + 1][0] - b[1] <= 6:
+                ch = cls._chain(Dl, j + 1, 1, 'K', True, maxn=2)
+                if ch[-1][1] < dic[0]: out['knocks'] = ('K', ch)
+        return out
+    @staticmethod
+    def patch(a, b, font):
+        """The digit's ink from 0 (plate) to 1 (stroke), at its own contrast, as 12 x 18 grey cells; None if too faint."""
+        x0, x1, y0, y1 = b
+        box = a[y0 - 2:y1 + 2, max(0, x0 - 3):x1 + 3]
+        v = (255 - np.maximum(np.maximum(box[..., 0], box[..., 1]), box[..., 2]) if font == 'K'
+             else np.minimum(np.minimum(box[..., 0], box[..., 1]), box[..., 2])).astype(np.float32)
+        s = v.ravel(); k1, k2 = int(0.25 * (s.size - 1)), int(0.97 * (s.size - 1))
+        s = np.partition(s, (k1, k2)); lo, hi = float(s[k1]), float(s[k2])        # plate behind / the strokes
+        if hi - lo < 40: return None
+        g = np.clip((v[2:-2, x0 - max(0, x0 - 3):x0 - max(0, x0 - 3) + x1 - x0] - lo) / (hi - lo), 0, 1)
+        return (_lin(18, g.shape[0]) @ g @ _lin(12, g.shape[1]).T).ravel()
+    @classmethod
+    def digit(cls, a, b, font):
+        """-> (label, distance, lead): label a digit, 'X' (not a digit) or None (doubtful)."""
+        if font not in cls.T: return None, 1.0, 0.0
+        p = cls.patch(a, b, font)
+        if p is None: return None, 1.0, 0.0
+        labels, S, Wd = cls.T[font]
+        d = np.abs(S - p).mean(1) + 0.5 * (np.abs(Wd - (b[1] - b[0])) > 3)
+        i = int(d.argmin()); lab = labels[i]; di = float(d[i])
+        rest = d[labels != lab]; other = float(rest.min()) if len(rest) else 1.0
+        if di > cls.ACCEPT or other - di < cls.MARGIN: return None, di, other - di
+        return str(lab), di, other - di
+    @classmethod
+    def number(cls, a, font, ch):
+        """Digits of one number -> int or None. A not-digit shape may only follow the number (the edge of the next
+        plate); every shape before must be a sure digit, all of the same height."""
+        labs = [cls.digit(a, b, font)[0] for b in ch]
+        while labs and labs[-1] == 'X': labs.pop(); ch = ch[:-1]
+        if not labs or any(l is None or l == 'X' for l in labs) or len(labs) > 4: return None
+        if max(b[2] for b in ch) - min(b[2] for b in ch) > 1 or max(b[3] for b in ch) - min(b[3] for b in ch) > 1: return None
+        s = ''.join(labs)
+        return None if len(s) > 1 and s[0] == '0' else int(s)
     @classmethod
     def read(cls, a):
-        """a: full 16:9 frame. -> {} or {'damage': n, 'kills': n, 'assists': n} with the numbers that could be read."""
-        if not SquadsLeft.T: return {}
+        """a: full 16:9 frame. -> {} or {'kills', 'assists', 'knocks', 'damage'} with the numbers that could be read."""
+        if not cls.T: return {}
         out = {}
-        for k, (y0, y1, x0, x1, hmin, hmax) in cls.BOXES.items():
-            try: v = cls.number(a[y0:y1, x0:x1].min(2) > 232, hmin, hmax)
+        try: lay = cls.layout(a)
+        except Exception: return out
+        for k, (font, ch) in lay.items():
+            try: v = cls.number(a, font, ch)
             except Exception: v = None
             if v is not None: out[k] = v
-        try:                    # knocks: dark digits on a white plate, right of the assists
-            if (a[128:160, 2120:2230].min(2) > 215).mean() > 0.4:
-                v = cls.number(a[130:158, 2173:2216].max(2) < 90, 14, 18)
-                if v is not None: out['knocks'] = v
-        except Exception: pass
         return out
 
-def stat_final(reads, t0, t1, last=25):
+def stat_final(reads, t0, t1, end=None):
     """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists, knocks).
-    -> (final value, time it was first read, time of the last read of any value) or None. When the last read is
-    long before the end of the game the value is only a floor: the number may have grown unseen afterwards. The final value is the one read most often among the last
-    25 reads of the game (at least 3 times): a digit misread now and then gives other values, never the same wrong
-    one most of the time, so 'the highest value seen' would be wrong where 'the usual value at the end' is right."""
+    end: time of the last read of the strip in this game (any of its numbers): a number whose own last read is more
+    than 10 s before it stopped being readable while the strip was still there, so its last value is not the total.
+    -> (final value, time it was first read, time of the last read of any value) or None.
+    A value counts once it was read twice in a row (no other value read between). The final value is the value of
+    the LAST TWO reads of the game, which must be equal: the number often grows in the very last second of a game
+    (damage in a final fight: 355 -> 375, 262 -> 297 -> 353, 106 -> 164 on the last frame with the strip), and then
+    the value read twice before it is not the total. A single read is never taken as the total either, so such a
+    game has no final value rather than a doubtful one. Values that counted must never go down inside a game: if they
+    do, something was misread (or another player's strip was read) and there is no final value either. When the last
+    read is long before the end of the game the value is only a floor: the number may have grown unseen afterwards."""
     R = [(t, v) for t, v in reads if t0 <= t < t1]
-    if len(R) < 3: return None
-    tail = [v for _, v in R[-last:]]; v = max(set(tail), key=lambda x: (tail.count(x), x))
-    if tail.count(v) < 3: return None
-    return v, round(next(t for t, x in R if x == v), 2), round(R[-1][0], 2)
+    if len(R) < 2 or R[-1][1] != R[-2][1]: return None
+    if end is not None and R[-1][0] < end - 10: return None
+    vals = [R[i][1] for i in range(1, len(R)) if R[i][1] == R[i - 1][1]]
+    if any(b < a for a, b in zip(vals, vals[1:])): return None
+    v = R[-1][1]
+    first = next(R[i - 1][0] for i in range(1, len(R)) if R[i][1] == v and R[i - 1][1] == v)
+    return v, round(first, 2), round(R[-1][0], 2)
 
 def squads_timeline(reads, t0, t1):
     """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.

@@ -124,11 +124,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
   time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close
   to the placement. 16:9 only.
-- **Own stats**: `pcs_hud.OwnStats` reads the recording player's kills, assists and knocks from the strip under the
-  squads counter (same digit table; knocks are dark digits on a white plate). `games[].own` = for each, the value
-  shown most among the last 25 reads of the game (+ `...At`, `...LastRead`); reads taken while spectating are
-  dropped. The numbers only grow, so a value whose last read is long before the game's end is a floor, not the total. Damage is
-  in the same strip but not read: its 17 px digits were misread too often at the end of games (see the class note).
+- **Own stats**: `pcs_hud.OwnStats` reads the recording player's kills, assists, knocks and damage from the strip under
+  the squads counter. Nothing there is at a fixed place (plates come and go, the group shifts left as numbers grow,
+  pubs has no knocks plate and smaller kills / assists digits): the strip is cut into white shapes (brighter than the
+  plate behind them) and dark shapes on bright plates, and each number is found next to its icon (damage digits end at
+  x = 2336). Digits are compared as grey 12 x 18 cells, each at its own contrast, with the shapes in `pcs_banner.json`
+  (`strip`: per size 'S' 17 px, 'B' 22 px, 'K' knocks; 'X' = not a digit); a doubtful digit = no number. Kills need
+  the skull icon left of them. `games[].own` = for each number the value of the last two reads of the game, which must
+  agree (+ `...At`, `...LastRead`); none when the number grew in the last second (read once: damage often does in a
+  final fight), when values read twice went down, or when it stopped being read > 10 s before the strip did. Reads
+  taken while spectating are dropped. Checked against the check set (dev and held-out games): no wrong read.
+  The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 
@@ -141,12 +147,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   then `run "<rec>" --readers squads,own --per game` re-runs readers in seconds to a minute; `verify` compares with the
   reads taken on the real frames. `Cache(dir).frames()` gives full-size frames (black outside the boxes), so readers
   run unchanged. Cache folder: `--cache` or `PCS_REGION_CACHE` (the coach's: `D:\tools\pcs-test-exe\region-cache`).
-  It is game footage: never in the repo. 16:9 recordings only.
+  It is game footage: never in the repo. 16:9 recordings only. Caches built before 16 Nov 2026 cut the counters box
+  at x = 1990, which hides the skull of ranked kills: OwnStats leaves those kills unread on them (real frames are fine).
 - **Check set** (`tools/check_set.py score <file.json>`): truths read by eye at given times (squads left, kills,
   assists, knocks, damage, legends, mode, map), scored against the readers on the region cache: per field, truths /
   read / correct at the nearest keyframe and within 3 s, misses listed. Format in the module and
   `tools/checkset_example.json`; the real set references private recordings and lives in the handoff folder.
-  Build a new reader against it, and add a truth only when the value was read on an extracted frame.
+  Build a new reader against it, and add a truth only when the value was read on an extracted frame. Truths carry a
+  `split` (`dev` / `held`, whole games, decided before tuning): tune on `--split dev`, report `--split held` too.
 
 ## Conventions
 

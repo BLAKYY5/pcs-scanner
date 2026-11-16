@@ -2,20 +2,21 @@
 """Labelled check set: truths about recordings at given times (checked by eye on screen), and a scorer that runs the
 readers on the region cache (tools/region_cache.py) at those times, so a reader's accuracy is a number.
 
-  python tools/check_set.py score <checkset.json> [--cache DIR] [--fields squadsLeft,kills]
+  python tools/check_set.py score <checkset.json> [--cache DIR] [--fields squadsLeft,kills] [--split dev|held]
 
 File format (JSON):
   {"format": "pcs-checkset/1",
    "truths": [
      {"recording": "<file name of the recording>", "t": 3597, "squadsLeft": 8, "kills": 3, "assists": 0,
-      "knocks": 3, "damage": 1123, "source": "given", "note": "..."},
+      "knocks": 3, "damage": 1123, "source": "given", "split": "dev", "note": "..."},
      {"recording": "...", "t": 2213, "legends": ["catalyst", "vantage", "bangalore"], "self": 3, "ranked": true},
      {"recording": "...", "t": 2190, "mode": "ranked", "map": "SP"}
    ]}
-Any subset of fields per truth. Fields and the reader that answers each:
+Optional 'split' per truth (e.g. "dev" for the truths a reader may be tuned on, "held" for truths kept back to test
+it on unseen games; decide the split before tuning). Any subset of fields per truth. Fields and the reader that answers each:
   squadsLeft            SquadsLeft.read
   kills assists knocks  OwnStats.read
-  damage                OwnStats.read (key 'damage'; no damage reader on main yet: always unread)
+  damage                OwnStats.read (key 'damage')
   legends               Legends.read: the legend in each slot, in slot order (None = slot not named)
   self                  Legends.read: the slot (1..3) of the recording player
   ranked                Legends.read: rank badges on the select screen (true / false)
@@ -114,9 +115,11 @@ def main():
     ap.add_argument('checkset')
     ap.add_argument('--cache', help='region cache root (default: $PCS_REGION_CACHE)')
     ap.add_argument('--fields', help='only these fields, comma-separated')
+    ap.add_argument('--split', help="only the truths with this 'split' value (e.g. dev, held)")
     a = ap.parse_args()
     fields = [f.strip() for f in a.fields.split(',')] if a.fields else None
-    print(table(score(load(a.checkset), cache_reads(a.cache), fields)))
+    truths = [t for t in load(a.checkset) if not a.split or t.get('split') == a.split]
+    print(table(score(truths, cache_reads(a.cache), fields)))
 
 if __name__ == '__main__':
     main()
