@@ -1207,6 +1207,25 @@ def test_legend_select_starts_a_game():
                 assert cells(s[0], o[0]) > 150, (other_mode, cells(s[0], o[0]))
 
 
+def _own_put(HUD, img, font, text, x_end=None, x_start=None, gap=2):
+    """Draws a number of the own-stats strip with the reader's own digit shapes ('S' small white, 'B' big white,
+    'K' dark knocks digits), ending at x_end or starting at x_start. -> (first x, last x)."""
+    import numpy as np
+    from PIL import Image
+    y0, h = {"S": (135, 17), "B": (133, 22), "K": (136, 16)}[font]
+    labels, shapes, widths = HUD.OwnStats.T[font]
+    gs = []
+    for ch in text:
+        i = list(labels).index(ch); g = shapes[i].reshape(18, 12)
+        gs.append(np.asarray(Image.fromarray((g * 255).astype(np.uint8)).resize((int(round(widths[i])), h), Image.BILINEAR), np.float32) / 255)
+    x = x_start if x_start is not None else x_end - sum(g.shape[1] for g in gs) - gap * (len(gs) - 1); x0 = x
+    for g in gs:
+        box = img[y0:y0 + h, x:x + g.shape[1]].astype(np.float32); ink = g[..., None]
+        img[y0:y0 + h, x:x + g.shape[1]] = (box * (1 - ink) + (20 if font == "K" else 255) * ink).astype(np.uint8)
+        x += g.shape[1] + gap
+    return x0, x - gap
+
+
 def test_squads_left_counter():
     """The number in front of "SQUADS LEFT" is read digit by digit; per game it only goes down, and a value
     counts once it was read twice, so one bad read never moves it."""
@@ -1239,27 +1258,175 @@ def test_squads_left_counter():
     assert HUD.squads_timeline(reads, 0, 400) == [[10, 20], [30, 19], [50, 18], [310, 17]], HUD.squads_timeline(reads, 0, 400)
     assert HUD.squads_timeline(reads, 400, 900) == [[500, 20]]
 
-    # the player's own kills, assists and knocks under it: same digits; knocks are dark on a white plate
-    def strip(kills=None, assists=None, knocks=None):
-        img = np.full((1440, 2560, 3), 40, np.uint8)
-        def put(x, text, h, colour=255):
-            from PIL import Image
-            for ch in text:
-                w = round(14 * h / 22)
-                g = np.asarray(Image.fromarray(cells(ch).astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 127
-                img[134:134 + h, x:x + w][g] = colour; x += w + 3
-        if kills is not None: put(2006, str(kills), 22)
-        if assists is not None: put(2089, str(assists), 22)
-        if knocks is not None:
-            img[128:160, 2125:2230] = 250; put(2176, str(knocks), 16, 20)
+    # The player's own strip under it: kills (skull), assists (handshake), knocks (dark digits on a white plate,
+    # ranked) and damage (its own plate, digits ending at x = 2336). Nothing is at a fixed place: each number is found
+    # next to its icon. Synthetic strips: icons as plain blocks, digits drawn from the 'strip' shapes of the table.
+    O = HUD.OwnStats
+    assert set("0123456789") <= set(O.T["S"][0]) and set("0123456789") <= set(O.T["B"][0]), "digit shapes missing"
+    put = lambda *a, **k: _own_put(HUD, *a, **k)
+
+    def strip(kills=None, assists=None, knocks=None, damage=None, font="B", plate=40):
+        img = np.full((1440, 2560, 3), plate, np.uint8)
+        if damage is None: return img
+        d0, _ = put(img, "S", str(damage), x_end=2336)
+        img[132:156, d0 - 40:d0 - 3] = 255                                      # damage icon, 37 x 24
+        left = d0 - 70
+        if knocks is not None:                                                    # white plate, dark icon, dark digits
+            img[126:162, left - 105:left] = 250
+            img[131:157, left - 80:left - 44] = 20
+            put(img, "K", str(knocks), x_start=left - 41)
+            left -= 125
+        if kills is not None:
+            a0 = left - 20 - 15 * len(str(assists))                              # assists digits end 20 px before
+            put(img, font, str(assists), x_start=a0)
+            img[132:157, a0 - 41:a0 - 3] = 255                                   # handshake, 38 x 25
+            k0, _ = put(img, font, str(kills), x_end=a0 - 41 - 24)              # kills end 24 px before the handshake
+            img[132:157, k0 - 34:k0 - 9] = 255                                   # skull, 25 x 25, 9 px before
         return img
-    assert HUD.OwnStats.read(strip(kills=3, assists=1, knocks=2)) == {"kills": 3, "assists": 1, "knocks": 2}
-    assert HUD.OwnStats.read(strip(kills=12, assists=0)) == {"kills": 12, "assists": 0}
-    assert HUD.OwnStats.read(strip()) == {}
-    # the final value is the usual one at the end of the game, not the highest ever read (one misread must not win)
-    R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 2), (52, 2)]
-    assert HUD.stat_final(R, 0, 100) == (2, 30, 52), HUD.stat_final(R, 0, 100)
-    assert HUD.stat_final([(10, 5), (11, 5)], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
+
+    assert O.read(strip()) == {}
+    assert O.read(np.full((1440, 2560, 3), 250, np.uint8)) == {}
+    assert O.read(strip(damage=54)) == {"damage": 54}                                         # damage only
+    assert O.read(strip(knocks=2, damage=160)) == {"knocks": 2, "damage": 160}                # knocks plate alone
+    ranked = O.read(strip(kills=3, assists=1, knocks=2, damage=716))                          # ranked: all four
+    assert ranked == {"kills": 3, "assists": 1, "knocks": 2, "damage": 716}, ranked
+    wide = O.read(strip(kills=12, assists=10, knocks=6, damage=2051))                         # the group shifts left
+    assert wide == {"kills": 12, "assists": 10, "knocks": 6, "damage": 2051}, wide
+    pubs = O.read(strip(kills=2, assists=0, damage=589, font="S"))                            # pubs: no knocks, small digits
+    assert pubs == {"kills": 2, "assists": 0, "damage": 589}, pubs
+    bright = O.read(strip(kills=4, assists=3, knocks=4, damage=1154, plate=150))              # bright scene behind the plates
+    assert bright == {"kills": 4, "assists": 3, "knocks": 4, "damage": 1154}, bright
+    img = strip(kills=3, assists=1, knocks=2, damage=716)
+    img[135:152, 2310:2318] = 255                                                             # a damage digit smudged
+    assert "damage" not in O.read(img) and O.read(img)["kills"] == 3                          # doubtful = no number
+    img = strip(kills=3, assists=1, knocks=2, damage=716)
+    sk = np.where((img[140, :2100] == 255).all(1))[0]
+    img[132:157, sk[0]:sk[0] + 25] = 40                                                       # no skull: no kills
+    assert "kills" not in O.read(img) and O.read(img)["assists"] == 1
+
+    # the final value of a game: the value of the last two reads, which must agree; values read twice never go down
+    R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 9), (52, 9)]
+    assert HUD.stat_final(R, 0, 100) == (9, 50, 52, False), HUD.stat_final(R, 0, 100)
+    assert HUD.stat_final(R + [(53, 12)], 0, 100) is None                    # grew in the last second, read once: unknown
+    assert HUD.stat_final(R + [(53, 5), (54, 5)], 0, 100) is None            # went down: something was misread
+    assert HUD.stat_final(R[:-2], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
+    assert HUD.stat_final(R, 0, 100, end=53) == (9, 50, 52, False)
+    assert HUD.stat_final(R, 0, 100, end=80) is None                         # stopped being read long before the strip did
+    # damage (coach's decision): a last value read once counts when it is above every earlier read and at most
+    # SINGLE_JUMP above the read before it; the result says it rests on a single read
+    D = [(t, 300) for t in range(10, 20)] + [(20, 340), (21, 340), (22, 375)]
+    J = HUD.SINGLE_JUMP
+    assert HUD.stat_final(D, 0, 100, None, J) == (375, 22, 22, True), HUD.stat_final(D, 0, 100, None, J)
+    assert HUD.stat_final(D, 0, 100) is None                                 # without the rule (kills, assists, knocks)
+    assert HUD.stat_final(D[:-1] + [(22, 335)], 0, 100, None, J) is None     # lower than earlier reads: a misread
+    assert HUD.stat_final(D[:-1] + [(22, 340 + J + 1)], 0, 100, None, J) is None   # implausible jump: a misread
+    assert HUD.stat_final(D[:-3] + [(20, 900), (21, 340), (22, 375)], 0, 100, None, J) is None   # an earlier read was higher
+    assert HUD.stat_final([(10, 50), (11, 80)], 0, 100, None, J) is None     # nothing confirmed before it
+    assert HUD.stat_final(D, 0, 100, 40, J) is None                          # still refused: last read long before the strip's
+    # in the scan: games[].own with kills / assists / knocks / damage (+ At, LastRead, damageSingleRead)
+    import pcs_scan as SCAN
+    own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=own)
+    assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
+                               "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
+    own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=own)
+    o = games[0]["own"]
+    assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
+
+
+def _tools():
+    root = Path(__file__).resolve().parent.parent
+    for p in (root / "scanner", root / "tools"):
+        if str(p) not in sys.path: sys.path.insert(0, str(p))
+    import region_cache, check_set
+    return region_cache, check_set
+
+
+def test_region_cache_round_trip():
+    """Developer tool: the region cache keeps the readers' boxes bit for bit, so readers on the cache give exactly
+    what they give on the full frame (synthetic frames: noise + a squads counter + an own-stats strip)."""
+    import numpy as np
+    RC, _ = _tools()
+    import pcs_hud as HUD
+    rng = np.random.default_rng(7)
+
+    def cells(digit, h, w):
+        bits = next(t for d, t in HUD.SquadsLeft.T if d == digit)
+        g = np.array([(bits >> (191 - i)) & 1 for i in range(192)], np.uint8).reshape(16, 12)
+        from PIL import Image
+        return np.asarray(Image.fromarray(g * 255).resize((w, h), Image.NEAREST)) > 127
+
+    def frame(n, kills):
+        img = rng.integers(0, 120, (1440, 2560, 3), dtype=np.uint8)          # a noisy scene: no easy compression
+        for x in range(2140, 2286, 16): img[77:99, x:x + 4] = 255
+        img[77:99, 2288:2292] = 255
+        x = 2130
+        for ch in reversed(str(n)):
+            img[77:99, x - 14:x][cells(ch, 22, 14)] = 255; x -= 18
+        img[126:162, 2200:2380] = 40                                          # the damage plate
+        d0, _ = _own_put(HUD, img, "S", str(kills * 100 + 7), x_end=2336)
+        img[132:156, d0 - 40:d0 - 3] = 255                                   # its icon
+        return img
+    frames = [(60.0 * k + 0.5 * i, frame(20 - i, 1 + i % 5)) for k in (0, 2) for i in range(3)]   # two minutes, one gap
+    with tempfile.TemporaryDirectory() as d:
+        wr = RC.Writer(d)
+        for t, img in frames: wr.add(t, img)
+        wr.close(); RC.write_index(d, recording="synthetic.mp4", frames=len(frames))
+        c = RC.Cache(d)
+        assert c.minutes == [0, 2] and c.times() == [t for t, _ in frames]
+        got = [(t, a.copy()) for t, a in c.frames()]
+        assert [t for t, _ in got] == [t for t, _ in frames]
+        for (t, a), (_, img) in zip(got, frames):
+            for y0, y1, x0, x1 in RC.BOXES.values():
+                assert np.array_equal(a[y0:y1, x0:x1], img[y0:y1, x0:x1]), t
+            assert a[700:800, 1000:1100].max() == 0                         # outside the boxes: black
+            for name in ("squads", "own", "ranked", "banner", "ring", "dbg"):
+                assert RC.READERS[name][1](a) == RC.READERS[name][1](img), (t, name)
+        assert [RC.READERS["squads"][1](a) for _, a in got] == [20, 19, 18, 20, 19, 18]
+        assert RC.READERS["own"][1](got[1][1]) == {"damage": 207}
+        # only the boxes a reader needs are decoded, and a time window only opens the minutes it covers
+        assert [t for t, _ in c.crops(120, 121, ["counters"])] == [120.0, 120.5] and RC.boxes_for(["squads"]) == ["counters"]
+        reads = RC.run_readers(c, ["squads"])
+        assert [v for _, v in reads["squads"]] == [20, 19, 18, 20, 19, 18]
+        assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
+
+
+def test_check_set_scoring():
+    """Developer tool: the check set scorer counts truths, reads and correct reads per field, at the nearest
+    keyframe and within 3 s."""
+    _, CS = _tools()
+    truths = [
+        {"recording": "r.mp4", "t": 100, "squadsLeft": 8, "kills": 3, "damage": 1123},
+        {"recording": "r.mp4", "t": 200, "squadsLeft": 14, "kills": 2},
+        {"recording": "r.mp4", "t": 300, "legends": ["catalyst", "vantage", "bangalore"], "self": 3, "ranked": True},
+        {"recording": "r.mp4", "t": 400, "mode": "ranked", "map": "SP"},
+    ]
+    sel = {"ranked": True, "squad": [{"slot": 1, "legend": "catalyst", "self": False}, {"slot": 2, "legend": "vantage", "self": False},
+                                     {"slot": 3, "legend": "bangalore", "self": True}]}
+    data = {   # keyframes: time -> reads
+        99.0: {"squads": 8, "own": {"kills": 3}}, 100.0: {"squads": 8, "own": {"kills": 3}},
+        199.0: {"squads": 14, "own": {"kills": 2}}, 200.0: {"squads": 41, "own": {}}, 202.0: {"squads": 14, "own": {}},
+        300.0: {"legends": sel},
+        401.0: {"banner": {"mode": "ranked", "map": None}}, 404.0: {"banner": {"mode": "ranked", "map": "SP"}},
+    }
+
+    def reads_at(rec, t0, t1, readers):
+        return [(t, {r: v.get(r) for r in readers}) for t, v in sorted(data.items()) if t0 <= t <= t1]
+    res = CS.score(truths, reads_at)
+    row = lambda f: tuple(res[f][k] for k in ("n", "nearRead", "nearOk", "winRead", "winOk"))
+    assert row("squadsLeft") == (2, 2, 1, 2, 2), row("squadsLeft")
+    assert row("kills") == (2, 1, 1, 2, 2), row("kills")
+    assert row("damage") == (1, 0, 0, 0, 0)
+    assert row("legends") == row("self") == row("ranked") == (1, 1, 1, 1, 1)
+    assert row("mode") == (1, 1, 1, 1, 1) and row("map") == (1, 0, 0, 0, 0), row("map")   # 404 is outside +-3 s
+    assert [m["t"] for m in res["squadsLeft"]["misses"]] == [200] and res["squadsLeft"]["misses"][0]["nearest"] == 41
+    assert CS.score(truths, reads_at, fields=["kills"]).keys() == {"kills"}
+    assert "squadsLeft" in CS.table(res) and "miss damage" in CS.table(res)
+    ex = Path(__file__).resolve().parent.parent / "tools" / "checkset_example.json"
+    assert len(CS.load(str(ex))) >= 2
 
 
 if __name__ == "__main__":

@@ -1,0 +1,9 @@
+{
+ "format": "pcs-checkset/1",
+ "note": "Synthetic example of the format. Real check sets reference private recordings and live outside this repo.",
+ "truths": [
+  {"recording": "Apex Legends_2000.01.01-20.00.mp4", "t": 1200, "squadsLeft": 9, "kills": 2, "assists": 1, "knocks": 3, "damage": 640, "source": "example"},
+  {"recording": "Apex Legends_2000.01.01-20.00.mp4", "t": 300, "legends": ["lifeline", "wraith", "bloodhound"], "self": 2, "ranked": true, "source": "example"},
+  {"recording": "Apex Legends_2000.01.01-20.00.mp4", "t": 270, "mode": "ranked", "map": "SP", "source": "example"}
+ ]
+}

@@ -512,11 +512,15 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
-        if own:                 # the recording player's own kills / assists / knocks: the value shown most at the end
+        if own:                 # the recording player's own numbers: the value of the game's last two reads (stat_final)
             st = {}
-            for k in ('kills', 'assists', 'knocks'):
-                f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi)
-                if f: st[k] = f[0]; st[k + 'At'] = f[1]; st[k + 'LastRead'] = f[2]
+            end = max((t_ for t_, _ in own if g['tStart'] <= t_ < hi), default=None)
+            for k in ('kills', 'assists', 'knocks', 'damage'):
+                f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi, end,
+                                   HUD.SINGLE_JUMP if k == 'damage' else None)   # damage: a consistent last read counts
+                if f:
+                    st[k] = f[0]; st[k + 'At'] = f[1]; st[k + 'LastRead'] = f[2]
+                    if k == 'damage': st['damageSingleRead'] = f[3]         # true: the total rests on one read
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
