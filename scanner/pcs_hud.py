@@ -17,29 +17,7 @@ LOOSE = False   # set by the scanner for 4:3 stretched recordings (softer, resca
 NUMRX = re.compile(r'(?<![\d])(-?\d{1,6})[.?\-](\d\d)(?!\d)')
 # map % = 50 + X/s , 50 - Y/s   (s = world units per 1 % of map); refined from calibration pairs later
 # map % = cx + X/sx , cy - Y/sy  (fitted from 220 map opens: own arrow vs POS, Oct 2026)
-CAL = {'WE': (914.2, 49.46, 885.1, 49.82), 'SP': (1024.1, 49.17, 1070.4, 50.63)}   # ED: below (game transform)
-
-def _game_tx(pos_x, pos_y, scale):
-    """The game's own minimap transform (px = (x - pos_x) / scale on its 4096 px minimap) as map %. The app's map
-    pictures are framed like the game's minimap (checked Nov 2026: own-arrow / POS pairs on BM and ED, POI centres
-    on the minimap pictures of BM, KC, SP)."""
-    s = scale * 40.96
-    return (s, -pos_x / s, s, pos_y / s)
-
-# Broken Moon: the game transform, checked on 12 own-arrow / POS pairs from 3 games (Nov 2026): residual rms 0.75 % (x)
-# and 0.48 % (y), mean offset under 0.3 %. A free fit on the same pairs moves the 9 known landings by 0.1 to 1.3 %.
-CAL['BM'] = _game_tx(-45000, 43500, 21)
-# E-District: the game transform since 16 Nov 2026 (coach's decision). On 13 own-arrow / POS pairs from 6 games
-# (3, 4 Nov scans; 19 pairs built from the 3, 4, 15 Nov scans, 6 arrow outliers rejected) it fits better than the Oct fit: rms 0.33 % (x) / 0.49 % (y) against
-# 0.74 / 0.69 %, mean offset under 0.1 % against 0.55 / 0.50 %. It moves points up to 3 % in x near the map edges;
-# none of the 16 known ED landings (3, 4, 15 Nov) changes place. Old Oct fit: (902.9, 49.03, 861.1, 50.39).
-CAL['ED'] = _game_tx(-43008, 43008, 21)
-# Kings Canyon: the game transform only, no own-arrow pairs yet (the map's POI centres sit on the game minimap's
-# buildings, so the framing matches). Its landings carry mapCalibrated = False until pairs confirm it.
-# Olympus: left out (its minimap picture isn't identified, so the framing can't be checked); its game transform
-# would be _game_tx(-52024, 48025, 22).
-CAL['KC'] = _game_tx(-37541, 43886, 20)
-CAL_UNCHECKED = {'KC'}
+CAL = {'WE': (914.2, 49.46, 885.1, 49.82), 'ED': (902.9, 49.03, 861.1, 50.39), 'SP': (1024.1, 49.17, 1070.4, 50.63)}
 
 def white(s, lo=180):
     s = s.astype(np.int16)
