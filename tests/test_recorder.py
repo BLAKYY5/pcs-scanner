@@ -1107,13 +1107,14 @@ def test_legend_select_starts_a_game():
     assert sorted(t[0] for t in L.T) == names
     COL = [(240, 160, 40), (40, 180, 190), (140, 200, 50)]
 
-    def screen(picks, locked=(True, True, True), own=1, ranked=True, dy=0, dx=0):
-        img = np.full((1440, 2560, 3), 60, np.uint8)
+    def screen(picks, locked=(True, True, True), own=1, ranked=True, dy=0, dx=0, bg=(60, 60, 60)):
+        img = np.full((1440, 2560, 3), bg, np.uint8)
         for k, n in enumerate(picks):
             y0 = int(round(172 + 106.5 * k)) + dy
             img[y0 + 9:y0 + 73, 215 + dx:315 + dx] = tiles[n][..., None]                 # the portrait
-            img[y0 + 56:y0 + 80, 296 + dx:328 + dx] = COL[k]                             # numbered badge, always coloured
-            img[y0 + 30:y0 + 46, 188 + dx:208 + dx] = COL[k] if locked[k] else (200, 200, 200)
+            img[y0 + 60:y0 + 80, 300 + dx:328 + dx] = COL[k]                             # numbered badge, always coloured
+            img[y0 + 64:y0 + 76, 312 + dx:316 + dx] = 255                                # its white digit
+            img[y0 + 30:y0 + 46, 196 + dx:204 + dx] = COL[k] if locked[k] else (200, 200, 200)   # left edge of the frame
             for x in range(330 + dx, 520 + dx, 6): img[y0 + 10:y0 + 30, x:x + 3] = COL[k] if k == own else (255, 255, 255)
         if ranked: img[170:254:6, 72:156] = 230
         return img
@@ -1150,6 +1151,32 @@ def test_legend_select_starts_a_game():
     assert not any(k.startswith("_") for k in sel), sel
     SCAN.timeline(games, samples)
     assert g["mode"] == "unknown", g["mode"]
+
+    # the select screen's background is often a saturated orange, right behind the frames and the names. The frame
+    # and the own name are recognised by the badge's colour, not by a median hue over a window that is mostly
+    # background (7 Nov, t 4206: slot 3 locked octane over orange read as "not coloured" on every frame with the GPU
+    # decoder and on one frame with the CPU decoder, so the scan said pathfinder or octane depending on the decoder)
+    ORANGE = (176, 98, 55)
+    for bg_dx in (0, -114):                      # ranked, and other modes (roster further left, no rank badges)
+        d = L.read(screen(["alpha", "bravo", "charlie"], bg=ORANGE, dx=bg_dx, ranked=bg_dx == 0))
+        assert d and [s["legend"] for s in d["squad"]] == ["alpha", "bravo", "charlie"], (bg_dx, d)
+        assert [s["locked"] for s in d["squad"]] == [True, True, True], (bg_dx, d)
+        assert [s["self"] for s in d["squad"]] == [False, True, False], (bg_dx, d)
+        d = L.read(screen(["alpha", "bravo", "charlie"], locked=(True, False, False), bg=ORANGE, dx=bg_dx, ranked=bg_dx == 0))
+        assert d and [s["locked"] for s in d["squad"]] == [True, False, False], (bg_dx, d)    # orange player, grey frame
+    def jitter(img, seed):                       # the other decoder: same picture, each pixel a few levels off
+        r = np.random.default_rng(seed)
+        return np.clip(img.astype(np.int16) + r.integers(-6, 7, img.shape), 0, 255).astype(np.uint8)
+    seq = [(4181.0 + k, screen(["alpha", "bravo", "delta"], locked=(k > 6, k > 14, False), bg=ORANGE)) for k in range(18)]
+    seq += [(4199.0 + k, screen(["alpha", "bravo", "charlie"], bg=ORANGE)) for k in range(8)]
+    for seed in (None, 1, 2):
+        evs = [{"t": t, "kind": "select", "data": L.read(img if seed is None else jitter(img, seed * 100 + int(t)))} for t, img in seq]
+        assert all(e["data"] for e in evs), seed
+        sel = None
+        for e in HUD.select_runs(evs):
+            sel = HUD.new_select(e["data"], e["t"]) if sel is None else HUD.merge_select(sel, e["data"], e["t"])
+        assert [s["legend"] for s in sel["squad"]] == ["alpha", "bravo", "charlie"], (seed, sel)
+        assert [s["self"] for s in sel["squad"]] == [False, True, False] and sel["frames"] == 26, (seed, sel)
 
     # the loading banner just before the legend select names the mode and the map in big white letters
     def word(img, y0, y1, seed, n):                                  # made-up block letters starting at x = 194
