@@ -60,6 +60,7 @@ function renderTop() {
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
   const yn = $('#nav a[data-page="youtube"]'); if (yn) yn.hidden = !(S && S.youtube && S.youtube.available);
+  const tn = $('#nav a[data-page="team"]'); if (tn) tn.hidden = !(S && S.hub && S.hub.url);   // only with a hub address
 }
 // the window was opened again (from the tray): check for an update if the last check is old
 document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
@@ -94,6 +95,7 @@ function route() {
   else if (page === 'review') renderReview(pageArg);
   else if (page === 'settings') renderSettings();
   else if (page === 'youtube') renderYouTube();
+  else if (page === 'team') renderTeam();
   else location.hash = '#home';
 }
 window.addEventListener('hashchange', route);
@@ -228,7 +230,7 @@ function drawList() {
     el.innerHTML = `<div class="recrow head"><span></span><span>Recording</span><span class="c3">Recorded</span><span class="c4">Size</span><span class="c5">Status</span><span></span></div>` +
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
-        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}</div></div>
+        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${it.note ? `<span class="faint" style="font-size:12px">· ${esc(it.note)}</span>` : ''}</div></div>
         <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
@@ -650,6 +652,11 @@ function renderSettings() {
           <small>Lets the scan name the weapons in the kill feed. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
       </div></section>
     ${r ? `
+    <section class="card section"><h2>Team hub</h2>
+      <div class="form">
+        <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Empty = results go to Google Drive only.</small></label>
+        <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in link your coach sent. Don't share it.</small></div>
+      </div></section>
     <section class="card section"><h2>Start-up</h2>
       ${switchHTML('f-start_with_windows', s.start_with_windows, 'Start with Windows', 'PCS Scanner waits in the tray (bottom right) from the moment you log in. Recommended: you never have to think about it.')}
       ${switchHTML('f-enabled', r.enabled, 'Auto-record', 'Records the Apex window while the game runs, then offers to scan the session. Your microphone is never recorded.')}
@@ -724,7 +731,6 @@ function renderSettings() {
       <div class="form">
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, 'Scan automatically', 'Starts after a countdown unless you press Skip')}</div>
         <label class="field"><span>Countdown (seconds)</span><input id="f-scan_delay_s" type="number" min="5" max="600" value="${s.scan_delay_s}"></label>
-        <label class="field wide"><span>Team hub address (optional)</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>Leave empty to send results to Google Drive only.</small></label>
       </div></section>` : '<div class="notice">Auto-record isn\'t available in this build.</div>'}
     <section class="card section"><h2>About</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
@@ -741,6 +747,7 @@ function renderSettings() {
   $('#f-quit').onclick = () => { if (confirmBox('Quit PCS Scanner? Auto-record stops until you open it again.')) api('/api/quit', {}); };
   $('#save').onclick = saveSettings;
   wireHotkeys();
+  wireHubKey();
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
   const md = $('#f-mic_device'); if (md) api('/api/mics').then(m => {
     md.innerHTML = m.devices.map(d => `<option value="${esc(d.id)}" ${d.id === m.current ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
@@ -773,9 +780,80 @@ async function saveSettings() {
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
+    const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
   }
-  try { S = await api('/api/settings', body); toast('Settings saved.'); renderSettings(); renderTop(); }
+  try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast('Settings saved.'); renderSettings(); renderTop(); }
   catch (e) { toast('Not saved: ' + e.message, true); }
+}
+
+/* ------------------------------------------------------------------ team hub: key (Settings) and Team page */
+// The page never gets the key back from the app: only "pcs_…abcd". A new key is typed, sent once, and forgotten here.
+let hubKeyEdit = false;
+function hubStatusHTML(h) {
+  if (!h) return '';
+  if (h.wait) return `<span class="hubmsg warn">Too many wrong keys: wait ${Math.ceil(h.wait / 60)} min</span>`;
+  if (h.refused) return '<span class="hubmsg bad">Key refused. Ask your coach for a new key.</span>';
+  const l = h.last || {};
+  return l.text ? `<span class="hubmsg ${l.ok ? 'good' : 'bad'}">${esc(l.text)}</span>` : '';
+}
+function wireHubKey() {
+  const box = $('#hubKey'); if (!box || !S) return;
+  const h = S.hub || {}, edit = hubKeyEdit || !h.key;
+  box.innerHTML = `<div class="row">${edit
+      ? `<input id="f-hub_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key or sign-in link">${h.key ? '<button class="btn small ghost" id="hk-cancel">Cancel</button>' : ''}`
+      : `<span class="keybox">${esc(h.key)}</span><button class="btn small ghost" id="hk-change">Change</button><button class="btn small ghost danger" id="hk-remove">Remove</button>`}
+    <button class="btn small" id="hk-test">Test</button></div>
+    <div id="hk-result" class="hubres">${hubStatusHTML(h)}</div>`;
+  const c = $('#hk-change'); if (c) c.onclick = () => { hubKeyEdit = true; wireHubKey(); $('#f-hub_key').focus(); };
+  const x = $('#hk-cancel'); if (x) x.onclick = () => { hubKeyEdit = false; wireHubKey(); };
+  const rm = $('#hk-remove'); if (rm) rm.onclick = async () => {
+    if (!confirmBox('Remove your hub key from this PC?')) return;
+    try { S = await api('/api/settings', {hub_key: null}); toast('Key removed.'); wireHubKey(); renderTop(); } catch (e) { toast(e.message, true); }
+  };
+  $('#hk-test').onclick = async () => {
+    const body = {hub_url: $('#f-hub_url').value.trim()}, k = $('#f-hub_key');
+    if (k && k.value.trim()) body.hub_key = k.value.trim();
+    $('#hk-test').disabled = true; $('#hk-result').innerHTML = '<span class="hubmsg">Testing…</span>';
+    try {
+      S = await api('/api/settings', body);                  // the address and a new key are saved first
+      if (body.hub_key) hubKeyEdit = false;
+      $('#f-hub_url').value = S.recorder.settings.hub_url;    // a sign-in link fills an empty address
+      const r = await api('/api/hub/test', {}); S.hub = r.hub;
+      wireHubKey(); renderTop();
+    } catch (e) { const o = $('#hk-result'); if (o) o.innerHTML = `<span class="hubmsg bad">${esc(e.message)}</span>`; const t = $('#hk-test'); if (t) t.disabled = false; }
+  };
+}
+
+function renderTeam() {
+  if (!S) { $('#main').innerHTML = '<div class="empty"><strong>Starting…</strong></div>'; setTimeout(() => page === 'team' && renderTeam(), 500); return; }
+  const h = S.hub || {};
+  if (!h.url) { $('#main').innerHTML = '<div class="empty"><strong>No team hub set</strong>Add the address from your coach in <a href="#settings">Settings</a>.</div>'; return; }
+  const l = h.last || {};
+  $('#main').innerHTML = `
+    <div class="pagehead"><div><h1>Team hub</h1><p>The team's pages: Loot Book, scans, games. They open in their own window, signed in with your key.</p></div>
+      <div class="toolbar"><a class="btn ghost" href="#settings">Hub settings</a><button class="btn" id="tm-test">Test</button></div></div>
+    <section class="card section">
+      <div class="muted mono" style="font-size:13px">${esc(h.url)}</div>
+      <div id="tm-status">${hubStatusHTML(h) || (h.key ? '<span class="hubmsg">Not tested yet</span>' : '<span class="hubmsg warn">No key yet: add it in <a href="#settings">Settings</a>.</span>')}</div>
+      <div class="row">
+        <button class="btn brand" data-p="/">Open team hub</button>
+        <button class="btn" data-p="/lootbook/">Loot Book</button>
+        <button class="btn" data-p="/#/scanner">Scans</button>
+        ${l.role === 'coach' ? '<button class="btn ghost" data-p="/keys">Keys</button>' : ''}
+      </div></section>`;
+  $$('[data-p]').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await api('/api/hub/open', {path: b.dataset.p}); toast(r.window ? 'Opened in a new window.' : 'Opened in your browser. If it asks for a key, open the sign-in link from your coach.'); }
+    catch (e) { toast(e.message, true); }
+    b.disabled = false;
+  });
+  const test = async () => {
+    $('#tm-status').innerHTML = '<span class="hubmsg">Testing…</span>';
+    try { const r = await api('/api/hub/test', {}); S.hub = r.hub; if (page === 'team') renderTeam(); }
+    catch (e) { $('#tm-status').innerHTML = `<span class="hubmsg bad">${esc(e.message)}</span>`; }
+  };
+  $('#tm-test').onclick = test;
+  if (!l.text && !h.refused && !h.wait && !renderTeam.tested) { renderTeam.tested = true; test(); }   // once per app start
 }
 
 /* ------------------------------------------------------------------ youtube queue */
