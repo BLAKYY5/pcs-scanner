@@ -19,6 +19,23 @@ NUMRX = re.compile(r'(?<![\d])(-?\d{1,6})[.?\-](\d\d)(?!\d)')
 # map % = cx + X/sx , cy - Y/sy  (fitted from 220 map opens: own arrow vs POS, Oct 2026)
 CAL = {'WE': (914.2, 49.46, 885.1, 49.82), 'ED': (902.9, 49.03, 861.1, 50.39), 'SP': (1024.1, 49.17, 1070.4, 50.63)}
 
+def _game_tx(pos_x, pos_y, scale):
+    """The game's own minimap transform (px = (x - pos_x) / scale on its 4096 px minimap) as map %. The app's map
+    pictures are framed like the game's minimap (checked Nov 2026: own-arrow / POS pairs on BM and ED, POI centres
+    on the minimap pictures of BM, KC, SP)."""
+    s = scale * 40.96
+    return (s, -pos_x / s, s, pos_y / s)
+
+# Broken Moon: the game transform, checked on 12 own-arrow / POS pairs from 3 games (Nov 2026): residual rms 0.75 % (x)
+# and 0.48 % (y), mean offset under 0.3 %. A free fit on the same pairs moves the 9 known landings by 0.1 to 1.3 %.
+CAL['BM'] = _game_tx(-45000, 43500, 21)
+# Kings Canyon: the game transform only, no own-arrow pairs yet (the map's POI centres sit on the game minimap's
+# buildings, so the framing matches). Its landings carry mapCalibrated = False until pairs confirm it.
+# Olympus: left out (its minimap picture isn't identified, so the framing can't be checked); its game transform
+# would be _game_tx(-52024, 48025, 22).
+CAL['KC'] = _game_tx(-37541, 43886, 20)
+CAL_UNCHECKED = {'KC'}
+
 def white(s, lo=180):
     s = s.astype(np.int16)
     if LOOSE: lo = min(lo, 165)

@@ -101,6 +101,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   never in the repo). Coach-only: importing recordings by hand.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
+- **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
+  → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
+  minimap, so a map's game transform (`_game_tx`) works directly. WE / ED / SP use values fitted in Oct 2026, BM the
+  game transform checked on 12 own-arrow / POS pairs (rms < 0.8 %), KC the game transform unchecked
+  (`mapCalibrated: false`), OL none yet. Each `games[].calib` entry (own arrow on the full map) paired with `POS`
+  just before and after it is a calibration pair; the arrow blob is sometimes wrong (reject outliers). BM and KC
+  have POI centres only: a landing more than `POI_NEAR` (12 %) from every centre gets no name (Broken Moon's middle
+  has no POI in `pcs_maps.json`).
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,

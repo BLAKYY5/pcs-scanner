@@ -1456,6 +1456,24 @@ def test_check_set_scoring():
     assert len(CS.load(str(ex))) >= 2
 
 
+def test_landing_place_broken_moon():
+    """Broken Moon landings get map coordinates (the game's own minimap transform, checked on own-arrow / POS pairs) and a
+    place name only near a POI centre (the map has centres, no outlines). Maps without a transform still give None."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    x, y = HUD.to_map("BM", -13757.28, -22228.53)             # 4 Nov, landed in the domes of Cultivation
+    assert 0 < x < 100 and 0 < y < 100 and abs(x - 36.32) < 0.05 and abs(y - 76.41) < 0.05, (x, y)
+    assert SCAN.landing_poi("BM", x, y) == "bm-cultivation"
+    assert SCAN.landing_poi("BM", *HUD.to_map("BM", -9555.07, 22030.99)) == "bm-the-core"    # 15 Nov, The Core
+    assert SCAN.landing_poi("BM", *HUD.to_map("BM", -8772.64, -2841.75)) is None             # the middle: no POI there
+    assert "BM" not in HUD.CAL_UNCHECKED and "KC" in HUD.CAL_UNCHECKED
+    assert HUD.to_map("OL", 0, 0) is None and HUD.to_map("?", 0, 0) is None
+    assert HUD.to_map("WE", 0, 0) == (49.46, 49.82)                                          # fitted maps unchanged
+    for mx, my in ((10, 10), (50, 50), (90, 70)):                                           # outlined maps: as poi_at
+        assert SCAN.landing_poi("WE", mx, my) == SCAN.poi_at("WE", mx, my)[0]
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
