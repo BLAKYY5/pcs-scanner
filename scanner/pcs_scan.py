@@ -105,6 +105,18 @@ def poi_at(mp, x, y):
     p = min(P, key=lambda q: (q['x'] - x) ** 2 + (q['y'] - y) ** 2)
     return p['id'], False
 
+POI_NEAR = 12.0   # map %: on a map without POI outlines, a landing farther than this from every POI centre gets no name
+
+def landing_poi(mp, x, y):
+    """The POI named for a landing. Maps with POI outlines: as poi_at. Maps with centres only (BM, KC): the nearest
+    centre only when it is within POI_NEAR, else None (Broken Moon's middle has no POI in pcs_maps.json, and the
+    nearest far-away centre would be a wrong name)."""
+    pid, inside = poi_at(mp, x, y)
+    P = MAPS[mp]['pois']
+    if inside or any(p.get('poly') for p in P): return pid
+    p = next(q for q in P if q['id'] == pid)
+    return pid if (p['x'] - x) ** 2 + (p['y'] - y) ** 2 <= POI_NEAR ** 2 else None
+
 # ---------- frame readers ----------
 def read_dropscreen(a, loose=False):
     """Scrim/custom pre-game screen: drop map panel on the right with red/green markers."""
@@ -499,7 +511,9 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         if ld:
             if path: HUD.refine_landing(path, ld)
             mp = HUD.to_map(g['map'], ld['x'], ld['y'])
-            if mp: ld['mapX'], ld['mapY'] = mp; ld['poi'] = poi_at(g['map'], *mp)[0]
+            if mp:
+                ld['mapX'], ld['mapY'] = mp; ld['poi'] = landing_poi(g['map'], *mp)
+                ld['mapCalibrated'] = g['map'] not in HUD.CAL_UNCHECKED
         g['landing'] = ld
         g['hud'] = {'samples': len(S), 'self': sum(1 for s in S if s[4] is not None and not s[3])}
         R = [r for t_, r in (rank or []) if lo <= t_ < hi]
