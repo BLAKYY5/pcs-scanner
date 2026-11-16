@@ -1,8 +1,9 @@
 """What kind of Apex session a recording is: scrims, ranked, pubs or wildcard.
 
 The player (or coach) can set it by hand in the app; otherwise it comes from the scan: the scrim drop screen
-means scrims, the ranked badge means ranked. Pubs and wildcard can't be told apart by the scan yet, so those
-are set by hand. The label decides what goes to YouTube and the word in the video title.
+means scrims, the ranked badge means ranked, the loading banner's mode word means wildcard or pubs (pubs trios
+only so far: other playlists show another word and stay unlabelled until it is taught to the scanner). The
+label decides what goes to YouTube and the word in the video title.
 """
 from __future__ import annotations
 
@@ -47,7 +48,7 @@ def set_label(path: str, kind: str | None) -> None:
 
 def auto(scan: dict) -> str | None:
     """From the scan: scrims when the scrim drop screen was read, ranked when the ranked badge was seen,
-    wildcard when the loading banner before a game said so."""
+    wildcard or pubs when the loading banner before a game said so (in that order of priority)."""
     games = scan.get("games", []) if scan else []
     if any(g.get("mode") == "scrim" and g.get("drop") for g in games):
         return "scrims"
@@ -55,6 +56,8 @@ def auto(scan: dict) -> str | None:
         return "ranked"
     if any(g.get("mode") == "wildcard" for g in games):
         return "wildcard"
+    if any(g.get("mode") == "pubs" for g in games):
+        return "pubs"
     return None
 
 
