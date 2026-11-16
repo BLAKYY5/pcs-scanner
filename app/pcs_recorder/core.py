@@ -373,17 +373,22 @@ class Recorder:
             except Exception as ex:
                 log.info("results not sent, will retry: %s", ex)
                 self.next_upload = self.clock() + 60
-                if not e.note.startswith("not sent"):    # tell the player once, not every minute
-                    e.note = f"not sent yet: {ex}"
+                import re
+                note = f"not sent yet: {ex}"
+                # tell the player once per reason, not every minute (a new reason, e.g. "key refused", is told)
+                if re.sub(r"\d+", "", e.note) != re.sub(r"\d+", "", note):
+                    e.note = note
                     retention.save_index(self.idx)
-                    self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon as "
-                                   "it works.", sticky=True, action=getattr(ex, "action", None))
+                    self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon "
+                                   "as it works.", sticky=True, action=getattr(ex, "action", None))
                 return
-            e.status, e.note = "uploaded", ""
+            hub_note = getattr(where, "hub_note", "")          # what the hub answered: "Sent to hub: 11 games"
+            e.status, e.note = "uploaded", hub_note
             retention.save_index(self.idx)
             self.hub.report(self._report(key))
             to = " and ".join(where) if where else "the team"
-            self.ui.notify("Results sent", f"{summary(e)}: sent to {to}. Nothing else to do.")
+            self.ui.notify("Results sent", f"{summary(e)}: sent to {to}." + (f" {hub_note}." if hub_note else "")
+                           + " Nothing else to do.")
 
     # ---------------------------------------------------------- housekeeping
     def cleanup(self) -> list[tuple[str, str]]:

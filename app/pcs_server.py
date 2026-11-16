@@ -128,6 +128,7 @@ class Backend:
         self._worker_running = False
         self.pick_files = lambda kind="video": []          # native "open files" dialog
         self.open_path = lambda p: os.startfile(p) if os.name == "nt" else None
+        self.open_window = lambda url, title: False        # a second app window (pywebview); False = none
         self.set_start_with_windows = lambda on: None
         self.quit = lambda: None
 
@@ -385,6 +386,7 @@ class Backend:
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         "label": label, "label_by_hand": by_hand,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
+                        "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
                         "nogame": bool(norm in rec_index and getattr(rec_index[norm][1], "nogame", False))}
         return sorted(items.values(), key=lambda x: -x["mtime"])
 
@@ -582,8 +584,10 @@ class Backend:
                         where = self.auto.sender.upload(files)
                     else:
                         where = ["Google Drive"] if core.drive_upload_quiet([str(x) for x in files]) else []
+                    note = getattr(where, "hub_note", "")
                     self.say(f"Scan of {Path(p).name} done" + (f", sent to {' and '.join(where)}." if where else
-                                                                 " (not sent: sign in with Google)."))
+                                                                 " (not sent: sign in with Google).")
+                             + (f" {note}." if note else ""))
                 except Exception as e:
                     self.say(f"Scan of {Path(p).name} done, but not sent: {e}")
         except Exception:
@@ -613,9 +617,42 @@ class Backend:
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
+                "hub": self.hub_state(),
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
+
+    # ------------------------------------------------------------- team hub
+    def hub_state(self) -> dict:
+        """Hub address, key masked (never the key itself), refused / wait, last Test result."""
+        from pcs_recorder import hub
+        a = self.auto
+        return hub.public_state(a.s.hub_url) if a else {"url": "", "key": "", "refused": False, "wait": 0, "last": {}}
+
+    def hub_test(self) -> dict:
+        from pcs_recorder import hub
+        a = self.auto
+        if not a or not a.s.hub_url:
+            return {"ok": False, "text": "No hub address"}
+        res = hub.test(a.s.hub_url)
+        if res.get("ok"):
+            a.rec.next_upload = 0                          # results waiting for the hub: try now
+        return res
+
+    def open_hub(self, path: str = "/") -> dict:
+        """The hub's own pages, in a second app window signed in with the key (see pcs_recorder.hub.page_url).
+        Without the app window (no WebView2), the default browser shows the page, without the key."""
+        from pcs_recorder import hub
+        a = self.auto
+        url = a.s.hub_url if a else ""
+        if not url:
+            raise RuntimeError("No team hub address set (Settings → Team hub)")
+        path = path if isinstance(path, str) and path.startswith("/") and not path.startswith("//") else "/"
+        if self.open_window(hub.page_url(url, path), "PCS Team hub"):
+            return {"window": True}
+        import webbrowser
+        webbrowser.open(url + path)
+        return {"window": False}
 
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
@@ -662,6 +699,18 @@ class Backend:
 
     def _save_settings(self, body: dict) -> None:
         self._check_voice(body)                              # before anything is saved
+        # hub key: a key or the coach's sign-in link; "" = unchanged, None = remove. Checked before anything is
+        # saved, and never echoed back (errors don't repeat what was pasted).
+        from pcs_recorder import hub
+        new_key, link_url, remove_key = None, None, False
+        if "hub_key" in body:
+            raw = body.pop("hub_key")
+            if raw is None:
+                remove_key = True
+            elif str(raw).strip():
+                new_key, link_url = hub.parse_key(raw)
+                if not new_key:
+                    raise ValueError("That isn't a hub key. Paste the key or the sign-in link from your coach.")
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
         if "team_link" in body:
@@ -689,11 +738,20 @@ class Backend:
             a.s.player = core.SETTINGS.get("player", "")
             before = (a.s.start_with_windows,)
             yt_before = getattr(a.s, "yt_enabled", False)
+            hub_before = a.s.hub_url
             for k in REC_FIELDS:
                 if k in body:
                     setattr(a.s, k, body[k])
+            if link_url and not str(a.s.hub_url or "").strip():
+                a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st
             st.save(a.s)
+            if new_key or remove_key:
+                hub.set_key(new_key)
+                a.rec.next_upload = 0                        # results waiting for the hub: try with the new key
+            if a.s.hub_url != hub_before:
+                hub.reset()
+                a.rec.next_upload = 0
             if getattr(a.s, "yt_enabled", False) and not yt_before:
                 a.s.yt_since = time.time()                 # only blocks recorded from now on
                 st.save(a.s)
@@ -898,6 +956,10 @@ class Server:
                     if path == "/api/settings":
                         b.save_settings(body)
                         return self._json(b.state())
+                    if path == "/api/hub/test":
+                        return self._json(b.hub_test() | {"hub": b.hub_state()})
+                    if path == "/api/hub/open":
+                        return self._json(b.open_hub(body.get("path") or "/"))
                     if path == "/api/autorecord":
                         b.set_autorecord(bool(body.get("enabled")))
                         return self._json(b.state())

@@ -537,6 +537,326 @@ def test_labels_queue_and_mics_api():
         srv.stop()
 
 
+# ------------------------------------------------------------------ team hub: key, Test, uploads, Team window
+GOOD_KEY = "pcs_" + "A" * 43           # obviously fake keys
+BAD_KEY = "pcs_" + "B" * 43
+
+
+class FakeHub:
+    """A hub on localhost. mode "new": keys needed (0.3), "old": no keys, no /api/ping or /api/me (0.2).
+    `limit` = answer 429 to everything that needs a key. Every request is kept (method, path, Authorization)."""
+
+    def __init__(self, mode="new"):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.mode, self.limit, self.seen, self.bodies = mode, False, [], []
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj, headers=None):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                auth = self.headers.get("Authorization", "")
+                hub.seen.append((self.command, self.path, auth))
+                hub.bodies.append(body)
+                p = self.path
+                if hub.mode == "old":
+                    if p == "/api/status":
+                        return self._send(200, {"version": "0.2.0"})
+                    if p == "/api/scans":
+                        return self._send(200, {"scan_ids": [1]})
+                    if p in ("/api/recorder/sessions",):
+                        return self._send(200, {"ok": True})
+                    if p == "/api/db/scrims":
+                        return self._send(200, [])
+                    return self._send(404, {"detail": "Not Found"})
+                if p == "/api/ping":
+                    return self._send(200, {"version": "0.3.0"})
+                if hub.limit:
+                    return self._send(429, {"detail": "Too many", "error": "too_many_attempts"}, {"Retry-After": "120"})
+                if not auth:
+                    return self._send(401, {"detail": "A key is needed.", "error": "no_key"})
+                if auth != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if p == "/api/me":
+                    return self._send(200, {"name": "Tester", "role": "player", "via": "header",
+                                            "can_edit_lootbook": True, "coach_only_collections": []})
+                if p == "/api/scans":
+                    return self._send(200, {"scan_ids": [7, 8], "uploader": "Tester",
+                                            "imports": [{"scan_id": 7, "status": "imported", "note": "", "games": 11,
+                                                         "new": [], "updated": []}]})
+                if p == "/api/recorder/sessions":
+                    return self._send(200, {"ok": True})
+                if p == "/api/db/scrims":
+                    return self._send(200, [])
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _fresh_hub():
+    from pcs_recorder import hub
+    hub.set_key(None)
+    hub.reset()
+    return hub
+
+
+def test_hub_key_link_parsing():
+    from pcs_recorder import hub
+    assert hub.parse_key(GOOD_KEY) == (GOOD_KEY, None)
+    assert hub.parse_key("  " + GOOD_KEY + "\n") == (GOOD_KEY, None)
+    assert hub.parse_key(f"http://100.64.1.2:8420/login#key={GOOD_KEY}") == (GOOD_KEY, "http://100.64.1.2:8420")
+    assert hub.parse_key(f"https://pcs-hub.example.ts.net/login#key={GOOD_KEY}&x=1") == (
+        GOOD_KEY, "https://pcs-hub.example.ts.net")
+    assert hub.parse_key(f"http://pcs-hub:8420/login#key={GOOD_KEY.replace('_', '%5F')}")[0] == GOOD_KEY
+    for bad in ("", "pcs_short", GOOD_KEY + "X", f"http://h/login?key={GOOD_KEY}",      # a key in the query: refused
+                f"ftp://h/login#key={GOOD_KEY}", f"http://user@h/login#key={GOOD_KEY}", "hello"):
+        assert hub.parse_key(bad) == (None, None), bad
+    assert hub.mask(GOOD_KEY) == "pcs_…AAAA" and hub.mask(None) == ""
+    assert hub.summary({"scan_ids": [1]}) == "Sent to hub"                                       # old hub
+    assert hub.summary({"imports": [{"status": "imported", "games": 11}]}) == "Sent to hub: 11 games"
+    assert hub.summary({"imports": [{"status": "imported", "games": 1}]}) == "Sent to hub: 1 game"
+    assert hub.summary({"imports": [{"status": "failed", "note": "unknown field\nmore"}]}) == \
+        "Sent to hub, not imported: unknown field"
+    assert hub.summary({"imports": []}) == "Sent to hub"                                        # a feed alone
+
+
+def test_hub_key_storage():
+    """The key file is encrypted for this Windows user: the key's text is not in it; it reads back after a restart."""
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    raw = hub.KEY_FILE.read_bytes()
+    assert GOOD_KEY.encode() not in raw and b"A" * 20 not in raw, raw[:80]
+    hub.S.loaded = False                                        # as after a restart
+    assert hub.get_key() == GOOD_KEY
+    try:
+        hub.set_key("pcs_nope")
+        raise AssertionError("bad key saved")
+    except ValueError as e:
+        assert "pcs_nope" not in str(e)
+    hub.set_key(None)
+    assert not hub.KEY_FILE.exists() and hub.get_key() is None
+
+
+def test_hub_settings_test_button_and_errors():
+    """Settings → Team hub: link pasted (key + address), key masked everywhere, Test button against a hub that
+    wants keys (good / wrong / no key / too many tries) and an old hub without keys."""
+    from pcs_recorder import settings as st
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    b = pcs_server.Backend(_Auto(str(TMP / "hubrecs")))
+    st_save = st.save
+    st.save = lambda s: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        assert state["hub"]["url"] == "" and state["hub"]["key"] == ""             # no hub: nothing (no Team tab)
+        # a wrong paste: refused, nothing saved, the text pasted is not repeated
+        code, r, _ = call(srv, "/api/settings", {"hub_key": "pcs_12345 not a key"})
+        assert code == 500 and "12345" not in r["error"] and hub.get_key() is None
+        # the coach's sign-in link: key and (empty) address both taken from it
+        code, raw, _ = call(srv, "/api/settings", {"hub_url": "", "hub_key": f"{fake.url}/login#key={GOOD_KEY}"}, raw=True)
+        assert code == 200 and GOOD_KEY.encode() not in raw
+        state = json.loads(raw)
+        assert b.auto.s.hub_url == fake.url and state["hub"] == {"url": fake.url, "key": "pcs_…AAAA", "refused": False,
+                                                                 "wait": 0, "last": {}}
+        assert hub.get_key() == GOOD_KEY
+        # an empty key field = unchanged
+        call(srv, "/api/settings", {"hub_key": "", "keep_days": 5})
+        assert hub.get_key() == GOOD_KEY
+        # Test: connected
+        code, raw, _ = call(srv, "/api/hub/test", {}, raw=True)
+        assert GOOD_KEY.encode() not in raw
+        r = json.loads(raw)
+        assert r["ok"] and r["text"] == "Connected as Tester (player)" and r["hub"]["last"]["text"] == r["text"], r
+        assert all(a in ("", "Bearer " + GOOD_KEY) for _, _, a in fake.seen)
+        assert all(GOOD_KEY not in p for _, p, _ in fake.seen)                          # never in an address
+        assert ("GET", "/api/me", "Bearer " + GOOD_KEY) in fake.seen
+        # the state page never carries the key
+        assert GOOD_KEY.encode() not in call(srv, "/api/state", raw=True)[1]
+        # a wrong key: "Key refused", and the hub is marked so
+        call(srv, "/api/settings", {"hub_key": BAD_KEY})
+        r = call(srv, "/api/hub/test", {})[1]
+        assert not r["ok"] and r["text"] == "Key refused" and r["hub"]["refused"] is True, r
+        # no key at all
+        call(srv, "/api/settings", {"hub_key": None})
+        r = call(srv, "/api/hub/test", {})[1]
+        assert not r["ok"] and r["text"].startswith("Key needed"), r
+        # too many wrong keys: wait
+        call(srv, "/api/settings", {"hub_key": GOOD_KEY})
+        fake.limit = True
+        r = call(srv, "/api/hub/test", {})[1]
+        assert not r["ok"] and "wait" in r["text"] and r["hub"]["wait"] > 60, r
+        n = len(fake.seen)
+        try:
+            hub.report(fake.url, {"id": "x"})
+            raise AssertionError("sent while waiting")
+        except hub.HubError as e:
+            assert e.kind == "wait" and len(fake.seen) == n                     # nothing sent before Retry-After
+        fake.limit = False
+        hub.set_key(GOOD_KEY)                                                   # a new key clears the wait
+        # hub not reachable
+        b.auto.s.hub_url = "http://127.0.0.1:9"
+        assert call(srv, "/api/hub/test", {})[1]["text"] == "Hub not reachable"
+        # an old hub (no keys): works with or without a key
+        old = FakeHub("old")
+        try:
+            b.auto.s.hub_url = old.url
+            for k in (GOOD_KEY, None):
+                hub.set_key(k)
+                r = call(srv, "/api/hub/test", {})[1]
+                assert r["ok"] and r["text"] == "Hub is an older version: no key needed", r
+        finally:
+            old.stop()
+    finally:
+        srv.stop()
+        fake.stop()
+        st.save = st_save
+        _fresh_hub()
+
+
+def test_hub_uploads_refused_key_and_old_hub():
+    """Scan + feed go in one request with the key; 401 stops hub uploads until the key changes; an old hub
+    keeps working; the answer is summed up for the player."""
+    from pcs_recorder import runtime
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    folder = TMP / "hubup"
+    folder.mkdir(exist_ok=True)
+    files = [folder / "rec.scan.json", folder / "rec.feed.json"]
+    for f in files:
+        f.write_text("{}")
+    s = _S(str(folder))
+    s.hub_url, s.player = fake.url, "Tester"
+    drive = {"ok": False}
+    sender = runtime.Sender(s, lambda paths: drive["ok"])
+    try:
+        hub.set_key(GOOD_KEY)
+        where = sender.upload(files)
+        assert where == ["the team hub"] and where.hub_note == "Sent to hub: 11 games", (where, where.hub_note)
+        ups = [(m, p, a) for m, p, a in fake.seen if p == "/api/scans"]
+        assert len(ups) == 1 and ups[0][2] == "Bearer " + GOOD_KEY                       # one request, with the key
+        body = fake.bodies[fake.seen.index(ups[0])]
+        assert b"rec.scan.json" in body and b"rec.feed.json" in body
+        sender.report({"id": "Tester-rec-1", "status": "uploaded"})
+        assert fake.seen[-1] == ("POST", "/api/recorder/sessions", "Bearer " + GOOD_KEY)
+        from pcs_recorder import eec
+        assert eec.from_hub(fake.url, "PCS", 0, 1) is None and fake.seen[-1][1] == "/api/db/scrims"
+        # wrong key: refused once, then no more requests until the key changes
+        hub.set_key(BAD_KEY)
+        for _ in range(3):
+            try:
+                sender.upload(files)
+                raise AssertionError("upload succeeded with a refused key")
+            except ConnectionError as e:
+                assert "refused your key" in str(e) and BAD_KEY not in str(e)
+        assert len([1 for _, p, a in fake.seen if a == "Bearer " + BAD_KEY]) == 1          # tried once only
+        # Drive still takes the results; the hub's refusal is noted
+        drive["ok"] = True
+        where = sender.upload(files)
+        assert where == ["Google Drive"] and where.hub_note == "Not sent to hub: key refused"
+        drive["ok"] = False
+        hub.set_key(GOOD_KEY)                                                            # new key: sent again
+        assert sender.upload(files) == ["the team hub"]
+        # an old hub: same upload, no import answer
+        old = FakeHub("old")
+        try:
+            s.hub_url = old.url
+            for k in (GOOD_KEY, None):
+                hub.set_key(k)
+                where = sender.upload(files)
+                assert where == ["the team hub"] and where.hub_note == "Sent to hub"
+        finally:
+            old.stop()
+        # no hub set: nothing goes to a hub
+        s.hub_url = ""
+        n = len(fake.seen)
+        drive["ok"] = True
+        assert sender.upload(files) == ["Google Drive"] and len(fake.seen) == n
+    finally:
+        fake.stop()
+        _fresh_hub()
+
+
+def test_team_window_signed_in():
+    """Team tab: the hub's pages open in a second app window, signed in through the hub's /login#key=… page
+    (the key after '#', never sent to a server); an old hub opens the page itself."""
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    auto = _Auto(str(TMP / "team"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    opened = []
+    b.open_window = lambda url, title: opened.append(url) or True
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        hub.set_key(GOOD_KEY)
+        code, raw, _ = call(srv, "/api/hub/open", {"path": "/lootbook/"}, raw=True)
+        assert code == 200 and json.loads(raw) == {"window": True} and GOOD_KEY.encode() not in raw
+        url = opened[-1]
+        before, _, frag = url.partition("#")
+        assert before == f"{fake.url}/login?next=/lootbook/" and frag == "key=" + GOOD_KEY, url
+        call(srv, "/api/hub/open", {"path": "/#/scanner"})
+        assert opened[-1].startswith(f"{fake.url}/login?next=/%23/scanner#key=")
+        call(srv, "/api/hub/open", {"path": "//evil.example/"})
+        assert opened[-1].startswith(f"{fake.url}/login?next=/#key=")                    # only the hub's own pages
+        hub.set_key(None)
+        call(srv, "/api/hub/open", {"path": "/lootbook/"})
+        assert opened[-1] == f"{fake.url}/lootbook/"
+        old = FakeHub("old")
+        try:
+            auto.s.hub_url = old.url
+            hub.set_key(GOOD_KEY)
+            call(srv, "/api/hub/open", {"path": "/lootbook/"})
+            assert opened[-1] == f"{old.url}/lootbook/"                                  # old hub: no sign-in page
+        finally:
+            old.stop()
+        auto.s.hub_url = ""
+        assert call(srv, "/api/hub/open", {"path": "/"})[0] == 500
+    finally:
+        srv.stop()
+        fake.stop()
+        _fresh_hub()
+
+
+def test_hub_key_never_in_logs_or_data_files():
+    """After everything above: the key's text is in no file of the data folder (app.log, recorder.json…)."""
+    import logging
+    for h in logging.getLogger().handlers:
+        h.flush()
+    hits = []
+    for p in Path(os.environ["PCS_DATA_DIR"]).rglob("*"):
+        if p.is_file():
+            data = p.read_bytes()
+            if GOOD_KEY.encode() in data or BAD_KEY.encode() in data:
+                hits.append(p.name)
+    assert not hits, hits
+
+
 if __name__ == "__main__":
     try:
         for name, fn in list(globals().items()):

@@ -102,7 +102,14 @@ h1{font-size:34px}h2{font-size:22px}h3{font-size:15px;color:var(--muted);letter-
 label.field{display:flex;flex-direction:column;gap:5px}
 label.field>span{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 label.field>small{color:var(--faint);font-size:12px}
-input[type=text],input[type=number],input[type=url],select{background:#0f0f0e;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:8px 10px;font:14px var(--body);width:100%}
+.hubfield{display:flex;flex-direction:column;gap:5px}
+.hubfield>span{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.hubfield>small{color:var(--faint);font-size:12px}
+#f-hub_key{flex:1 1 200px;width:auto;min-width:0}
+.keybox{font:14px var(--mono);padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:#0f0f0e}
+.hubres:empty{display:none}
+.hubmsg{font-size:14px;color:var(--muted)}.hubmsg.good{color:var(--good)}.hubmsg.bad{color:var(--accent)}.hubmsg.warn{color:var(--warn)}
+input[type=text],input[type=number],input[type=url],input[type=password],select{background:#0f0f0e;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:8px 10px;font:14px var(--body);width:100%}
 input:focus,select:focus{outline:none;border-color:var(--info)}
 input[type=range]{width:100%;accent-color:var(--brand)}
 .form{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:14px 18px}

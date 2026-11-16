@@ -25,6 +25,7 @@ def selftest(out):
     try:
         import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
+        import pcs_recorder.hub   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
@@ -116,6 +117,35 @@ class Window:
             self.show()
         self.done.wait()
 
+    def open_extra(self, url, title):
+        """A second app window (the team hub's pages). It shares the main window's browser storage, so the hub's
+        sign-in cookie stays for the next time. False when there is no app window (Edge fallback)."""
+        if self.w is None:
+            return False
+        try:
+            import webview
+            w = getattr(self, 'extra', None)
+            if w is not None:
+                try:
+                    w.load_url(url)
+                    w.show()
+                    w.restore()
+                    return True
+                except Exception:
+                    self.extra = None                        # closed in the meantime: open a new one
+            w = webview.create_window(title, url, width=1320, height=860, min_size=(800, 600),
+                                      background_color='#121110')
+            self.extra = w
+
+            def closed():
+                if getattr(self, 'extra', None) is w:
+                    self.extra = None
+            w.events.closed += closed
+            return True
+        except Exception as e:
+            logging.warning('hub window failed: %s', e.__class__.__name__)    # never the address: it has the key
+            return False
+
     def _closing(self):
         if self.quitting:
             return True
@@ -150,6 +180,11 @@ class Window:
 
     def quit(self):
         self.quitting = True
+        if getattr(self, 'extra', None) is not None:
+            try:
+                self.extra.destroy()
+            except Exception:
+                pass
         if self.w is not None:
             try:
                 self.w.destroy()
@@ -292,6 +327,7 @@ def main():
         r = win.pick_files(kind)
         return tk_thread.pick_files(kind) if r is None else r
     b.pick_files = pick
+    b.open_window = win.open_extra
 
     def dropped(paths):
         jsons = [p for p in paths if p.lower().endswith('.json')]
