@@ -1262,6 +1262,96 @@ def test_squads_left_counter():
     assert HUD.stat_final([(10, 5), (11, 5)], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
 
 
+def _tools():
+    root = Path(__file__).resolve().parent.parent
+    for p in (root / "scanner", root / "tools"):
+        if str(p) not in sys.path: sys.path.insert(0, str(p))
+    import region_cache, check_set
+    return region_cache, check_set
+
+
+def test_region_cache_round_trip():
+    """Developer tool: the region cache keeps the readers' boxes bit for bit, so readers on the cache give exactly
+    what they give on the full frame (synthetic frames: noise + a squads counter + an own-stats strip)."""
+    import numpy as np
+    RC, _ = _tools()
+    import pcs_hud as HUD
+    rng = np.random.default_rng(7)
+
+    def cells(digit, h, w):
+        bits = next(t for d, t in HUD.SquadsLeft.T if d == digit)
+        g = np.array([(bits >> (191 - i)) & 1 for i in range(192)], np.uint8).reshape(16, 12)
+        from PIL import Image
+        return np.asarray(Image.fromarray(g * 255).resize((w, h), Image.NEAREST)) > 127
+
+    def frame(n, kills):
+        img = rng.integers(0, 120, (1440, 2560, 3), dtype=np.uint8)          # a noisy scene: no easy compression
+        for x in range(2140, 2286, 16): img[77:99, x:x + 4] = 255
+        img[77:99, 2288:2292] = 255
+        x = 2130
+        for ch in reversed(str(n)):
+            img[77:99, x - 14:x][cells(ch, 22, 14)] = 255; x -= 18
+        img[134:156, 2006:2020][cells(str(kills), 22, 14)] = 255
+        return img
+    frames = [(60.0 * k + 0.5 * i, frame(20 - i, 1 + i % 5)) for k in (0, 2) for i in range(3)]   # two minutes, one gap
+    with tempfile.TemporaryDirectory() as d:
+        wr = RC.Writer(d)
+        for t, img in frames: wr.add(t, img)
+        wr.close(); RC.write_index(d, recording="synthetic.mp4", frames=len(frames))
+        c = RC.Cache(d)
+        assert c.minutes == [0, 2] and c.times() == [t for t, _ in frames]
+        got = [(t, a.copy()) for t, a in c.frames()]
+        assert [t for t, _ in got] == [t for t, _ in frames]
+        for (t, a), (_, img) in zip(got, frames):
+            for y0, y1, x0, x1 in RC.BOXES.values():
+                assert np.array_equal(a[y0:y1, x0:x1], img[y0:y1, x0:x1]), t
+            assert a[700:800, 1000:1100].max() == 0                         # outside the boxes: black
+            for name in ("squads", "own", "ranked", "banner", "ring", "dbg"):
+                assert RC.READERS[name][1](a) == RC.READERS[name][1](img), (t, name)
+        assert [RC.READERS["squads"][1](a) for _, a in got] == [20, 19, 18, 20, 19, 18]
+        assert RC.READERS["own"][1](got[1][1]) == {"kills": 2}
+        # only the boxes a reader needs are decoded, and a time window only opens the minutes it covers
+        assert [t for t, _ in c.crops(120, 121, ["counters"])] == [120.0, 120.5] and RC.boxes_for(["squads"]) == ["counters"]
+        reads = RC.run_readers(c, ["squads"])
+        assert [v for _, v in reads["squads"]] == [20, 19, 18, 20, 19, 18]
+        assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
+
+
+def test_check_set_scoring():
+    """Developer tool: the check set scorer counts truths, reads and correct reads per field, at the nearest
+    keyframe and within 3 s."""
+    _, CS = _tools()
+    truths = [
+        {"recording": "r.mp4", "t": 100, "squadsLeft": 8, "kills": 3, "damage": 1123},
+        {"recording": "r.mp4", "t": 200, "squadsLeft": 14, "kills": 2},
+        {"recording": "r.mp4", "t": 300, "legends": ["catalyst", "vantage", "bangalore"], "self": 3, "ranked": True},
+        {"recording": "r.mp4", "t": 400, "mode": "ranked", "map": "SP"},
+    ]
+    sel = {"ranked": True, "squad": [{"slot": 1, "legend": "catalyst", "self": False}, {"slot": 2, "legend": "vantage", "self": False},
+                                     {"slot": 3, "legend": "bangalore", "self": True}]}
+    data = {   # keyframes: time -> reads
+        99.0: {"squads": 8, "own": {"kills": 3}}, 100.0: {"squads": 8, "own": {"kills": 3}},
+        199.0: {"squads": 14, "own": {"kills": 2}}, 200.0: {"squads": 41, "own": {}}, 202.0: {"squads": 14, "own": {}},
+        300.0: {"legends": sel},
+        401.0: {"banner": {"mode": "ranked", "map": None}}, 404.0: {"banner": {"mode": "ranked", "map": "SP"}},
+    }
+
+    def reads_at(rec, t0, t1, readers):
+        return [(t, {r: v.get(r) for r in readers}) for t, v in sorted(data.items()) if t0 <= t <= t1]
+    res = CS.score(truths, reads_at)
+    row = lambda f: tuple(res[f][k] for k in ("n", "nearRead", "nearOk", "winRead", "winOk"))
+    assert row("squadsLeft") == (2, 2, 1, 2, 2), row("squadsLeft")
+    assert row("kills") == (2, 1, 1, 2, 2), row("kills")
+    assert row("damage") == (1, 0, 0, 0, 0)
+    assert row("legends") == row("self") == row("ranked") == (1, 1, 1, 1, 1)
+    assert row("mode") == (1, 1, 1, 1, 1) and row("map") == (1, 0, 0, 0, 0), row("map")   # 404 is outside +-3 s
+    assert [m["t"] for m in res["squadsLeft"]["misses"]] == [200] and res["squadsLeft"]["misses"][0]["nearest"] == 41
+    assert CS.score(truths, reads_at, fields=["kills"]).keys() == {"kills"}
+    assert "squadsLeft" in CS.table(res) and "miss damage" in CS.table(res)
+    ex = Path(__file__).resolve().parent.parent / "tools" / "checkset_example.json"
+    assert len(CS.load(str(ex))) >= 2
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):

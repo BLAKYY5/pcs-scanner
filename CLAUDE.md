@@ -132,6 +132,22 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 
+## Developer tools (`tools/`, not in the exe)
+
+- **Region cache** (`tools/region_cache.py`): decodes a recording once with the scanner's own `keyframes()` and keeps,
+  per keyframe, the five small boxes the readers look at (`BOXES`: debug overlay, top-left block for legend select /
+  banner / ring clock, rest of the banner words, top-right counters, kill feed), as lossless WebP (bit-identical: lossy
+  formats were tried and changed reader results). `build "<rec>" --verify` (about 1.5 GB per hour of recording),
+  then `run "<rec>" --readers squads,own --per game` re-runs readers in seconds to a minute; `verify` compares with the
+  reads taken on the real frames. `Cache(dir).frames()` gives full-size frames (black outside the boxes), so readers
+  run unchanged. Cache folder: `--cache` or `PCS_REGION_CACHE` (the coach's: `D:\tools\pcs-test-exe\region-cache`).
+  It is game footage: never in the repo. 16:9 recordings only.
+- **Check set** (`tools/check_set.py score <file.json>`): truths read by eye at given times (squads left, kills,
+  assists, knocks, damage, legends, mode, map), scored against the readers on the region cache: per field, truths /
+  read / correct at the nearest keyframe and within 3 s, misses listed. Format in the module and
+  `tools/checkset_example.json`; the real set references private recordings and lives in the handoff folder.
+  Build a new reader against it, and add a truth only when the value was read on an extracted frame.
+
 ## Conventions
 
 - Commit messages: a plain summary line, then what and why. PRs: what changed for the players, how it was tested.
