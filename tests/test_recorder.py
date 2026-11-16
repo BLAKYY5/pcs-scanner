@@ -1306,19 +1306,35 @@ def test_squads_left_counter():
 
     # the final value of a game: the value of the last two reads, which must agree; values read twice never go down
     R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 9), (52, 9)]
-    assert HUD.stat_final(R, 0, 100) == (9, 50, 52), HUD.stat_final(R, 0, 100)
+    assert HUD.stat_final(R, 0, 100) == (9, 50, 52, False), HUD.stat_final(R, 0, 100)
     assert HUD.stat_final(R + [(53, 12)], 0, 100) is None                    # grew in the last second, read once: unknown
     assert HUD.stat_final(R + [(53, 5), (54, 5)], 0, 100) is None            # went down: something was misread
     assert HUD.stat_final(R[:-2], 0, 100) is None and HUD.stat_final(R, 60, 100) is None
-    assert HUD.stat_final(R, 0, 100, end=53) == (9, 50, 52)
+    assert HUD.stat_final(R, 0, 100, end=53) == (9, 50, 52, False)
     assert HUD.stat_final(R, 0, 100, end=80) is None                         # stopped being read long before the strip did
-    # in the scan: games[].own with kills / assists / knocks / damage (+ At, LastRead)
+    # damage (coach's decision): a last value read once counts when it is above every earlier read and at most
+    # SINGLE_JUMP above the read before it; the result says it rests on a single read
+    D = [(t, 300) for t in range(10, 20)] + [(20, 340), (21, 340), (22, 375)]
+    J = HUD.SINGLE_JUMP
+    assert HUD.stat_final(D, 0, 100, None, J) == (375, 22, 22, True), HUD.stat_final(D, 0, 100, None, J)
+    assert HUD.stat_final(D, 0, 100) is None                                 # without the rule (kills, assists, knocks)
+    assert HUD.stat_final(D[:-1] + [(22, 335)], 0, 100, None, J) is None     # lower than earlier reads: a misread
+    assert HUD.stat_final(D[:-1] + [(22, 340 + J + 1)], 0, 100, None, J) is None   # implausible jump: a misread
+    assert HUD.stat_final(D[:-3] + [(20, 900), (21, 340), (22, 375)], 0, 100, None, J) is None   # an earlier read was higher
+    assert HUD.stat_final([(10, 50), (11, 80)], 0, 100, None, J) is None     # nothing confirmed before it
+    assert HUD.stat_final(D, 0, 100, 40, J) is None                          # still refused: last read long before the strip's
+    # in the scan: games[].own with kills / assists / knocks / damage (+ At, LastRead, damageSingleRead)
     import pcs_scan as SCAN
     own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
     games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
     SCAN.timeline(games, [], own=own)
     assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
-                               "damage": 400, "damageAt": 40, "damageLastRead": 42}, games[0]["own"]
+                               "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
+    own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=own)
+    o = games[0]["own"]
+    assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
 
 
 def _tools():

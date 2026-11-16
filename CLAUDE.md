@@ -131,9 +131,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.7 is
   x = 2336). Digits are compared as grey 12 x 18 cells, each at its own contrast, with the shapes in `pcs_banner.json`
   (`strip`: per size 'S' 17 px, 'B' 22 px, 'K' knocks; 'X' = not a digit); a doubtful digit = no number. Kills need
   the skull icon left of them. `games[].own` = for each number the value of the last two reads of the game, which must
-  agree (+ `...At`, `...LastRead`); none when the number grew in the last second (read once: damage often does in a
-  final fight), when values read twice went down, or when it stopped being read > 10 s before the strip did. Reads
-  taken while spectating are dropped. Checked against the check set (dev and held-out games): no wrong read.
+  agree (+ `...At`, `...LastRead`); none when values read twice went down, or when the number stopped being read
+  > 10 s before the strip did. Damage often grows in the last second of a game (final fight), read once: by the
+  coach's decision (16 Nov 2026) that last read counts when it is above every earlier read of the game and at most
+  `SINGLE_JUMP` (250) above the read before it (largest real rise between two reads seen: 178); then
+  `damageSingleRead` is true. Kills, assists and knocks keep the two-read rule (no last-second single reads to check
+  the rule on). Reads taken while spectating are dropped. Check set (dev and held-out games): no wrong read; damage
+  totals right in 15 of 15 games (5 rest on a single read). A misread units or tens digit that comes out higher
+  would still pass the single-read rule: it relies on the digit test (no misread seen in ~9,000 reads).
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).

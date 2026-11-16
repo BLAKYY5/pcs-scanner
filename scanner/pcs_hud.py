@@ -921,26 +921,36 @@ class OwnStats:
             if v is not None: out[k] = v
         return out
 
-def stat_final(reads, t0, t1, end=None):
+SINGLE_JUMP = 250      # damage: largest rise accepted from the read before a last value seen once (see stat_final)
+
+def stat_final(reads, t0, t1, end=None, single_jump=None):
     """reads: [(t, value)] of a number that only grows during a game (damage, kills, assists, knocks).
     end: time of the last read of the strip in this game (any of its numbers): a number whose own last read is more
     than 10 s before it stopped being readable while the strip was still there, so its last value is not the total.
-    -> (final value, time it was first read, time of the last read of any value) or None.
-    A value counts once it was read twice in a row (no other value read between). The final value is the value of
-    the LAST TWO reads of the game, which must be equal: the number often grows in the very last second of a game
-    (damage in a final fight: 355 -> 375, 262 -> 297 -> 353, 106 -> 164 on the last frame with the strip), and then
-    the value read twice before it is not the total. A single read is never taken as the total either, so such a
-    game has no final value rather than a doubtful one. Values that counted must never go down inside a game: if they
-    do, something was misread (or another player's strip was read) and there is no final value either. When the last
-    read is long before the end of the game the value is only a floor: the number may have grown unseen afterwards."""
+    single_jump: None = a last value seen only once is never the total; a number = it is, when consistent (below).
+    -> (final value, time it was first read, time of the last read of any value, rests on a single read) or None.
+
+    A value counts once it was read twice in a row (no other value read between). Normally the final value is the
+    value of the LAST TWO reads of the game, which must be equal. The number often grows in the very last second of
+    a game (damage in a final fight: 355 -> 375, 262 -> 297 -> 353, 106 -> 164 on the last frame with the strip),
+    so with single_jump the last read alone is taken (coach's decision, 16 Nov 2026) when it is consistent:
+    it is higher than EVERY earlier read of the game (a misread digit mostly gives a lower value, which this
+    refuses) and at most single_jump above the read just before it (a misread higher digit gives a jump of hundreds;
+    the largest real rise between two reads in our recordings was 178). Each read already passed the digit test.
+    Always refused: values read twice that go down inside a game (a misread, or another player's strip), and a
+    number whose last read is more than 10 s before the strip's (its value is only a floor)."""
     R = [(t, v) for t, v in reads if t0 <= t < t1]
-    if len(R) < 2 or R[-1][1] != R[-2][1]: return None
+    if len(R) < 2: return None
     if end is not None and R[-1][0] < end - 10: return None
     vals = [R[i][1] for i in range(1, len(R)) if R[i][1] == R[i - 1][1]]
     if any(b < a for a, b in zip(vals, vals[1:])): return None
     v = R[-1][1]
-    first = next(R[i - 1][0] for i in range(1, len(R)) if R[i][1] == v and R[i - 1][1] == v)
-    return v, round(first, 2), round(R[-1][0], 2)
+    if R[-2][1] == v:
+        first = next(R[i - 1][0] for i in range(1, len(R)) if R[i][1] == v and R[i - 1][1] == v)
+        return v, round(first, 2), round(R[-1][0], 2), False
+    if single_jump is None or not vals: return None
+    if v <= max(x for _, x in R[:-1]) or v - R[-2][1] > single_jump: return None
+    return v, round(R[-1][0], 2), round(R[-1][0], 2), True
 
 def squads_timeline(reads, t0, t1):
     """reads: [(t, n)] over the recording. -> [[t, n]]: when each new, lower count was first seen in this game.
