@@ -157,17 +157,15 @@ async function pollLoop() {
   if (WT.polling) return;
   WT.polling = true;
   while (page === 'watch' && inSession()) {
-    if (document.hidden) {                           // hidden: wait until shown (the app keeps the session with the hub)
-      await new Promise(r => document.addEventListener('visibilitychange', r, {once: true}));
-      continue;
-    }
-    try { applySnap(await api(`/api/watch/poll?seq=${WT.seq}&wait=15`)); }
+    // a long poll to the app on this PC: it waits there, costs nothing, and still hears at once when the session
+    // ends (e.g. the app left it because Apex started), so the players stop even in a hidden window
+    try { applySnap(await api(`/api/watch/poll?seq=${WT.seq}&wait=${document.hidden ? 25 : 15}`)); }
     catch (e) { await new Promise(r => setTimeout(r, 1500)); }
   }
   WT.polling = false;
   if (page === 'watch' && WT.snap && WT.snap.ended) {
     stopPlayers();
-    const why = {ended: 'The coach ended the session.', idle: 'The session ended (the coach left).', replaced: 'The coach started another session.', left: 'You left the session.'}[WT.snap.ended] || 'The session ended.';
+    const why = {ended: 'The coach ended the session.', idle: 'The session ended (the coach left).', replaced: 'The coach started another session.', left: 'You left the session.', apex: 'Apex started, so you left the session. The others keep watching.'}[WT.snap.ended] || 'The session ended.';
     $('#main').innerHTML = `<div class="empty"><strong>Session over</strong>${esc(why)} <a href="#team">Team</a></div>`;
   }
 }

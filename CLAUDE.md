@@ -143,7 +143,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   own full-screen button is hidden, or the drawings would not show.
 - **Watch together** (`pcs_recorder/watch.py`, `web/session.js` + `session.css`, hub 0.5 `/api/videos`, `/api/sessions`,
   contract in the hub's `AGENT.md`): the coach and the squad watch one game together, every player's view side by
-  side, the coach in control (play, pause, seek, speed, large view, drawings live). The views are the players' YouTube
+  side, the coach in control (play, pause, seek, speed, large view, drawings live). Never during a game: start / join
+  are refused while Apex runs ("Close Apex to watch together"), and when Apex starts during a session the app leaves
+  it (`Watch.check_apex`, every 3 s in the websocket thread; hub session goes on for the others, review talk stops),
+  the page hears `ended: "apex"` through its long poll (also when hidden) and stops its players. The views are the players' YouTube
   videos: after a block upload `youtube.Uploader.send_to_hub` tells the hub which recordings the video holds at what
   offsets (`offsets` / `durations` kept in `youtube.json`; same retry rules as the scan results; hub before 0.5 = asked
   again after 6 h). Game time 0 = the jump; a view's video time = its `videoAt` + game time. The window never holds the
