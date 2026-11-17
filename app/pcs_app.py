@@ -26,6 +26,7 @@ def selftest(out):
         import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
+        import pcs_recorder.notes   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
