@@ -14,6 +14,7 @@ import hashlib
 import json
 import mimetypes
 import os
+import re
 import secrets
 import threading
 import time
@@ -99,6 +100,34 @@ def track_file(video: str, n: int) -> Path:
 
 def vid(path: str) -> str:
     return hashlib.sha1(os.path.normcase(os.path.abspath(path)).encode()).hexdigest()[:12]
+
+
+_REC_NAME = re.compile(r'(\d{4})[._-](\d{2})[._-](\d{2})[ _-](\d{2})[._-](\d{2})(?:[._-](\d{2}))?')
+
+
+def recorded_at(path: str, scan: dict | None = None) -> float | None:
+    """When the recording started (local time, epoch seconds): from the file name OBS gives it
+    ("Apex Legends_2026.11.07-21.42", read like the scanner's rec_start), else the scan's recStart.
+    None when neither tells: the caller falls back to the file's time."""
+    import datetime
+    cands = []
+    m = _REC_NAME.search(Path(path).name)
+    if m:
+        y, mo, d, h, mi, s = m.groups()
+        cands.append(f"{y}-{mo}-{d}T{h}:{mi}:{s or '00'}")
+    if isinstance((scan or {}).get("recStart"), str):
+        cands.append(scan["recStart"])
+    for c in cands:
+        try:
+            return datetime.datetime.fromisoformat(c).timestamp()
+        except (ValueError, OverflowError, OSError):
+            continue
+    return None
+
+
+# what the review player shows of each game, beside the drop / rings / landing it always had
+GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "ring", "landing", "rankedShare", "clockStart", "harvesters",
+               "select", "banner", "squadsLeft", "own", "feedStats")
 
 
 def scan_files(video: str) -> tuple[Path | None, Path | None]:
@@ -383,12 +412,15 @@ class Backend:
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
             label, by_hand = labels.of(p, full)
+            rec = recorded_at(p, full)
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
+                        # "Recorded" = when the recording started, not when the file was last written
+                        "recorded": rec if rec is not None else st.st_mtime,
                         "label": label, "label_by_hand": by_hand,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
                         "nogame": bool(norm in rec_index and getattr(rec_index[norm][1], "nogame", False))}
-        return sorted(items.values(), key=lambda x: -x["mtime"])
+        return sorted(items.values(), key=lambda x: -x["recorded"])
 
     def find(self, item_id: str) -> dict | None:
         return next((x for x in self.library() if x["id"] == item_id), None)
@@ -416,8 +448,7 @@ class Backend:
             d = json.loads(scan.read_text(encoding="utf-8"))
             games = []
             for g in d.get("games", []):
-                games.append({k: g.get(k) for k in ("map", "mode", "tStart", "tEnd", "ring", "landing", "rankedShare",
-                                                     "clockStart", "harvesters")}
+                games.append({k: g.get(k) for k in GAME_FIELDS}
                              | {"drop": {k: (g.get("drop") or {}).get(k) for k in ("spots", "err")},
                                 "track": [[s[0], s[4], s[5], s[6], s[7]] for s in g.get("samples", []) if s[4] is not None],
                                 # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]
@@ -608,7 +639,9 @@ class Backend:
                    "scanning": a.rec.scan_proc is not None, "waiting": len(a.rec.queue),
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
-                   "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder}
+                   "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
+                   # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
+                   "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
@@ -895,7 +928,12 @@ class Server:
                 if not it:
                     return self._json({"error": "not found"}, 404)
                 p = p or it["path"]
-                size = os.path.getsize(p)
+                try:
+                    size = os.path.getsize(p)
+                except FileNotFoundError:
+                    return self._json({"error": "file missing"}, 404)
+                except OSError:                             # the review player says "can't be read"
+                    return self._json({"error": "file can't be read"}, 500)
                 start, end = 0, size - 1
                 rng = self.headers.get("Range")
                 if rng and rng.startswith("bytes="):

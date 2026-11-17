@@ -27,6 +27,12 @@ function fmtT(s) {
   return (h ? h + ':' + String(m).padStart(2, '0') : m) + ':' + String(x).padStart(2, '0');
 }
 const fmtGB = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
+/* GB per hour of recording at a video rate: the one place Home and Settings take it from (audio share from the app) */
+function gbHour(mbps) {
+  const r = S && S.recorder, audio = r && r.audioKbps != null ? r.audioKbps : 160;
+  return ((+mbps * 1000 + audio) * 3600 / 8 / 1e6).toFixed(1);
+}
+const recTime = it => it.recorded ?? it.mtime;   // when the recording started (file name), else the file's time
 function fmtDate(sec) {
   const d = new Date(sec * 1000), now = new Date();
   const day = d.toDateString() === now.toDateString() ? 'Today' :
@@ -85,6 +91,13 @@ async function poll() {
 /* ------------------------------------------------------------------ router */
 function route() {
   const [p, arg] = (location.hash.slice(1) || 'home').split('/');
+  if (page === 'settings' && p !== 'settings' && settingsDirty()) {      // leaving with unsaved changes: ask first
+    const target = location.hash || '#home';
+    history.replaceState(null, '', '#settings');
+    askUnsaved(target);
+    return;
+  }
+  if (p !== 'settings') settingsBase = null;
   const changed = p !== page || arg !== pageArg;
   page = p; pageArg = arg || '';
   if (!changed) return;
@@ -130,7 +143,7 @@ function renderHome(prev, force) {
       <div class="kpi"><span>Recordings</span><b>${r ? r.count : LIB.length}</b><small>kept ${r ? r.settings.keep_days + ' days' : '—'}</small></div>
       <div class="kpi"><span>Storage used</span><b>${r ? fmtGB(used) : '—'}</b><small>of ${r ? r.settings.max_gb + ' GB' : '—'}</small>
         <div class="meter ${pct > 90 ? 'full' : pct > 70 ? 'warn' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div></div>
-      <div class="kpi"><span>Quality</span><b>${r ? r.settings.bitrate_mbps + ' Mb/s' : '—'}</b><small>${r ? '≈ ' + r.gbPerHour + ' GB per hour' : ''}</small></div>
+      <div class="kpi"><span>Quality</span><b>${r ? r.settings.bitrate_mbps + ' Mb/s' : '—'}</b><small>${r ? '≈ ' + gbHour(r.settings.bitrate_mbps) + ' GB per hour' : ''}</small></div>
       <div class="kpi"><span>Google Drive</span><b style="font-size:22px;line-height:1.6"><span class="pill ${g[1]}" style="font-size:13px">${g[0]}</span></b>
         <small>${S.google === 'ok' ? 'Results go to “PCS Scans”' : `<a href="#" id="signin">Sign in with Google</a>`}</small></div>
     </div>
@@ -138,7 +151,7 @@ function renderHome(prev, force) {
       <section class="card"><div class="row between"><h2>Latest recordings</h2><a class="btn small ghost" href="#recordings">All recordings</a></div>
         <div class="list" style="margin-top:8px">${recent.length ? recent.map(it => `
           <div class="row between" style="padding:9px 2px;border-bottom:1px solid var(--line)">
-            <div style="min-width:0"><div class="name" style="font-weight:600">${esc(fmtDate(it.mtime))}${it.auto ? '' : ` <span class="faint" style="font-weight:400">· ${esc(it.name)}</span>`}</div>
+            <div style="min-width:0"><div class="name" style="font-weight:600">${esc(fmtDate(recTime(it)))}${it.auto ? '' : ` <span class="faint" style="font-weight:400">· ${esc(it.name)}</span>`}</div>
               <div class="row" style="gap:6px;margin-top:2px">${gameChips(it)} ${statusPill(it.status)}</div></div>
             <a class="btn small" href="#review/${it.id}">Review</a></div>`).join('') :
           '<div class="empty"><strong>No recordings yet</strong>Play Apex with auto-record on, or add recordings by hand.</div>'}</div></section>
@@ -231,7 +244,7 @@ function drawList() {
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${it.note ? `<span class="faint" style="font-size:12px">· ${esc(it.note)}</span>` : ''}</div></div>
-        <span class="c3 muted">${fmtDate(it.mtime)}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
+        <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">Review</a>
@@ -300,19 +313,66 @@ async function scan(ids) {
 }
 
 /* ------------------------------------------------------------------ review */
-const KIND = {drop: ['D', 'Drop map'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
+const KIND = {select: ['S', 'Legend select'], drop: ['D', 'Drop map'], start: ['G', 'Game start'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
 const TRACKN = {game: 'Game sound', discord: 'Voice app', mic: 'Microphone'};
 const VOICE_NAMES = {discord: 'Discord', teamspeak: 'TeamSpeak'};
 function voiceName(s) {          /* the voice app recorded on track 2, as the player calls it */
   if (s.voice_app === 'other') return (s.voice_exe || '').trim().replace(/\.exe$/i, '') || 'Voice app';
   return VOICE_NAMES[s.voice_app] || 'Discord';
 }
+/* ---- one game's header: mode, map, squad, the player's own numbers, squads left (scanner 1.10.8+; older scans show less) */
+const MODES = {ranked: 'Ranked', pubs: 'Pubs', wildcard: 'Wildcard', scrim: 'Scrim'};
+const LEGENDS = {madmaggie: 'Mad Maggie'};
+const legendName = l => l ? (LEGENDS[l] || l[0].toUpperCase() + l.slice(1)) : '?';
+function squadText(g) {
+  const sq = ((g.select && g.select.squad) || []).slice().sort((a, b) => a.slot - b.slot);
+  return sq.map(q => legendName(q.legend) + (q.self ? ' (you)' : '')).join(', ');
+}
+function gameStart(g) { return Math.min(g.tStart ?? Infinity, (g.select && g.select.tFirst) ?? Infinity); }
+function gameAt(t) {               /* the game on screen at t: the last one started by then (the first before any) */
+  const games = (RV && RV.d.games) || [];
+  let gi = games.length ? 0 : -1;
+  games.forEach((g, i) => { if (gameStart(g) <= t + 1) gi = i; });
+  return gi;
+}
+function squadsAt(g, t) {          /* the "squads left" count read by time t, or null */
+  let n = null;
+  for (const [tt, c] of g.squadsLeft || []) { if (tt <= t) n = c; else break; }
+  return n;
+}
+function gameHeadHTML(g, i, total) {
+  const mode = MODES[g.mode] || '', map = g.map && g.map !== '?' ? mapName(g.map) : '';
+  const title = [`Game ${i + 1} of ${total}`, mode, map].filter(Boolean).join(' · ');
+  const parts = [`<b class="gtitle">${esc(title)}</b>`];
+  const sq = ((g.select && g.select.squad) || []).slice().sort((a, b) => a.slot - b.slot);
+  if (sq.length) parts.push(`<span class="gsquad">${sq.map(q => q.self ? `<b title="You recorded this">${esc(legendName(q.legend))} (you)</b>` : esc(legendName(q.legend))).join(' · ')}</span>`);
+  const own = g.own, sl = g.squadsLeft || [], stats = [];
+  if (own) {
+    const v = (k, tip) => `<span class="gstat"${tip ? ` title="${esc(tip)}"` : ''}><small>${k[0].toUpperCase() + k.slice(1)}</small><b>${own[k] != null ? own[k] : '–'}</b></span>`;
+    stats.push(v('kills'), v('assists'), v('knocks'), v('damage', own.damageSingleRead ? 'Read once, at the very end of the game' : ''));
+  }
+  if (sl.length) stats.push(`<span class="gstat" title="The last count read in this game. Not always your placement: it keeps going down while you spectate."><small>Squads left (last read)</small><b>${sl[sl.length - 1][1]}</b></span>`);
+  if (stats.length) parts.push(`<span class="gstats">${stats.join('')}</span>`);
+  return parts.join('');
+}
+function drawGameBar(t) {
+  const el = $('#gameBar'), games = (RV && RV.d.games) || [];
+  if (!el) return;
+  const gi = games.length ? gameAt(t) : -1;
+  if (gi === RV.gi && !el.hidden === (gi >= 0)) return;
+  RV.gi = gi; el.hidden = gi < 0;
+  if (gi >= 0) el.innerHTML = gameHeadHTML(games[gi], gi, games.length);
+}
 function buildEvents(d) {
   const ev = [];
   (d.games || []).forEach((g, gi) => {
     const map = mapName(g.map), spots = (g.drop && g.drop.spots) || [];
     const ours = spots.find(s => s.kind === 'ours');
-    if (g.tStart != null) ev.push({t: g.tStart, k: 'drop', g: gi, title: 'Drop map', sub: `${map} · ${spots.length} squads seen`});
+    // how the game started: the legend select screen, the scrim drop screen (both in scrims), else just its start
+    const sel = g.select && g.select.tFirst != null ? g.select : null;
+    if (sel) ev.push({t: sel.tFirst, k: 'select', g: gi, title: 'Legend select', sub: squadText(g)});
+    if (spots.length) ev.push({t: g.tStart, k: 'drop', g: gi, title: 'Drop map', sub: `${map} · ${spots.length} squads seen`});
+    else if (!sel && g.tStart != null) ev.push({t: g.tStart, k: 'start', g: gi, title: 'Game start', sub: map !== '?' ? map : ''});
     const L = g.landing || {};
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: 'Jumped from the ship'});
     if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: ours ? 'at ' + poiName(ours.poi) : ''});
@@ -354,7 +414,7 @@ async function renderReview(id) {
   if (RV && RV.ro) RV.ro.disconnect();
   RV = {d, ev, spans, tab: d.games ? 'events' : 'events', dur: 0};
   $('#main').innerHTML = `
-    <div class="pagehead"><div><h1>${esc(fmtDate(d.mtime))}</h1><p class="row" style="gap:8px">${gameChips(d)} ${statusPill(d.status)} <span class="faint mono" title="${esc(d.path)}">${esc(d.name)}</span></p></div>
+    <div class="pagehead"><div><h1>${esc(fmtDate(recTime(d)))}</h1><p class="row" style="gap:8px">${gameChips(d)} ${statusPill(d.status)} <span class="faint mono" title="${esc(d.path)}">${esc(d.name)}</span></p></div>
       <div class="toolbar"><a class="btn ghost" href="#recordings">← Recordings</a>
         ${!d.scan ? '<button class="btn brand" id="rvScan">Scan this recording</button>' : ''}
         <button class="btn" id="rvOpen">Open file</button></div></div>
@@ -363,19 +423,20 @@ async function renderReview(id) {
         <div class="player" id="player"><video id="vid" controls controlslist="nofullscreen" preload="metadata" src="/video/${d.id}?t=${encodeURIComponent(TOKEN)}"></video>
           <canvas class="ink" id="ink" hidden></canvas><div class="cnote" id="cnote" hidden></div>
           <div class="seen" id="seen" ${d.scan ? '' : 'hidden'}></div>
-          <div class="err" id="vidErr" hidden><div><h2>This recording can't play here</h2><p class="muted">Its video format isn't supported by the built-in player (usually HEVC/H.265).<br>Open it in your usual video player instead.</p><button class="btn brand" id="vidOpen">Open file</button></div></div></div>
+          <div class="err" id="vidErr" hidden><div><h2 id="vidErrT">This recording can't play here</h2><p class="muted" id="vidErrP"></p><button class="btn brand" id="vidOpen">Open file</button></div></div></div>
+        <div class="card gamebar" id="gameBar" hidden></div>
         <div class="card coachbar" id="coachBar" hidden></div>
         <div class="card" style="margin-top:12px;padding:12px 16px 14px">
           <div class="tl" id="tl"><div class="lanes">
             <div class="lane games" id="laneG"><span class="lane-label">Games</span></div>
-            <div class="lane" id="laneE"><span class="lane-label">Drop · jump · landing · rings</span></div>
+            <div class="lane" id="laneE"><span class="lane-label">Start · jump · landing · rings</span></div>
             <div class="lane" id="laneF"><span class="lane-label">Kill feed</span></div>
             <div class="lane sound" id="laneS"><span class="lane-label">Sound · <span id="soundState">analysing…</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
             <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>Drop map</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
               <button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
@@ -391,7 +452,7 @@ async function renderReview(id) {
   const v = $('#vid');
   $('#rvOpen').onclick = $('#vidOpen').onclick = () => api('/api/open', {what: 'file', id: d.id});
   const rs = $('#rvScan'); if (rs) rs.onclick = () => scan([d.id]);
-  v.addEventListener('error', () => { $('#vidErr').hidden = false; });
+  v.addEventListener('error', () => showVideoError(v, d.id));
   setupAudio(d, v);
   v.addEventListener('loadedmetadata', () => { RV.dur = v.duration; drawTimeline(); drawSound(); });
   try { if (localStorage.getItem('pcs-seen') === '0') $('#seen').hidden = true; } catch (x) {}
@@ -408,6 +469,20 @@ async function renderReview(id) {
   $('#rvFull').onclick = fullScreen;
   setupInk(v);
   loadNotes(d.id);
+}
+async function showVideoError(v, id) {   /* say which: file missing, can't be read, damaged, or a format not supported */
+  const code = v.error ? v.error.code : 0;
+  let st = 0;
+  try { st = (await fetch(`/video/${id}?t=${encodeURIComponent(TOKEN)}`, {method: 'HEAD'})).status; } catch (e) { st = -1; }
+  let h = 'This recording can\'t play here', p;
+  if (st === 404) { h = 'File missing'; p = 'The recording isn\'t in its folder any more (moved, renamed or deleted).'; }
+  else if (st !== 200 && st !== 206) { h = 'Can\'t read the file'; p = 'The file is there but couldn\'t be opened. It may still be in use: try again in a minute.'; }
+  else if (code === 3) { h = 'File damaged'; p = 'The video stops playing partway: the file is damaged or cut short. Your usual video player may still play it.'; }
+  else if (code === 4) { h = 'Video format not supported'; p = 'The built-in player can\'t play this format (often HEVC/H.265). Open it in your usual video player.'; }
+  else if (code === 2) { h = 'Can\'t read the file'; p = 'Reading the file stopped. Try again, or open it in your usual video player.'; }
+  else p = 'Open it in your usual video player instead.';
+  if (!$('#vidErr')) return;
+  $('#vidErrT').textContent = h; $('#vidErrP').textContent = p; $('#vidOpen').hidden = st === 404; $('#vidErr').hidden = false;
 }
 function fullScreen() {           /* the player box, not the bare video: the coach's drawings stay on top */
   const p = $('#player'); if (!p) return;
@@ -427,8 +502,11 @@ function drawTimeline() {
   const D = dur(), pct = t => (t / D * 100).toFixed(3) + '%';
   $('#laneG').innerHTML = '<span class="lane-label">Games</span>' + (RV.spans.length ? RV.spans.map(s =>
     `<div class="segm" data-t="${s.from}" style="left:${pct(s.from)};width:calc(${pct(Math.max(1, s.to - s.from))})" title="${esc(mapName(s.map))} · ${fmtT(s.from)}–${fmtT(s.to)}">${esc(mapName(s.map))}${s.mode ? ' · ' + esc(s.mode) : ''}</div>`).join('') :
-    `<span class="faint" style="position:absolute;left:8px;top:4px;font-size:12px">${RV.d.scan ? 'No game found in this recording' : 'Not scanned yet: scan it to see games and events here'}</span>`);
-  $('#laneE').innerHTML = '<span class="lane-label">Drop · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
+    `<span class="faint" style="position:absolute;left:8px;top:4px;font-size:12px">${RV.d.scan ? 'No game found in this recording' : 'Not scanned yet: scan it to see games and events here'}</span>`) +
+    // small ticks under the games where the "squads left" count went down (tooltip: the count)
+    (RV.d.games || []).map(g => (g.squadsLeft || []).map(([t, n]) =>
+      `<i class="sqt" data-t="${t}" style="left:${pct(t)}" title="${fmtT(t)} · ${n} squad${n === 1 ? '' : 's'} left"></i>`).join('')).join('');
+  $('#laneE').innerHTML = '<span class="lane-label">Start · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
     `<button class="mk ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
@@ -458,7 +536,7 @@ function drawSide() {
     RV.ev.forEach((e, i) => {
       if (e.k === 'feed') return;                     // kill feed lines have their own tab
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
-      const col = {drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
+      const col = {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
       html += `<div class="ev" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';
@@ -490,6 +568,7 @@ function onTime(force) {
   const v = $('#vid'); if (!v || !RV) return;
   const t = v.currentTime;
   $('#playhead').style.left = (t / dur() * 100) + '%';
+  drawGameBar(t);
   drawSeen(t);
   showNotesAt(t);
   const body = $('#rvBody'); if (!body) return;
@@ -543,6 +622,8 @@ function drawSeen(t) {
     if (r.kind === 'wait' && t >= from && t <= r.endsAt) rows.push(`<span class="ring">Ring${r.round ? ' ' + r.round : ''} starts closing in ${fmtT(r.endsAt - t)}</span>`);
     if (r.kind === 'closing' && t >= r.firstSeen && t <= r.endsAt) rows.push(`<span class="ring">Ring closing · ends in ${fmtT(r.endsAt - t)}</span>`);
   }
+  const sq = squadsAt(g, t);
+  if (sq != null) rows.push(`<span>${sq} squad${sq === 1 ? '' : 's'} left</span>`);
   if (s && s[3] != null) {
     const kmh = s[6] != null ? Math.round(s[6] * 0.0254 * 3.6) : null;
     rows.push(`<span class="mono">x ${Math.round(s[3])} · y ${Math.round(s[4])} · z ${Math.round(s[5])}${kmh != null ? ` · ${kmh} km/h` : ''}</span>`);
@@ -870,7 +951,8 @@ function renderSettings() {
   if (!S) { $('#main').innerHTML = '<div class="empty"><strong>Starting…</strong></div>'; setTimeout(() => page === 'settings' && renderSettings(), 500); return; }
   const r = S.recorder, s = r ? r.settings : {};
   $('#main').innerHTML = `
-    <div class="pagehead"><div><h1>Settings</h1><p>Saved on this PC. Changes apply right away.</p></div><button class="btn brand" id="save">Save changes</button></div>
+    <div class="pagehead"><div><h1>Settings</h1><p>Saved on this PC when you press Save changes. The Auto-record switch applies right away.</p></div>
+      <div class="row"><span class="dirty" id="dirty" hidden>Unsaved changes</span><button class="btn brand" id="save">Save changes</button></div></div>
     <section class="card section"><h2>You</h2>
       <div class="form">
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
@@ -890,7 +972,7 @@ function renderSettings() {
       </div></section>
     <section class="card section"><h2>Start-up</h2>
       ${switchHTML('f-start_with_windows', s.start_with_windows, 'Start with Windows', 'PCS Scanner waits in the tray (bottom right) from the moment you log in. Recommended: you never have to think about it.')}
-      ${switchHTML('f-enabled', r.enabled, 'Auto-record', 'Records the Apex window while the game runs, then offers to scan the session. Your microphone is never recorded.')}
+      ${switchHTML('f-enabled', r.enabled, 'Auto-record', 'Records the Apex window while the game runs, then offers to scan the session. Your mic and voice app are recorded only if you switch them on below, after your team agreed.')}
     </section>
     <section class="card section"><h2>Recordings</h2>
       <div class="form">
@@ -899,7 +981,7 @@ function renderSettings() {
         <label class="field"><span>Recordings with no game: delete after (hours)</span><input id="f-nogame_keep_h" type="number" min="0" max="720" value="${s.nogame_keep_h ?? 24}">
           <small>Only when the scan is sure nothing was played (no game, not one kill-feed line). 0 = right after the scan. They also go first when space is needed.</small></label>
         <label class="field"><span>Maximum folder size (GB)</span><input id="f-max_gb" type="number" min="20" value="${s.max_gb}"><small>Oldest recordings go first. At least 20 GB.</small></label>
-        <label class="field wide"><span>Quality: <b id="q-val">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
+        <label class="field wide"><span>Quality: <b id="q-val" class="unit">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint" class="unit"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
           <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
         <label class="field"><span>Capture</span><select id="f-capture">${[['window', 'Apex window (recommended)'], ['game', 'Game capture'], ['display', 'Whole screen']].map(([v, l]) => `<option value="${v}" ${v === s.capture ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></section>
@@ -967,7 +1049,7 @@ function renderSettings() {
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
         <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to Blakey if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
-  const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + ((q.value * 1000 + 480) * 3600 / 8 / 1e6).toFixed(1) + ' GB per hour'; };
+  const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + gbHour(q.value) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
   $('#f-signin').onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
@@ -980,9 +1062,12 @@ function renderSettings() {
   wireHotkeys();
   wireHubKey();
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
+  settingsBase = settingsSnap();
+  // the microphone list arrives later: it joins the starting point unless something was changed meanwhile
+  const fill = html => { const clean = !settingsDirty(); md.innerHTML = html; if (clean && page === 'settings') settingsBase = settingsSnap(); syncDirty(); };
   const md = $('#f-mic_device'); if (md) api('/api/mics').then(m => {
-    md.innerHTML = m.devices.map(d => `<option value="${esc(d.id)}" ${d.id === m.current ? 'selected' : ''}>${esc(d.name)}</option>`).join('');
-  }).catch(() => { md.innerHTML = '<option value="default">Windows default microphone</option>'; });
+    fill(m.devices.map(d => `<option value="${esc(d.id)}" ${d.id === m.current ? 'selected' : ''}>${esc(d.name)}</option>`).join(''));
+  }).catch(() => fill('<option value="default">Windows default microphone</option>'));
   const va = $('#f-voice_app'), vx = $('#f-voice_exe');
   const syncVoice = () => {
     if (!va) return;
@@ -1004,7 +1089,28 @@ function renderSettings() {
     catch (e) { toast(e.message, true); en.checked = !en.checked; }
   };
 }
-async function saveSettings() {
+/* Unsaved changes: the form as it was drawn vs. now. Leaving the page with changes asks Save / Discard. */
+let settingsBase = null;
+function settingsSnap() { try { return $('#f-player') ? JSON.stringify(settingsBody()) : null; } catch (e) { return null; } }
+function settingsDirty() { const now = settingsSnap(); return settingsBase != null && now != null && now !== settingsBase; }
+function syncDirty() { const d = $('#dirty'); if (d) d.hidden = !settingsDirty(); }
+['input', 'change', 'keyup', 'click'].forEach(ev => document.addEventListener(ev, () => { if (page === 'settings') setTimeout(syncDirty); }, true));
+function askUnsaved(target) {
+  const box = document.createElement('div');
+  box.className = 'dialog';
+  box.innerHTML = `<div role="dialog" aria-modal="true" aria-labelledby="dlgT"><h2 id="dlgT">Unsaved changes</h2><p class="muted" style="margin:0">Save your changes before leaving Settings?</p>
+    <div class="row" style="justify-content:flex-end"><button class="btn ghost" data-a="stay">Stay</button><button class="btn" data-a="discard">Discard</button><button class="btn brand" data-a="save">Save</button></div></div>`;
+  document.body.appendChild(box);
+  const close = () => box.remove();
+  box.onclick = async e => {
+    const a = e.target.dataset && e.target.dataset.a;
+    if (e.target === box || a === 'stay') return close();
+    if (a === 'discard') { close(); settingsBase = null; location.hash = target; }
+    if (a === 'save') { close(); if (await saveSettings()) location.hash = target; }
+  };
+  $('[data-a="save"]', box).focus();
+}
+function settingsBody() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim()};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
@@ -1013,8 +1119,12 @@ async function saveSettings() {
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
   }
-  try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast('Settings saved.'); renderSettings(); renderTop(); }
-  catch (e) { toast('Not saved: ' + e.message, true); }
+  return body;
+}
+async function saveSettings() {
+  const body = settingsBody();
+  try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast('Settings saved.'); if (page === 'settings') renderSettings(); renderTop(); return true; }
+  catch (e) { toast('Not saved: ' + e.message, true); return false; }
 }
 
 /* ------------------------------------------------------------------ team hub: key (Settings) and Team page */
