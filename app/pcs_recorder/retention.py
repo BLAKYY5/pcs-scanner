@@ -119,7 +119,8 @@ def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[s
         del idx[key]
 
     # forget entries whose files are already gone
-    for k in [k for k, e in idx.items() if k not in protect and not files_of(e) and e.status != "recording"]:
+    # (a recording that never had a file, path "", stays listed as failed until the keep limit, then goes)
+    for k in [k for k, e in idx.items() if k not in protect and e.path and not files_of(e) and e.status != "recording"]:
         del idx[k]
 
     for k in sorted(idx, key=lambda k: idx[k].started):

@@ -2248,7 +2248,10 @@ def test_failed_recording_never_deletes_other_files():
         assert retention.files_of(idx["f"]) == [] and retention.files_of(idx["g"]) == []
         removed = retention.enforce(idx, keep_days=7, max_gb=0.0)
         assert all(p.exists() for p in keep), [p.name for p in work.iterdir()]
-        assert removed == [] and idx == {}                                  # entries forgotten, nothing deleted
+        assert [n for n, _ in removed] == [""] and idx == {}                # entries gone, no file deleted
+        idx = {"new": retention.Entry(path="", started=time.time() - 3600, status="failed")}
+        retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert "new" in idx                                                 # a fresh failure stays listed
     finally:
         os.chdir(old_cwd)
 
