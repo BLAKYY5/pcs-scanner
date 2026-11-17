@@ -94,6 +94,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
   Dev builds are offered releases ≥ their `base`.
+- **Results to hub and Drive**: a recording is "uploaded" once the hub OR Drive took its results; where they went is
+  kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+  that reached only Drive stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
+  while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
+  8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
+- **Silent voice / mic track**: after a recording of 5 min or more, tracks 2 and 3 (when on, with consent, not muted
+  by hotkey) are read (audio only, `pcs_levels.track_db`); loudest half second under -60 dBFS = silent, told once
+  per setting (`silence.json`).
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).

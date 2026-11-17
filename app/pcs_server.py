@@ -387,6 +387,9 @@ class Backend:
                         "label": label, "label_by_hand": by_hand,
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
+                        # on the team hub? {"hub": "sent" | "pending" | "", "why": "Hub not reachable" | "Key refused"…}
+                        "hub": (self.auto.rec.hub_state(rec_index[norm][0])
+                                if norm in rec_index and hasattr(self.auto.rec, "hub_state") else None),
                         "nogame": bool(norm in rec_index and getattr(rec_index[norm][1], "nogame", False))}
         return sorted(items.values(), key=lambda x: -x["mtime"])
 

@@ -59,6 +59,10 @@ class Recorder:
         self.night = None                        # night.Night (night uploads, turning the PC off)
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
+        self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub / Drive, per recording
+        self.hub_next, self.hub_fails, self.hub_fail_url = 0.0, 0, ""   # hub retries: backoff after network errors
+        self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
+        self.silence_thread: threading.Thread | None = None
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
         for k in sorted(self.idx, key=lambda k: self.idx[k].started):
             e = self.idx[k]
@@ -84,6 +88,7 @@ class Recorder:
                 self._next_in_queue(apex)
             if not apex and self.scan_proc is None:
                 self._retry_uploads()
+                self._retry_hub()
                 if self.youtube:
                     try:
                         self.youtube.tick()
@@ -128,6 +133,7 @@ class Recorder:
         e.path = self._final_file(path) if path else ""
         if e.path:
             self._write_events(key)
+            self._start_silence_check(e.path, self.clock() - e.started)
         e.status = "recorded" if e.path else "failed"
         e.note = "" if e.path else "OBS didn't return a file"
         retention.save_index(self.idx)
@@ -385,10 +391,145 @@ class Recorder:
             hub_note = getattr(where, "hub_note", "")          # what the hub answered: "Sent to hub: 11 games"
             e.status, e.note = "uploaded", hub_note
             retention.save_index(self.idx)
+            hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
+            self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),
+                              "why": getattr(where, "hub_why", "") if hub_ok is False else "",
+                              "drive": {True: "sent", False: "failed"}.get(drive_ok, "")}
+            self._save_sent()
             self.hub.report(self._report(key))
             to = " and ".join(where) if where else "the team"
+            later = " It goes to the hub by itself as soon as it works." if hub_ok is False else " Nothing else to do."
             self.ui.notify("Results sent", f"{summary(e)}: sent to {to}." + (f" {hub_note}." if hub_note else "")
-                           + " Nothing else to do.")
+                           + later)
+
+    def _save_sent(self) -> None:
+        try:
+            retention.save_sent(self.sent, self.idx)
+        except OSError as ex:
+            log.warning("sent.json not saved: %s", ex)
+
+    def hub_state(self, key: str) -> dict:
+        """{"hub": "sent" | "pending" | "", "why": ...} for the Recordings list."""
+        r = self.sent.get(key) or {}
+        return {"hub": r.get("hub", ""), "why": r.get("why", "")}
+
+    # hub tries after a network error: 1, 2, 4, 8 min, then every 15 min (a hub address or key change: at once)
+    HUB_BACKOFF = (60, 120, 240, 480, 900)
+
+    def _retry_hub(self) -> None:
+        """Recordings whose results reached Drive but not the hub: sent to the hub on their own schedule until it
+        takes them. Never while Apex runs (tick), never twice once the hub said 200. A refused key waits for a new
+        key or address; 429 waits for Retry-After (both known by pcs_recorder.hub without asking the hub)."""
+        upload_hub = getattr(self.hub, "upload_hub", None)
+        pending = [k for k, r in self.sent.items() if r.get("hub") == "pending" and k in self.idx
+                   and self.idx[k].status == "uploaded" and self.idx[k].path]
+        if not pending or upload_hub is None:
+            return
+        blocked = self.hub.hub_blocked() if hasattr(self.hub, "hub_blocked") else ""
+        if blocked:
+            self._hub_why(pending, blocked)
+            return
+        if self.s.hub_url != self.hub_fail_url:                  # another hub address: try it now
+            self.hub_next, self.hub_fails = 0.0, 0
+        if self.clock() < self.hub_next:
+            return
+        sent = []
+        for key in sorted(pending, key=lambda k: self.idx[k].started):
+            e = self.idx[key]
+            out = Path(e.path).with_suffix(".scan")
+            files = sorted(p for p in out.rglob("*") if p.is_file()) if out.exists() else []
+            if not files:                                        # results deleted by hand: nothing to send
+                self.sent[key]["hub"], self.sent[key]["why"] = "", ""
+                self._save_sent()
+                continue
+            try:
+                note = upload_hub(files)
+            except Exception as ex:
+                from .hub import reason
+                why = reason(ex)
+                log.info("hub retry failed (%s): %s", why, ex)
+                if getattr(ex, "kind", "network") in ("network", "http"):
+                    self.hub_fails += 1
+                    self.hub_next = self.clock() + self.HUB_BACKOFF[min(self.hub_fails, len(self.HUB_BACKOFF)) - 1]
+                    self.hub_fail_url = self.s.hub_url
+                self._hub_why([k for k in pending if self.sent[k].get("hub") == "pending"], why)
+                break
+            self.hub_fails, self.hub_next = 0, 0.0
+            self.sent[key].update(hub="sent", why="")
+            e.note = note or "Sent to hub"
+            retention.save_index(self.idx)
+            self._save_sent()
+            sent.append(key)
+            self.hub.report(self._report(key))
+        if sent:
+            what = summary(self.idx[sent[0]]) if len(sent) == 1 else f"{len(sent)} recordings"
+            self.ui.notify("Sent to hub", f"{what}: now on the team hub.")
+
+    def _hub_why(self, keys: list[str], why: str) -> None:
+        changed = False
+        for k in keys:
+            if k in self.sent and self.sent[k].get("why") != why:
+                self.sent[k]["why"] = why
+                changed = True
+        if changed:
+            self._save_sent()
+
+    # ---------------------------------------------------------- silent voice / mic track
+    SILENT_DB = -60.0          # loudest half second below this = nothing recorded (level 0 in the review player)
+    SILENT_MIN_S = 300         # shorter recordings: not checked (a quick restart says nothing)
+
+    def _start_silence_check(self, path: str, seconds: float) -> None:
+        """After a recording: was the voice app's or the mic's track silent from start to end? Runs beside the
+        scan prompt (reads the audio track only, never the video)."""
+        tracks = self.s.tracks()
+        check = [t for t in ("discord", "mic") if t in tracks
+                 and not any(ev.get("kind") == "mute" and ev.get("track") == t for ev in self.events)]
+        if not check or seconds < self.SILENT_MIN_S or not self.s.comms_consent:
+            return
+        sigs = {"discord": f"{self.s.voice_app}|{self.s.voice_exe}", "mic": self.s.mic_device or "default"}
+        names = {"discord": self.s.voice_name()}
+        self.silence_thread = threading.Thread(
+            target=self._check_silence, args=(path, tracks, check, sigs, names), daemon=True, name="silence")
+        self.silence_thread.start()
+
+    def _check_silence(self, path: str, tracks: list[str], check: list[str], sigs: dict, names: dict) -> None:
+        import json
+        from .settings import APP_DIR
+        f = APP_DIR / "silence.json"           # {track: settings it was found silent with}: told once per setting
+        try:
+            told = json.loads(f.read_text(encoding="utf-8"))
+            told = told if isinstance(told, dict) else {}
+        except (OSError, ValueError):
+            told = {}
+        track_db = self.track_db
+        if track_db is None:
+            from pcs_levels import track_db
+        before = dict(told)
+        for t in check:
+            try:
+                db = track_db(path, tracks.index(t))
+            except Exception as ex:
+                log.info("silence check skipped (%s): %s", t, ex)
+                continue
+            if not len(db):
+                continue
+            silent = float(max(db)) < self.SILENT_DB
+            log.info("track %s: loudest %.0f dBFS", t, float(max(db)))
+            if not silent:
+                told.pop(t, None)                # sound again: a later silence is told again
+            elif told.get(t) != sigs[t]:
+                told[t] = sigs[t]
+                if t == "discord":
+                    self.ui.notify("Voice track was silent", f"Nothing was recorded from {names['discord']}. "
+                                   "Check Settings → Voice app.")
+                else:
+                    self.ui.notify("Mic track was silent", "Nothing was recorded from your microphone. "
+                                   "Check Settings → Microphone.")
+        if told != before:
+            try:
+                f.write_text(json.dumps(told), encoding="utf-8")
+            except OSError:
+                pass
 
     # ---------------------------------------------------------- housekeeping
     def cleanup(self) -> list[tuple[str, str]]:
