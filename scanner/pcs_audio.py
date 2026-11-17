@@ -9,6 +9,8 @@ Cross-checks with the screen (measured on three recordings, see `attach`):
     alarm right after it is accepted (`soundWeak`); the bar is only lowered inside those few seconds.
   - screen rejects sound: an alarm heard while the ring clock shows the ring already closing, or a countdown still
     far from its end, is not a ring start (another event plays the same tones, e.g. "Loot Bins and Arsenals Reset").
+  - sound rejects screen: a game's damage total read only once is refused when the game was quiet between the read
+    before it and that read (damage needs hits; see `check_damage`).
 More cues get added as they are learned from recordings (knock and kill confirm, ping, …).
 """
 from __future__ import annotations
@@ -115,7 +117,50 @@ def analyse(a: np.ndarray) -> dict:
     c = TONE_CUES["ring_moving"]
     T, lv = tone_level(a, c["freqs"])
     found = {"ring_moving": runs(T, lv, c["min_db"], c["min_len"], c["merge"]) if len(T) else []}
-    return {"seconds": round(len(a) / SR, 1), "cues": found, "_ring": (T, lv)}
+    return {"seconds": round(len(a) / SR, 1), "cues": found, "_ring": (T, lv), "_loud": loudness(a)}
+
+
+LOUD_STEP = 0.05          # s per loudness value
+DAMAGE_QUIET_DB = 12.0    # a damage rise read once needs game sound this far above the game's median just before it
+
+
+def loudness(a: np.ndarray) -> np.ndarray:
+    """Short-term loudness (dBFS), one value per LOUD_STEP seconds."""
+    n = int(SR * LOUD_STEP)
+    if len(a) < n:
+        return np.zeros(0, np.float32)
+    b = a[:len(a) // n * n].reshape(-1, n)
+    return (20 * np.log10(np.sqrt((b * b).mean(1)) + 1e-6)).astype(np.float32)
+
+
+def check_damage(games: list[dict], loud: np.ndarray) -> int:
+    """Sound backs up a damage total that rests on a single read (`own.damageSingleRead`): damage needs hits, and
+    hits are loud. On the 7 and 15 Nov recordings every one of 93 damage rises read on screen had game sound at least
+    13.4 dB above the game's median within the second before the previous read and the new one, while 49 % of
+    random 2 s windows are that loud. A single read with no such sound between the read before it and itself is
+    refused (`damageRefused: "quiet"`, no damage total); otherwise `damageSoundDb` says how loud it was.
+    -> number refused."""
+    refused = 0
+    for g in games:
+        o = g.get("own") or {}
+        if not o.get("damageSingleRead") or o.get("damageAt") is None or not len(loud):
+            continue
+        t0, t1 = g.get("tStart", 0), g.get("tEndGame") or o.get("damageLastRead") or o["damageAt"]
+        game = loud[int(t0 / LOUD_STEP):int(t1 / LOUD_STEP) + 1]
+        lo = (o.get("damagePrevReadAt") or o["damageAt"] - 1) - 1
+        win = loud[max(0, int(lo / LOUD_STEP)):int(o["damageAt"] / LOUD_STEP) + 1]
+        if not len(game) or not len(win):
+            continue
+        db = float(win.max() - np.median(game))
+        if db >= DAMAGE_QUIET_DB:
+            o["damageSoundDb"] = round(db, 1)
+            continue
+        for k in ("damage", "damageAt", "damageLastRead", "damageSingleRead"):
+            o.pop(k, None)
+        o["damageRefused"] = "quiet"
+        o["damageSoundDb"] = round(db, 1)
+        refused += 1
+    return refused
 
 
 def guided_alarm(T, level, t: float) -> dict | None:
@@ -155,6 +200,9 @@ def attach(games: list[dict], found: dict) -> None:
       start: kept apart in `ringSoundOther` with the reason, not in `ringSound`;
     - other alarms of the game (map open, dead, spectating, …) stay in `ringSound`."""
     level = found.pop("_ring", None)
+    loud = found.pop("_loud", None)
+    if loud is not None:
+        found["damageRefused"] = check_damage(games, loud)
     moves = [c["t"] for c in found.get("cues", {}).get("ring_moving", [])]
     starts = sorted(g.get("tStart", 0) for g in games)
     weak = 0

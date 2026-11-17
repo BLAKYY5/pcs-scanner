@@ -1053,6 +1053,36 @@ def test_sound_ring_cross_check():
     assert A.screen_says_not_ring([], 50) is None
 
 
+def test_sound_damage_single_read():
+    """A damage total that rests on one read is kept when the game was loud between the read before it and that
+    read (hits), and refused when it was quiet; totals read twice are never touched."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_audio as A
+    sr = A.SR
+    rng = np.random.default_rng(3)
+    a = rng.normal(0, 0.003, sr * 300).astype(np.float32)          # quiet game sound
+    a[int(98.5 * sr):int(99.5 * sr)] += rng.normal(0, 0.2, sr).astype(np.float32)   # gunfire before the read at 100
+    loud = A.loudness(a)
+    assert len(loud) == 300 / A.LOUD_STEP
+
+    def game(t, prev, single=True):
+        return {"tStart": 0, "tEndGame": 290, "own": {"kills": 1, "damage": 400, "damageAt": t, "damageLastRead": t,
+                                                      "damageSingleRead": single, "damagePrevReadAt": prev}}
+    games = [game(100, 98), game(200, 198), game(200, 198, single=False), game(100, 99.8)]
+    assert A.check_damage(games, loud) == 1
+    kept, refused, twice, close = (g["own"] for g in games)
+    assert kept["damage"] == 400 and kept["damageSoundDb"] > A.DAMAGE_QUIET_DB, kept
+    assert "damage" not in refused and refused["damageRefused"] == "quiet" and refused["kills"] == 1, refused
+    assert twice["damage"] == 400 and "damageSoundDb" not in twice, twice
+    assert close["damage"] == 400, close                     # the window starts 1 s before the previous read
+    # through attach (as the scan calls it)
+    found = {"cues": {"ring_moving": []}, "_loud": loud}
+    gs = [game(200, 198)]
+    A.attach(gs, found)
+    assert found["damageRefused"] == 1 and "_loud" not in found and "damage" not in gs[0]["own"]
+
+
 def test_scanner_no_function_defined_twice():
     """A second function with the same name silently replaces the first one (the scanner's files are long): a new
     helper once took the name of the pre-ring clock's helper and every scan failed. Caught here instead."""
@@ -1476,6 +1506,7 @@ def test_squads_left_counter():
     SCAN.timeline(games, [], own=own)
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
+    assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
 
 
 def test_game_end_time():

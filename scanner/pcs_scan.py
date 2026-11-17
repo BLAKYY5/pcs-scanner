@@ -547,7 +547,11 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                                    HUD.SINGLE_JUMP if k == 'damage' else None)   # damage: a consistent last read counts
                 if f:
                     st[k] = f[0]; st[k + 'At'] = f[1]; st[k + 'LastRead'] = f[2]
-                    if k == 'damage': st['damageSingleRead'] = f[3]         # true: the total rests on one read
+                    if k == 'damage':
+                        st['damageSingleRead'] = f[3]                       # true: the total rests on one read
+                        if f[3]:    # the read before it: the rise happened in between (the sound check looks there)
+                            prev = [t_ for t_, o in own if 'damage' in o and g['tStart'] <= t_ < f[1]]
+                            if prev: st['damagePrevReadAt'] = round(prev[-1], 2)
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
@@ -620,7 +624,10 @@ def main():
                 audio = {'error': f'{type(e).__name__}: {e}'[:200]}
             perf['audio'] = time.time() - t_au
             if audio.get('cues'):
-                print(f"  sound: ring moving heard {len(audio['cues'].get('ring_moving', []))} time(s)", flush=True)
+                other = sum(len(g.get('ringSoundOther', [])) for g in games)
+                print(f"  sound: ring moving heard {len(audio['cues'].get('ring_moving', []))} time(s)"
+                      f", {audio.get('ringWeak', 0)} more found where the screen saw a countdown end"
+                      f", {other} not a ring start by the screen", flush=True)
         st = rec_start(path)
         for gm in games:
             if st:
