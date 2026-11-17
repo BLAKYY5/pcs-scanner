@@ -185,6 +185,7 @@ select.label:disabled{opacity:.5;cursor:default}
 .tick{position:absolute;top:4px;bottom:4px;width:3px;margin-left:-1px;border-radius:2px;background:var(--accent);opacity:.85;cursor:pointer}
 .tick:hover{opacity:1;box-shadow:0 0 0 2px rgba(229,57,45,.35)}
 .tick.lost{background:#8a877f}
+.mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */
 .wrap:has(> .review.theatre){max-width:none}
 .review.theatre{grid-template-columns:minmax(0,1fr)}

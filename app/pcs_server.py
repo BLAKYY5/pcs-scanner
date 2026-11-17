@@ -111,7 +111,7 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
-GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "ring", "landing", "rankedShare", "clockStart", "harvesters",
+GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
                "select", "banner", "squadsLeft", "own", "feedStats")
 
 

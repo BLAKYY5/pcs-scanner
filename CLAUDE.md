@@ -58,13 +58,23 @@ python scanner/pcs_scan.py "<recording>" --out <dir> [--cpu] [--snaps]     # sca
 python app/pcs_app.py                        # run the app from source (Windows)
 ```
 
-The tests are plain scripts: each `test_*` function runs from `__main__`, prints `ok <name>`, exits non-zero on
-failure. Add a test with every behaviour change; CI runs both files on Windows.
+The tests are plain scripts: each `test_*` function runs from `__main__` (`run_all`), prints `ok <name>`; a failure
+doesn't stop the others: all failures are listed at the end and the script exits non-zero. A test that can't run
+on this PC raises `Skipped` (test_ui.py: `test_single_instance` while another PCS Scanner runs). Add a test with every behaviour change; CI runs both files on Windows.
 
 Build = `build.yml`. `gh workflow run build.yml --ref <branch>` gives a `dev-N` test exe as a run artifact.
 A push to `main` builds too, and publishes release `v<VERSION>` if that tag doesn't exist yet. New modules need
 a `--hidden-import` (or `--collect-submodules`) in `build.yml` and a line in the selftest import in `pcs_app.py`,
 or the exe breaks while the tests pass.
+
+**ffmpeg** (bundled in the exe) is pinned in `build.yml` (`FFMPEG_TAG`, `FFMPEG_ZIP`, `FFMPEG_SHA256`): a BtbN
+FFmpeg-Builds master `win64-gpl` build, checked by SHA-256, so releases don't change ffmpeg by accident (the scanner
+parses its `pts_time` output and relies on its GPU decoding). Pin a month-end build (`autobuild-YYYY-MM-<last day>-…`):
+BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
+`gh release list --repo BtbN/FFmpeg-Builds`, then
+`gh api repos/BtbN/FFmpeg-Builds/releases/tags/<tag> --jq '.assets[] | select(.name|endswith("win64-gpl.zip")) | [.name, .digest]'`
+gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
+build and compare it with a scan from the previous build (same games and values).
 
 Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is released).
 
@@ -124,6 +134,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is
   own full-screen button is hidden, or the drawings would not show.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
+- **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for
+  compatibility. `tEndGame` (1.10.9+) = the last in-game HUD read (ring clock, squads counter, own strip, full map)
+  before the next game's start; the debug overlay alone does not count (it also shows in the firing range). Ring
+  phases first seen after the next game started are dropped from a game; a countdown ending after `tEndGame` has
+  `endsAfterGame: true` (the player died before that ring time). `scannerBuild` says which build made a scan
+  (`1.10.9+dev.52` for a test build, `+source` from source); `scanner` stays the plain version.
+- **Scanner speed**: readers take the uint8 frame and make int16 only the small areas they compute on; per-pixel
+  min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
+  which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
+  region caches (0 differences) and the check set table.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,

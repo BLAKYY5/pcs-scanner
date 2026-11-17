@@ -384,12 +384,12 @@ function buildEvents(d) {
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: 'Jumped from the ship'});
     if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: ours ? 'at ' + poiName(ours.poi) : ''});
     (g.ring || []).forEach(r => {
-      const n = r.round ? ' ' + r.round : '';
+      const n = r.round ? ' ' + r.round : '', after = r.endsAfterGame ? ' · after your game ended' : '';
       if (r.kind === 'wait') {
-        ev.push({t: r.appearedAt ?? r.firstSeen, k: 'ring', g: gi, title: `Ring${n} announced`, sub: r.endsAt ? 'closes at ' + fmtT(r.endsAt) : ''});
-        if (r.endsAt) ev.push({t: r.endsAt, k: 'ringclose', g: gi, title: `Ring${n} starts closing`});
+        ev.push({t: r.appearedAt ?? r.firstSeen, k: 'ring', g: gi, title: `Ring${n} announced`, sub: r.endsAt ? 'closes at ' + fmtT(r.endsAt) + after : ''});
+        if (r.endsAt) ev.push({t: r.endsAt, k: 'ringclose', g: gi, title: `Ring${n} starts closing`, sub: after.slice(3), after: !!r.endsAfterGame});
       } else {
-        ev.push({t: r.firstSeen, k: 'ringclose', g: gi, title: `Ring${n} closing`, sub: r.endsAt ? 'until ' + fmtT(r.endsAt) : ''});
+        ev.push({t: r.firstSeen, k: 'ringclose', g: gi, title: `Ring${n} closing`, sub: r.endsAt ? 'until ' + fmtT(r.endsAt) + after : ''});
       }
     });
   });
@@ -434,7 +434,9 @@ function feedEvent(l, g) {
 function gameSpans(d) {
   return (d.games || []).map(g => {
     const tr = g.track || [];
-    const end = Math.max(g.tEnd || 0, tr.length ? tr[tr.length - 1][0] : 0, ...(g.ring || []).map(r => r.lastSeen || 0));
+    // tEndGame (scanner 1.10.9+): the last in-game HUD read = the game's end for this recording; older scans: guessed
+    const end = g.tEndGame != null ? g.tEndGame :
+      Math.max(g.tEnd || 0, tr.length ? tr[tr.length - 1][0] : 0, ...(g.ring || []).map(r => r.lastSeen || 0));
     return {from: g.tStart, to: end, map: g.map, mode: g.mode};
   });
 }
@@ -555,7 +557,7 @@ function drawTimeline() {
     (RV.d.games || []).map(g => (g.squadsLeft || []).map(([t, n]) =>
       `<i class="sqt" data-t="${t}" style="left:${pct(t)}" title="${fmtT(t)} · ${n} squad${n === 1 ? '' : 's'} left"></i>`).join('')).join('');
   $('#laneE').innerHTML = '<span class="lane-label">Start · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
-    `<button class="mk ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
+    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
     const marks = RV.d.marks || [], spans = [], open = {};
