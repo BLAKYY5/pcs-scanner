@@ -66,7 +66,7 @@ A push to `main` builds too, and publishes release `v<VERSION>` if that tag does
 a `--hidden-import` (or `--collect-submodules`) in `build.yml` and a line in the selftest import in `pcs_app.py`,
 or the exe breaks while the tests pass.
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.8 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is released).
 
 ## How the pieces work (things that bit us)
 
