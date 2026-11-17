@@ -21,6 +21,16 @@ import pcs_hud as HUD
 
 VERSION = '1.10.9'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
+
+def build_stamp(here=HERE):
+    """Which build made a scan, for results files ('scannerBuild'; 'scanner' stays VERSION for the hub and old readers):
+    a release build = VERSION; a test build from the workflow (build.json version 'dev-N') = VERSION + '+dev.N', so scans
+    made between releases can be told apart; run from source (no build.json) = VERSION + '+source'."""
+    try: b = json.load(open(os.path.join(here, 'build.json'), encoding='utf-8-sig'))
+    except Exception: return VERSION + '+source'
+    v = str(b.get('version') or '')
+    if v.startswith('dev-'): return f"{VERSION}+dev.{v[4:]}"
+    return VERSION if v == VERSION else f'{VERSION}+{v or "unknown"}'
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
 USE_HW = True
@@ -107,12 +117,13 @@ def poi_at(mp, x, y):
 
 # ---------- frame readers ----------
 def read_dropscreen(a, loose=False):
-    """Scrim/custom pre-game screen: drop map panel on the right with red/green markers."""
+    """Scrim/custom pre-game screen: drop map panel on the right with red/green markers.
+    a: the frame (uint8 or int16); the gates only compare values, the panel is made int16 here for its arithmetic."""
     q = a[88:1088:4, 1520:2520:4]            # cheap gate on a 1/16 sample: dark panel with red markers
     if ((q[..., 0] > 140) & (q[..., 1] < 50) & (q[..., 2] < 50)).sum() < 25: return None   # no brightness test: Storm Point is bright
     lg = a[1125:1180, 1740:1800]; lr = a[1125:1180, 2020:2075]
     if ((lg[..., 1] > 150) & (lg[..., 0] < 120)).sum() < 40 or ((lr[..., 0] > 140) & (lr[..., 1] < 60)).sum() < 40: return None
-    p = a[88:1088, 1520:2520]; r, g, b = p[..., 0], p[..., 1], p[..., 2]
+    p = a[88:1088, 1520:2520].astype(np.int16); r, g, b = p[..., 0], p[..., 1], p[..., 2]
     red = blobs(ndimage.binary_closing((r > 140) & (g < 50) & (b < 50), iterations=3), 60, 3000)
     if len(red) < 5: return None
     grn = blobs(ndimage.binary_closing((g > 150) & (r < 120) & (b < 120), iterations=3), 60, 3000)
@@ -149,13 +160,14 @@ class MapReader:
         """Cheap gate (<1 ms): full map = dark key-hint bar along the bottom + white 'M' keycap bottom-left
         (or, on controller, a 'Close Map' button glyph and text in the same corner)."""
         bar = a[1362:1430:2, ::4]
-        if (bar.max(2) < 40).mean() <= 0.8: return False
-        if (a[1375:1420, 80:120].min(2) > 200).mean() > 0.3: return True
-        wf = (a[1375:1420, 40:320].min(2) > 170).mean()
+        if (HUD.minmax(bar)[1] < 40).mean() <= 0.8: return False
+        if (HUD.minmax(a[1375:1420, 80:120])[0] > 200).mean() > 0.3: return True
+        wf = (HUD.minmax(a[1375:1420, 40:320])[0] > 170).mean()
         return 0.04 < wf < 0.5
     def read(self, a, stretched=False):
+        """a: the frame (uint8 or int16); the map area is made int16 here for its arithmetic."""
         if not self.is_map(a): return None
-        X0 = 560; c = a[0:1340, X0:1960]          # map area only (all image work on this crop)
+        X0 = 560; c = a[0:1340, X0:1960].astype(np.int16)          # map area only (all image work on this crop)
         r, g, b = c[..., 0], c[..., 1], c[..., 2]
         sh = lambda L: [(x + X0, y, s_) for x, y, s_ in L]
         lime = sh(blobs(lime_mask(r, g, b, stretched), 4 if stretched else 5, 300))
@@ -388,16 +400,18 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 try: bn = HUD.Banner.read(img)
                 except Exception: bn = None
                 if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
+        # The readers take the uint8 frame and make int16 only the small areas they compute on: converting the whole
+        # 1440p frame cost about 6 ms each time, up to three times per keyframe (results are identical).
         for st in ([] if d else cands):
             HUD.LOOSE = st
-            d = read_dropscreen((view_drop(img) if st else img).astype(np.int16), st)
+            d = read_dropscreen(view_drop(img) if st else img, st)
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
-            d = mr.read((view_map(img) if st else img).astype(np.int16), st)
+            d = mr.read(view_map(img) if st else img, st)
             if d: events.append({'t': round(t, 2), 'kind': 'map', 'data': d}); votes[st] += 1; break
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
-                a = (view_top(img) if st else img).astype(np.int16)
+                a = view_top(img) if st else img
                 rg = HUD.read_ring(a); pos, vel = HUD.read_dbg(a)
                 if rg or pos: hud = (st, a, rg, pos, vel); votes[st] += 1; break
             st = hud[0] if hud else (mode if mode is not None else votes[True] > votes[False])
@@ -531,6 +545,27 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         if g['drop'] is None and jump is not None and jump < g['tStart']:
             g['tStart'] = max(jump - 60, (prev + 60) if prev is not None else 0)
         prev = g['tStart']
+    game_ends(games, samples, squads, own)
+    return games
+
+def game_ends(games, samples, squads=None, own=None):
+    """games[].tEndGame: when the game is over for this recording = the last in-game HUD read (ring clock, squads
+    counter, own stats strip, full map) from the game's start to the next game's start. Not the debug overlay alone:
+    it also shows in the firing range and between games (3 Nov: 2.5 hours of it after a game).
+    tEnd keeps its old meaning (the last drop screen / legend select / full map frame, often = tStart).
+    A game's ring phases stay in its window: a phase first seen after the next game started is dropped, and a phase
+    whose countdown ends after the game ended for this recording (the player died before) gets endsAfterGame."""
+    for gi, g in enumerate(games):
+        t0 = g['tStart']; hi = games[gi + 1]['tStart'] if gi + 1 < len(games) else float('inf')
+        inside = lambda t_: t0 <= t_ < hi
+        reads = [s[0] for s in samples if s[2] is not None and inside(s[0])] +[t_ for t_, _ in (squads or []) if inside(t_)] + \
+                [t_ for t_, _ in (own or []) if inside(t_)] + ([g['tEnd']] if inside(g['tEnd']) else [])
+        end = max(reads, default=t0)
+        g['tEndGame'] = round(float(end), 2)
+        if g.get('ring') is not None:
+            g['ring'] = [r for r in g['ring'] if r['firstSeen'] < hi]
+            for r in g['ring']:
+                if r.get('endsAt') is not None and r['endsAt'] > end: r['endsAfterGame'] = True
     return games
 
 def main():
@@ -583,10 +618,10 @@ def main():
                 t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
                 gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1, (gm.get('select') or {}).get('squad'))
         if feed_lines:
-            json.dump({'scanner': VERSION, 'file': os.path.basename(path), 'recStart': st, 'lines': feed_lines},
+            json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines},
                       open(os.path.join(A.out, name + '.feed.json'), 'w'))
             print(f'  kill/event feed: {len(feed_lines)} lines saved to {name}.feed.json', flush=True)
-        res = {'scanner': VERSION, 'file': os.path.basename(path), 'recStart': st, 'scannedAt': datetime.datetime.now().isoformat(timespec='seconds'),
+        res = {'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'scannedAt': datetime.datetime.now().isoformat(timespec='seconds'),
                'events': len(events), 'perf': {k: (round(v, 1) if isinstance(v, float) else v) for k, v in perf.items()},
                'ringLabels': labels.export(), 'games': games}
         if audio is not None: res['audio'] = audio

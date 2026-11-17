@@ -110,6 +110,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is
   own full-screen button is hidden, or the drawings would not show.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
+- **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for
+  compatibility. `tEndGame` (1.10.9+) = the last in-game HUD read (ring clock, squads counter, own strip, full map)
+  before the next game's start; the debug overlay alone does not count (it also shows in the firing range). Ring
+  phases first seen after the next game started are dropped from a game; a countdown ending after `tEndGame` has
+  `endsAfterGame: true` (the player died before that ring time). `scannerBuild` says which build made a scan
+  (`1.10.9+dev.52` for a test build, `+source` from source); `scanner` stays the plain version.
+- **Scanner speed**: readers take the uint8 frame and make int16 only the small areas they compute on; per-pixel
+  min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
+  which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
+  region caches (0 differences) and the check set table.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
