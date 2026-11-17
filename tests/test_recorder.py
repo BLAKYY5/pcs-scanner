@@ -1608,6 +1608,44 @@ def test_check_set_scoring():
     assert len(CS.load(str(ex))) >= 2
 
 
+def test_landing_place_broken_moon():
+    """Broken Moon landings get map coordinates (the game's own minimap transform, checked on own-arrow / POS pairs) and a
+    place name only near a POI centre (the map has centres, no outlines; the middle is named since PR #41). Maps without a transform still give None."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    x, y = HUD.to_map("BM", -13757.28, -22228.53)             # 4 Nov, landed in the domes of Cultivation
+    assert 0 < x < 100 and 0 < y < 100 and abs(x - 36.32) < 0.05 and abs(y - 76.41) < 0.05, (x, y)
+    assert SCAN.landing_poi("BM", x, y) == "bm-cultivation"
+    assert SCAN.landing_poi("BM", *HUD.to_map("BM", -9555.07, 22030.99)) == "bm-the-core"    # 15 Nov, The Core
+    assert SCAN.landing_poi("BM", *HUD.to_map("BM", -8772.64, -2841.75)) == "bm-quarantine-zone"  # the middle (PR #41)
+    assert SCAN.landing_poi("BM", *HUD.to_map("BM", -5572.87, -10867.06)) == "bm-quarantine-zone"  # 11.5 % away, Hazmat 13.1
+    assert SCAN.landing_poi("BM", 95, 95) is None                                            # > 12 % from every centre
+    assert "BM" not in HUD.CAL_UNCHECKED and "KC" in HUD.CAL_UNCHECKED
+    assert HUD.to_map("OL", 0, 0) is None and HUD.to_map("?", 0, 0) is None
+    assert HUD.to_map("WE", 0, 0) == (49.46, 49.82)                                          # fitted maps unchanged
+    for mx, my in ((10, 10), (50, 50), (90, 70)):                                           # outlined maps: as poi_at
+        assert SCAN.landing_poi("WE", mx, my) == SCAN.poi_at("WE", mx, my)[0]
+
+
+def test_landing_place_e_district():
+    """E-District uses the game's own minimap transform (coach's decision, 16 Nov 2026): the map's centre is world 0, 0,
+    own-arrow / POS pairs fit within half a percent, and the known landings keep their place."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    assert HUD.CAL["ED"] == HUD._game_tx(-43008, 43008, 21) and "ED" not in HUD.CAL_UNCHECKED
+    assert HUD.to_map("ED", 0, 0) == (50.0, 50.0)
+    ax, ay = HUD.to_map("ED", -11889, 8641)                   # 4 Nov: own arrow on the full map at 36.24, 40.35
+    assert abs(ax - 36.24) < 0.5 and abs(ay - 40.35) < 0.5, (ax, ay)
+    x, y = HUD.to_map("ED", 26519.45, 8113.98)                # 15 Nov, landed in The Heights (east edge: moved most)
+    assert abs(x - 80.83) < 0.05 and abs(y - 40.57) < 0.05, (x, y)
+    assert SCAN.landing_poi("ED", x, y) == "ed-heights"
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", 4103.86, 6782.84)) == "ed-energy-bank"     # 4 Nov
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", -23252.34, -8508.78)) == "ed-neon-square"  # 4 Nov
+    assert SCAN.landing_poi("ED", *HUD.to_map("ED", -4046.32, -33641.3)) == "ed-shipyard-arcade"  # 3 Nov, south edge
+
+
 def test_hub_answer_shown_on_recording():
     """What the hub answered for a recording ("Sent to hub: 11 games") is kept on it (Recordings list) and told."""
     from pcs_recorder.runtime import Sent
