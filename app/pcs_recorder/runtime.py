@@ -58,11 +58,16 @@ def hold_guard(on_show) -> socket.socket | None:
         while True:
             try:
                 c, _ = s.accept()
-                if c.recv(16) == b"show":
-                    on_show()
-                c.close()
             except OSError:
                 return
+            try:
+                c.settimeout(2)                       # a client that never sends can't block the next "show"
+                if c.recv(16) == b"show":
+                    on_show()
+            except OSError:
+                pass
+            finally:
+                c.close()
     threading.Thread(target=serve, daemon=True).start()
     return s
 

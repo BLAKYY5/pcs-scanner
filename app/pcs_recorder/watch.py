@@ -188,7 +188,17 @@ class Watch:
         if r.status_code == 404:                       # a hub before 0.5
             return {"available": False, "games": []}
         hub._check(r)
-        return {**r.json(), "available": True}
+        d = r.json()
+        d = d if isinstance(d, dict) else {}
+        from .notes import num
+        games = []
+        for g in d.get("games") or []:                 # times go straight into the page's markup: numbers only
+            if not isinstance(g, dict):
+                continue
+            games.append({**g, "jumpAt": num(g.get("jumpAt")),
+                          "bookmarks": [{**b, "t": num(b.get("t"))} for b in g.get("bookmarks") or [] if isinstance(b, dict)],
+                          "talk": [t for t in g.get("talk") or [] if isinstance(t, dict)]})
+        return {**d, "games": games, "available": True}
 
     def audio(self, aid: str) -> Path:
         """One review talk track, downloaded once into the data folder (the window's player reads it from here)."""
