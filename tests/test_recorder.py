@@ -1081,6 +1081,19 @@ def test_sound_damage_single_read():
     gs = [game(200, 198)]
     A.attach(gs, found)
     assert found["damageRefused"] == 1 and "_loud" not in found and "damage" not in gs[0]["own"]
+    # the developer tool that scores these checks on a scan
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import audio_cross
+    before = [{"tStart": 0, "tEndGame": 300, "ring": [{"kind": "wait", "endsAt": 100, "soundAt": 100.4},
+                                                       {"kind": "wait", "endsAt": 200}, {"kind": "wait", "endsAt": 400}],
+               "ringSound": [150.0], "own": {"damage": 400, "damageAt": 200, "damageSingleRead": True}}]
+    after = [{"tStart": 0, "tEndGame": 300, "ring": [{"kind": "wait", "endsAt": 100, "soundAt": 100.4},
+                                                      {"kind": "wait", "endsAt": 200, "soundAt": 200.5, "soundWeak": True},
+                                                      {"kind": "wait", "endsAt": 400}],
+              "ringSound": [], "ringSoundOther": [{"t": 150.0, "why": "closing"}], "own": {"damageRefused": "quiet"}}]
+    rows, tot = audio_cross.score(before, after)
+    assert tot == {"rings": 2, "heardBefore": 1, "heardAfter": 2, "weak": 1, "unexplainedBefore": 1, "unexplainedAfter": 0,
+                   "other": 1, "singleDamage": 1, "damageRefused": 1}, tot
 
 
 def test_scanner_no_function_defined_twice():

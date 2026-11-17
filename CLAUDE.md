@@ -249,6 +249,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
+  Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a
+  weaker alarm count right after it (`soundWeak`, 7 dB for 0.3 s within -0.5..+3.5 s); an alarm heard while the ring
+  clock shows the ring closing or a countdown far from its end is not a ring start (`ringSoundOther`, e.g. the "Loot
+  Bins and Arsenals Reset" event plays the same tones); a damage total resting on a single read is refused when the
+  game was quiet between the read before it (`damagePrevReadAt`) and it (`damageRefused: "quiet"`). Measured on the
+  7 / 15 / 17 Nov recordings: rings heard 38 -> 42 of 47, unexplained alarms 3 -> 0, real single damage reads 7 of 7
+  kept. Never use the voice / mic tracks for detection. Developer tool: `tools/audio_cross.py` (scores the ring alarm
+  and the damage check against a scan; game track audio, no video decode).
 
 ## Developer tools (`tools/`, not in the exe)
 
