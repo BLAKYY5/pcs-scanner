@@ -1694,6 +1694,151 @@ def test_review_kill_feed_our_squad():
         assert text in js, text
 
 
+class MinimapHub:
+    """A hub 0.5.2 with the `minimaps` collection: the list and the pictures need a key (any role). `docs` and `blobs`
+    can be changed by the test; `blob_calls` counts picture downloads."""
+    JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
+    PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 50
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.docs = {"SP": {"name": "Storm Point", "asset": "a" * 32, "pos_x": -50606, "pos_y": 52139, "scale": 25, "size": 4096},
+                     "BAD": {"asset": "../../x", "pos_x": 0, "pos_y": 0, "scale": 1, "size": 1}}
+        self.blobs = {"a" * 32: self.JPEG}
+        self.calls, self.blob_calls = [], 0
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, data, ctype="application/json"):
+                data = data if isinstance(data, bytes) else json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                auth = self.headers.get("Authorization", "")
+                hub.calls.append((self.path, auth))
+                if auth != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if self.path == "/api/db/minimaps":
+                    return self._send(200, [{"id": k, "data": v, "version": 1} for k, v in hub.docs.items()])
+                if self.path.startswith("/_blob/"):
+                    hub.blob_calls += 1
+                    b = hub.blobs.get(self.path[7:])
+                    # the real hub answers a placeholder drawing (200) for a picture it doesn't have
+                    return self._send(200, b, "image/jpeg") if b else self._send(200, b"<svg/>", "image/svg+xml")
+                return self._send(404, {"detail": "Not Found"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _age_minimap_list(data, seconds):
+    idx = json.loads((data / "index.json").read_text())
+    idx["at"] -= seconds
+    (data / "index.json").write_text(json.dumps(idx))
+
+
+def test_minimap_download_and_cache():
+    """Map panel pictures: downloaded once from the hub with the key, kept in the data folder (never next to the
+    app), served to the page with the page's token; offline the copy still shows; no key / no hub / no picture for
+    the map: said so, nothing downloaded."""
+    from pcs_recorder import minimaps
+    hub = _fresh_hub()
+    fake = MinimapHub()
+    auto = _Auto(str(TMP / "mmrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    srv = pcs_server.Server(b)
+    srv.start()
+    data = Path(os.environ["PCS_DATA_DIR"]) / "minimaps"
+    try:
+        # no key: needs the hub, nothing asked
+        r = call(srv, "/api/minimap/SP")[1]
+        assert r == {"available": False, "reason": "hub", "text": "Minimap needs the team hub"} and not fake.calls, r
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/minimap/SP")[1]
+        assert r["available"] and r["asset"] == "a" * 32, r
+        assert (r["pos_x"], r["pos_y"], r["scale"], r["size"]) == (-50606, 52139, 25, 4096), r
+        assert [p for p, _ in fake.calls] == ["/api/db/minimaps", "/_blob/" + "a" * 32]
+        assert all(a == "Bearer " + GOOD_KEY for _, a in fake.calls) and not any(GOOD_KEY in p for p, _ in fake.calls)
+        files = sorted(f.name for f in data.iterdir())
+        assert files == ["SP-" + "a" * 32 + ".img", "index.json"], files
+        assert not list(Path(pcs_server.WEB).rglob("*.img")) and GOOD_KEY not in (data / "index.json").read_text()
+        # the page gets the picture with its token only
+        code, body, h = call(srv, "/minimap/SP", raw=True)
+        assert code == 200 and body == MinimapHub.JPEG and h["Content-Type"] == "image/jpeg"
+        assert call(srv, "/minimap/SP", token=False, raw=True)[0] == 403
+        assert call(srv, "/minimap/WE", raw=True)[0] == 404 and call(srv, "/minimap/..%2F..%2Fx", raw=True)[0] == 404
+        # asked again: no new download, no new list (kept for hours)
+        call(srv, "/api/minimap/SP")
+        assert fake.blob_calls == 1 and len(fake.calls) == 2
+        # a map without a picture (Olympus), a game whose map wasn't read, a bad document: "no minimap yet"
+        for code in ("OL", "?", "BAD", "x"):
+            r = call(srv, "/api/minimap/" + urllib.request.quote(code))[1]
+            assert r == {"available": False, "reason": "map", "text": "No minimap for this map yet"}, (code, r)
+        # the coach uploads a new picture: the next list read downloads it, the old copy goes
+        fake.docs["SP"] = dict(fake.docs["SP"], asset="b" * 32)
+        fake.blobs["b" * 32] = MinimapHub.PNG
+        _age_minimap_list(data, minimaps.INDEX_TTL + 1)
+        r = call(srv, "/api/minimap/SP")[1]
+        assert r["asset"] == "b" * 32 and sorted(f.name for f in data.glob("*.img")) == ["SP-" + "b" * 32 + ".img"]
+        assert call(srv, "/minimap/SP", raw=True)[2]["Content-Type"] == "image/png"
+        # a picture the hub lost (it answers a drawing instead): nothing written, the panel says it needs the hub
+        fake.docs["WE"] = dict(fake.docs["SP"], asset="c" * 32)
+        _age_minimap_list(data, minimaps.MISS_TTL + 1)
+        r = call(srv, "/api/minimap/WE")[1]
+        assert r["available"] is False and r["reason"] == "hub" and not list(data.glob("WE-*")), r
+        # offline: the copy already here still shows
+        fake.stop()
+        _age_minimap_list(data, minimaps.INDEX_TTL + 1)
+        r = call(srv, "/api/minimap/SP")[1]
+        assert r["available"] and r["asset"] == "b" * 32
+        # no hub address: needs the hub
+        auto.s.hub_url = ""
+        assert call(srv, "/api/minimap/SP")[1]["reason"] == "hub"
+    finally:
+        srv.stop()
+        _fresh_hub()
+        shutil.rmtree(data, ignore_errors=True)
+
+
+def test_minimap_transform_and_page():
+    """World -> picture with the game's transform (exact on its 4096 px minimap), and the panel's texts and hooks."""
+    from pcs_recorder import minimaps
+    tx = {"pos_x": -43008, "pos_y": 43008, "scale": 21, "size": 4096}        # E-District
+    assert minimaps.to_picture(tx, 0, 0) == (0.5, 0.5)
+    assert minimaps.to_picture(tx, -43008, 43008) == (0, 0)
+    fx, fy = minimaps.to_picture(tx, -23252.34, -8508.78)                    # a landing in Neon Square (4 Nov scan)
+    assert abs(fx * 4096 - 940.75) < 0.01 and abs(fy * 4096 - 2453.2) < 0.1
+    we = {"pos_x": -45056, "pos_y": 45055, "scale": 22, "size": 4096}       # the hub's World's Edge formula
+    assert minimaps.to_picture(we, 45056, -45057) == (1.0, 1.0)
+    web = Path(pcs_server.WEB)
+    js = (web / "minimap.js").read_text(encoding="utf-8")
+    for text in ("Minimap needs the team hub", "No minimap for this map yet", "(x - info.pos_x) / info.scale / info.size",
+                 "(info.pos_y - y) / info.scale / info.size", "/api/minimap/", "pcs-map", "ResizeObserver"):
+        assert text in js, text
+    assert "requestAnimationFrame" not in js and "setInterval" not in js          # drawn on changes only
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert '<script src="minimap.js"></script>' in html and 'href="minimap.css"' in html
+    app = (web / "app.js").read_text(encoding="utf-8")
+    assert "minimapSetup(d, v)" in app and "minimapToggle()" in app and "<kbd>M</kbd> map" in app
+    # nothing of EA's in the app: no picture files next to the page
+    assert not [f for f in web.rglob("*") if f.suffix.lower() in (".jpg", ".jpeg", ".img")]
+
+
 def _edge():
     for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
         p = Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
