@@ -86,9 +86,14 @@ def save_sent(sent: dict[str, dict], idx: dict[str, Entry]) -> None:
 
 
 def files_of(entry: Entry) -> list[Path]:
-    """The video plus anything the scanner wrote next to it (same name, other extension)."""
+    """The video plus anything the scanner wrote next to it (same name, other extension).
+    A recording without a file (OBS gave none: path "") has no files. Path("") is the working folder and its stem
+    is "", so the glob below would match every file there: retention then deleted the whole folder the app was
+    started from (the exe's folder) once that failed recording was older than the keep limit."""
+    if not entry.path or not entry.path.strip():
+        return []
     p = Path(entry.path)
-    if not p.parent.exists():
+    if not p.stem or not p.is_absolute() or not p.parent.exists():
         return []
     return [f for f in p.parent.glob(p.stem + "*") if f.is_file()]
 
@@ -114,7 +119,8 @@ def enforce(idx: dict[str, Entry], keep_days: int, max_gb: float, protect: set[s
         del idx[key]
 
     # forget entries whose files are already gone
-    for k in [k for k, e in idx.items() if k not in protect and not files_of(e) and e.status != "recording"]:
+    # (a recording that never had a file, path "", stays listed as failed until the keep limit, then goes)
+    for k in [k for k, e in idx.items() if k not in protect and e.path and not files_of(e) and e.status != "recording"]:
         del idx[k]
 
     for k in sorted(idx, key=lambda k: idx[k].started):
