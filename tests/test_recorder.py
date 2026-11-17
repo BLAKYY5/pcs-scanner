@@ -1026,6 +1026,34 @@ def test_scanner_no_function_defined_twice():
         assert not twice, f"{f.name}: defined twice: {twice}"
 
 
+def test_maps_broken_moon_places():
+    """Broken Moon's named places from the game's full map (Season 31) are in the map data, so landings in the
+    middle of the map get a name: centres only, ids as on the hub, unique, inside the map (0..100 %).
+    Storm Point's "Lift" carries the game's name "Mountain Lift" (id kept: the hub uses sp-lift)."""
+    import json as _json
+    maps = _json.loads((Path(__file__).resolve().parent.parent / "scanner" / "pcs_maps.json").read_text(encoding="utf-8"))
+    bm = {p["id"]: p for p in maps["BM"]["pois"]}
+    new = {"bm-quarantine-zone": "Quarantine Zone", "bm-hazmat-tunnel": "Hazmat Tunnel", "bm-cliff-side": "Cliff Side",
+           "bm-underpass": "Underpass", "bm-space-port": "Space Port", "bm-experimental-labs": "Experimental Labs",
+           "bm-solar-pods": "Solar Pods"}
+    for i, name in new.items():
+        assert i in bm and bm[i]["name"] == name, i
+        assert 0 <= bm[i]["x"] <= 100 and 0 <= bm[i]["y"] <= 100, i
+        assert "poly" not in bm[i], i
+    for mp, d in maps.items():
+        ids = [p["id"] for p in d["pois"]]
+        assert len(ids) == len(set(ids)), f"{mp}: duplicate POI ids"
+    assert len({p["id"] for d in maps.values() for p in d["pois"]}) == sum(len(d["pois"]) for d in maps.values())
+    sp = {p["id"]: p for p in maps["SP"]["pois"]}
+    assert sp["sp-lift"]["name"] == "Mountain Lift"
+    assert not [p for p in maps["SP"]["pois"] if p["name"] == "Lift"]
+    # the middle of Broken Moon now has a name nearby (it used to fall 17-25 % from any named place)
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_scan
+    assert pcs_scan.poi_at("BM", 46.48, 47.56)[0] == "bm-quarantine-zone"
+    assert pcs_scan.poi_at("BM", 57.0, 59.0)[0] == "bm-hazmat-tunnel"
+
+
 def test_feed_weapon_icon():
     """A kill line gets the name of its weapon icon (and whether the red arrow follows it); a line without an icon
     gets none; without the private icons file the feed is captured exactly as before."""
