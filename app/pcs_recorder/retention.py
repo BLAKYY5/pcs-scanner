@@ -46,6 +46,45 @@ def save_index(idx: dict[str, Entry]) -> None:
     INDEX_FILE.write_text(json.dumps({k: vars(v) for k, v in idx.items()}, indent=2), encoding="utf-8")
 
 
+SENT_FILE = APP_DIR / "sent.json"       # where each recording's results went, kept apart from recordings.json
+OLD_RETRY_DAYS = 3                      # recordings sent before this file existed: hub retried only if this recent
+
+
+def load_sent(idx: dict[str, Entry], hub_url: str = "", now: float | None = None) -> dict[str, dict]:
+    """{recording key: {"hub": "sent" | "pending" | "", "why": reason, "drive": "sent" | "failed" | ""}}.
+
+    Kept in its own file so that an older app version still reads recordings.json (it refuses unknown fields).
+    The first time (no file yet), recordings already "uploaded" by the old rule (hub OR Drive) are sorted out from
+    the note the old version left: "Sent to hub…" = on the hub; otherwise, only those recorded in the last
+    OLD_RETRY_DAYS days go to the hub again (when a hub is set), so an update never sends a flood of old scans."""
+    try:
+        raw = json.loads(SENT_FILE.read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            return {k: v for k, v in raw.items() if isinstance(v, dict)}
+    except FileNotFoundError:
+        pass
+    except (json.JSONDecodeError, OSError):
+        pass
+    now = now or time.time()
+    out = {}
+    for k, e in idx.items():
+        if e.status != "uploaded":
+            continue
+        if e.note.startswith("Sent to hub"):
+            out[k] = {"hub": "sent", "why": "", "drive": ""}
+        elif hub_url and now - e.started <= OLD_RETRY_DAYS * 86400:
+            out[k] = {"hub": "pending", "why": "", "drive": ""}
+    save_sent(out, idx)
+    return out
+
+
+def save_sent(sent: dict[str, dict], idx: dict[str, Entry]) -> None:
+    for k in [k for k in sent if k not in idx]:          # recording deleted: forget it
+        del sent[k]
+    SENT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    SENT_FILE.write_text(json.dumps(sent, indent=1), encoding="utf-8")
+
+
 def files_of(entry: Entry) -> list[Path]:
     """The video plus anything the scanner wrote next to it (same name, other extension)."""
     p = Path(entry.path)

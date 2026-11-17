@@ -194,8 +194,15 @@ class Hotkeys:
 
 
 class Sent(list):
-    """Where the results went (["the team hub", "Google Drive"]), plus the hub's answer in one line."""
+    """Where the results went (["the team hub", "Google Drive"]), plus the hub's answer in one line.
+    hub_ok / drive_ok: True (took the files), False (tried, failed), None (not tried: no hub / no Drive);
+    hub_why: why the hub didn't take them, in a few words ("Hub not reachable", "Key refused")."""
     hub_note = ""
+    hub_ok = drive_ok = None
+    hub_why = ""
+
+
+hub_reason = hubmod.reason
 
 
 class Sender:
@@ -219,28 +226,56 @@ class Sender:
             return Sent()
         sent, errors, where = False, [], Sent()
         if self.s.hub_url:
+            where.hub_ok = False
             try:
                 answer = hubmod.upload(self.s.hub_url, files, self.s.player)   # all files in one request
                 sent = True
                 where.append("the team hub")
-                where.hub_note = hubmod.summary(answer)
+                where.hub_note, where.hub_ok = hubmod.summary(answer), True
             except hubmod.HubError as e:
                 errors.append(str(e))
                 where.hub_note = "Not sent to hub: " + ("key refused" if e.kind == "refused" else str(e))
+                where.hub_why = hub_reason(e)
             except Exception as e:
                 errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
+                where.hub_why = "Hub not reachable"
         try:
             if self.drive_upload([str(f) for f in files]):
                 sent = True
                 where.append("Google Drive")
+                where.drive_ok = True
             elif not self.s.hub_url:
                 raise NeedsSignIn("Your Google sign-in has expired or is missing, so the results couldn't go to "
                                   "Drive")
+            # else: not signed in to Google, or Drive refused: drive_upload can't tell which (drive_ok stays None)
         except Exception as e:
+            where.drive_ok = False
             errors.append(f"Google Drive upload failed ({e})")
         if not sent:
             raise ConnectionError("; ".join(errors) or "No destination set")
         return where
+
+    def hub_blocked(self) -> str:
+        """The hub must not be asked now: "Key refused" (until the key or address changes), "Hub asks to wait"
+        (429, until Retry-After), "No hub address"; "" = free to try."""
+        if not self.s.hub_url:
+            return "No hub address"
+        st_ = hubmod.public_state(self.s.hub_url)
+        if st_["refused"]:
+            return "Key refused"
+        if st_["wait"] > 0:
+            return "Hub asks to wait"
+        return ""
+
+    def upload_hub(self, files: list[Path]) -> str:
+        """Send one recording's results to the hub only (a later try after the hub didn't take them). A short
+        ping first, so a hub that is off (or Tailscale off) fails in seconds, not after the upload timeout.
+        Returns the hub's answer in one line; raises HubError (kind network | refused | wait | http)."""
+        url = self.s.hub_url
+        if not url:
+            raise hubmod.HubError("No team hub address set", "network")
+        hubmod.request(url, "GET", "/api/ping", timeout=5)          # any answer (even 404: older hub) = reachable
+        return hubmod.summary(hubmod.upload(url, files, self.s.player))
 
 
 def scan_process(video: str, out: str) -> subprocess.Popen:
@@ -314,7 +349,7 @@ class UI:
         t = title.lower()
         if any(w in t for w in ("failed", "not sent", "didn't", "error", "no hardware")):
             return "error"
-        if sticky or any(w in t for w in ("waiting", "turning off", "update available", "eec")):
+        if sticky or any(w in t for w in ("waiting", "turning off", "update available", "eec", "silent")):
             return "attention"
         if any(w in t for w in ("sent", "finished", "on youtube", "is on", "stays on")):
             return "done"

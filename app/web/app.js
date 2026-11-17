@@ -48,6 +48,13 @@ const STATUS = {
   'skipped': ['Skipped', ''], 'waiting': ['Waiting', 'info'], 'scanning': ['Scanning', 'info'], 'failed': ['Failed', 'bad'], 'recording': ['Recording', 'bad'],
 };
 const statusPill = s => { const [t, c] = STATUS[s] || [s, '']; return `<span class="pill ${c}">${esc(t)}</span>`; };
+// on the team hub or not (results that reached only Drive are sent to the hub again by themselves)
+const hubNote = it => {
+  const h = it.hub || {}, faint = t => t ? `<span class="faint" style="font-size:12px">${esc(t)}</span>` : '';
+  if (h.hub === 'pending') return `<span class="pill warn" title="Sent again by itself as soon as the hub takes it">Not on hub yet</span>${faint(h.why)}`;
+  if (h.hub === 'sent') return `<span class="pill good">On hub</span>${faint((it.note || '').replace(/^Sent to hub[:,]?\s*/, ''))}`;
+  return it.note ? faint('· ' + it.note) : '';
+};
 
 let S = null, LIB = [], page = '', pageArg = '';
 
@@ -243,7 +250,7 @@ function drawList() {
     el.innerHTML = `<div class="recrow head"><span></span><span>Recording</span><span class="c3">Recorded</span><span class="c4">Size</span><span class="c5">Status</span><span></span></div>` +
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
-        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${it.note ? `<span class="faint" style="font-size:12px">· ${esc(it.note)}</span>` : ''}</div></div>
+        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${hubNote(it)}</div></div>
         <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}

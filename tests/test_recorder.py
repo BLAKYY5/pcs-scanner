@@ -1486,6 +1486,229 @@ def test_hub_answer_shown_on_recording():
     assert len(hub.uploads) == 1                                                       # never sent twice
 
 
+class HubThenDrive(FakeHub):
+    """A Sender stand-in: Drive takes the results, the hub fails with `fail` (a HubError kind) until it is None.
+    `blocked` = what Sender.hub_blocked() would say (refused key, 429 wait)."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail, self.blocked, self.hub_calls = "network", "", []
+
+    def upload(self, files):
+        from pcs_recorder.runtime import Sent
+        out = Sent(["Google Drive"])
+        out.drive_ok, out.hub_ok, out.hub_why = True, False, "Hub not reachable"
+        out.hub_note = "Not sent to hub: the team hub didn't answer"
+        return out
+
+    def hub_blocked(self):
+        return self.blocked
+
+    def upload_hub(self, files):
+        from pcs_recorder import hub as hubmod
+        self.hub_calls.append([f.name for f in files])
+        if self.fail:
+            raise hubmod.HubError("no", self.fail, {"refused": 401, "wait": 429, "http": 500}.get(self.fail, 0))
+        return "Sent to hub: 2 games"
+
+
+def _hub_recorder(n=1, status="scanned", age_days=0.0, note=""):
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    retention.SENT_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder, s.hub_url = str(TMP / f"vids-{time.time_ns()}"), "http://hub.test:8420"
+    idx = {}
+    for i in range(n):
+        v = make_file(s.folder_path, f"Apex Legends_h{i}.mp4", UNIT)
+        out = v.with_suffix(".scan")
+        out.mkdir()
+        (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}, {"map": "WE"}]}')
+        idx[f"k{i}"] = retention.Entry(path=str(v), started=time.time() - age_days * 86400 - i, status=status, note=note)
+    retention.save_index(idx)
+    clock = {"t": time.time()}
+    hub, ui = HubThenDrive(), FakeUI()
+    r = Recorder(s, FakeOBS(s.folder_path), hub, ui, fake_scan, is_apex_running=lambda: False, clock=lambda: clock["t"])
+    return r, hub, ui, clock
+
+
+def test_hub_retried_when_only_drive_took_it():
+    """Drive took the results, the hub was down: the recording shows "Not on hub yet", the hub is tried again on
+    its own (backoff 1, 2, 4… min) until it takes them, then never again; nothing goes out while Apex runs."""
+    r, hub, ui, clock = _hub_recorder()
+    r._retry_uploads()
+    assert r.idx["k0"].status == "uploaded" and r.hub_state("k0") == {"hub": "pending", "why": "Hub not reachable"}
+    assert any(t == "Results sent" and "by itself" in m for t, m, *_ in ui.notes), ui.notes
+    assert retention.load_sent(r.idx)["k0"]["drive"] == "sent"                         # kept on disk
+    r._retry_hub()
+    assert len(hub.hub_calls) == 1 and r.hub_state("k0")["hub"] == "pending"
+    r._retry_hub(); r._retry_hub()
+    assert len(hub.hub_calls) == 1                                                     # waits 1 min
+    clock["t"] += 61; r._retry_hub()
+    assert len(hub.hub_calls) == 2                                                     # then 2 min
+    clock["t"] += 61; r._retry_hub()
+    assert len(hub.hub_calls) == 2
+    hub.fail = None                                                                    # hub back
+    apex = {"on": True}
+    r.is_apex_running = lambda: apex["on"]
+    r._start = lambda: None                                                            # no recording in this test
+    clock["t"] += 120; r.tick()
+    assert len(hub.hub_calls) == 2                                                     # never while Apex runs
+    apex["on"] = False; r.tick()
+    assert len(hub.hub_calls) == 3 and r.hub_state("k0") == {"hub": "sent", "why": ""}
+    assert r.idx["k0"].note == "Sent to hub: 2 games"
+    assert any(t == "Sent to hub" and "2 games" in m for t, m, *_ in ui.notes), ui.notes
+    clock["t"] += 3600; r.tick(); r._retry_hub()
+    assert len(hub.hub_calls) == 3                                                     # a 200 is never re-sent
+    # after a restart the state is read back: still on the hub, nothing re-sent
+    r2 = Recorder(r.s, FakeOBS(r.s.folder_path), hub, FakeUI(), fake_scan, is_apex_running=lambda: False)
+    assert r2.hub_state("k0")["hub"] == "sent"
+    r2._retry_hub()
+    assert len(hub.hub_calls) == 3
+
+
+def test_hub_key_refused_then_fixed():
+    """A refused key: nothing is tried while the key stays the same ("Key refused" shown); a new key = sent."""
+    r, hub, ui, clock = _hub_recorder(n=2)
+    r._retry_uploads()
+    assert all(r.hub_state(k)["hub"] == "pending" for k in ("k0", "k1"))
+    hub.fail = "refused"
+    r._retry_hub()
+    assert len(hub.hub_calls) == 1 and all(r.hub_state(k)["why"] == "Key refused" for k in ("k0", "k1"))
+    hub.blocked = "Key refused"                                                        # what hub.py now knows
+    for _ in range(5):
+        clock["t"] += 3600; r._retry_hub()
+    assert len(hub.hub_calls) == 1                                                     # stopped until the key changes
+    hub.blocked, hub.fail = "", None                                                   # new key pasted
+    r._retry_hub()
+    assert len(hub.hub_calls) == 3 and all(r.hub_state(k)["hub"] == "sent" for k in ("k0", "k1"))
+    assert [t for t, *_ in ui.notes].count("Sent to hub") == 1                         # one message for both
+    # 429: waits, no backoff counted, goes out when the wait is over
+    r3, hub3, _, clock3 = _hub_recorder()
+    r3._retry_uploads()
+    hub3.blocked = "Hub asks to wait"
+    r3._retry_hub()
+    assert not hub3.hub_calls and r3.hub_state("k0")["why"] == "Hub asks to wait"
+    hub3.blocked, hub3.fail = "", None
+    r3._retry_hub()
+    assert r3.hub_state("k0")["hub"] == "sent"
+
+
+def test_old_uploaded_recordings_not_flooded():
+    """After the update: recordings "uploaded" by the old rule. Those the hub confirmed stay sent; only the last
+    3 days' others are tried on the hub again; older ones are left alone."""
+    r, hub, ui, clock = _hub_recorder(n=3, status="uploaded", age_days=10)
+    assert all(r.hub_state(k)["hub"] == "" for k in r.idx), r.sent                # 10 days old: not re-sent
+    hub.fail = None
+    r._retry_hub()
+    assert not hub.hub_calls
+    r, hub, ui, clock = _hub_recorder(n=1, status="uploaded", age_days=1, note="Sent to hub: 4 games")
+    assert r.hub_state("k0")["hub"] == "sent"                                          # the hub said so before
+    r, hub, ui, clock = _hub_recorder(n=2, status="uploaded", age_days=1, note="Not sent to hub: key refused")
+    assert all(r.hub_state(k)["hub"] == "pending" for k in r.idx)
+    hub.fail = None
+    r._retry_hub()
+    assert len(hub.hub_calls) == 2 and all(r.hub_state(k)["hub"] == "sent" for k in r.idx)
+    # done once: a later start never sorts them again (the file exists)
+    r.idx["k0"].note = ""
+    r2 = Recorder(r.s, FakeOBS(r.s.folder_path), hub, FakeUI(), fake_scan, is_apex_running=lambda: False)
+    assert r2.hub_state("k0")["hub"] == "sent"
+    # no hub set at update time: nothing pending
+    retention.SENT_FILE.unlink()
+    for e in r.idx.values():
+        e.note = ""
+    assert retention.load_sent(r.idx, "") == {}
+
+
+def test_hub_and_drive_both_fine_or_no_hub():
+    """Hub took it: "On hub", never retried. No hub set: no hub state at all."""
+    from pcs_recorder.runtime import Sent
+    r, hub, ui, clock = _hub_recorder()
+
+    def both(files):
+        out = Sent(["the team hub", "Google Drive"])
+        out.hub_ok, out.drive_ok, out.hub_note = True, True, "Sent to hub: 2 games"
+        return out
+    hub.upload = both
+    r._retry_uploads()
+    assert r.sent["k0"] == {"hub": "sent", "why": "", "drive": "sent"}
+    r._retry_hub()
+    assert not hub.hub_calls
+    r, hub, ui, clock = _hub_recorder()
+    hub.upload = lambda files: Sent(["Google Drive"])                                  # no hub address
+    r._retry_uploads()
+    assert r.hub_state("k0")["hub"] == ""
+
+
+def _silence_recorder(levels, tracks=("game", "discord", "mic"), consent=True, mutes=()):
+    import numpy as np
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"vids-{time.time_ns()}")
+    s.comms_consent = consent
+    s.game_audio, s.discord_audio, s.mic_audio = "game" in tracks, "discord" in tracks, "mic" in tracks
+    s.voice_app, s.mic_device = "teamspeak", "default"
+    clock = {"t": 1_000_000.0}
+    ui = FakeUI()
+    r = Recorder(s, FakeOBS(s.folder_path), FakeHub(), ui, fake_scan, is_apex_running=lambda: False,
+                 clock=lambda: clock["t"])
+    read = []
+
+    def track_db(video, i):
+        read.append(i)
+        return np.array(levels[s.tracks()[i]], dtype=np.float32)
+    r.track_db = track_db
+    return r, ui, clock, read
+
+
+def _record(r, clock, minutes, mutes=()):
+    r.events = [{"t": 1, "kind": "mute", "track": t, "muted": True} for t in mutes]
+    r.silence_thread = None
+    r._start_silence_check(str(TMP / "x.mp4"), minutes * 60)
+    if r.silence_thread:
+        r.silence_thread.join(10)
+
+
+def test_silent_voice_or_mic_track_warned_once():
+    """A voice or mic track silent from start to end (loudest half second under -60 dBFS): told once, short and
+    literal; not again for the same setting; again after the setting changed. Normal tracks, short recordings,
+    tracks turned off, no consent, a track muted by hotkey: nothing."""
+    (settings.APP_DIR / "silence.json").unlink(missing_ok=True)
+    quiet, talk = [-120.0] * 1200, [-120.0] * 1100 + [-30.0] * 100
+    noise = [-75.0] * 1200                                         # mic noise floor only: still "silent"
+    r, ui, clock, read = _silence_recorder({"game": talk, "discord": quiet, "mic": talk})
+    _record(r, clock, 60)
+    assert [t for t, *_ in ui.notes] == ["Voice track was silent"], ui.notes
+    assert "TeamSpeak" in ui.notes[0][1] and "Settings → Voice app" in ui.notes[0][1]
+    assert read == [1, 2]                                          # tracks 2 and 3 only, never the game's
+    _record(r, clock, 60)
+    assert len(ui.notes) == 1                                      # same setting: not told again
+    r.s.voice_app = "discord"                                      # setting changed, still silent: told again
+    _record(r, clock, 60)
+    assert len(ui.notes) == 2 and "Discord" in ui.notes[1][1]
+    # mic silent
+    r, ui, clock, read = _silence_recorder({"game": talk, "discord": talk, "mic": noise})
+    _record(r, clock, 30)
+    assert [t for t, *_ in ui.notes] == ["Mic track was silent"] and "Settings → Microphone" in ui.notes[0][1]
+    # normal tracks: nothing; and sound again resets, so a later silence is told
+    (settings.APP_DIR / "silence.json").unlink(missing_ok=True)
+    r, ui, clock, read = _silence_recorder({"game": talk, "discord": talk, "mic": talk})
+    _record(r, clock, 60)
+    assert ui.notes == []
+    # short recording, no consent, track off, muted by hotkey: not checked
+    r, ui, clock, read = _silence_recorder({"game": talk, "discord": quiet, "mic": quiet})
+    _record(r, clock, 3)
+    assert ui.notes == [] and read == []
+    r, ui, clock, read = _silence_recorder({"game": talk}, tracks=("game",), consent=False)
+    _record(r, clock, 60)
+    assert ui.notes == [] and read == []
+    r, ui, clock, read = _silence_recorder({"game": talk, "mic": quiet}, tracks=("game", "mic"))
+    _record(r, clock, 60, mutes=("mic",))
+    assert ui.notes == [] and read == []
+    r, ui, clock, read = _silence_recorder({"game": talk, "mic": quiet}, tracks=("game", "mic"))
+    _record(r, clock, 60)
+    assert [t for t, *_ in ui.notes] == ["Mic track was silent"] and read == [1]      # mic = 2nd track here
+
+
 if __name__ == "__main__":
     for name, fn in list(globals().items()):
         if name.startswith("test_"):
