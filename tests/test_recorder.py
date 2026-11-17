@@ -1493,6 +1493,159 @@ def test_game_end_time():
     assert SCAN.game_ends(lone, [], None, None)[0]["tEndGame"] == 5.0         # nothing read: ends where it starts
 
 
+def _ring_frame(cur, nxt, decoy=None, seed=3):
+    """A synthetic full-map frame (2560 x 1440): blotchy map art in the map square, red tint outside the current ring
+    with a dark line on it, a see-through white disc for the next ring, optionally a purple disc (another map
+    feature). Circles in screen px (x, y, r). No game picture: numbers only."""
+    import numpy as np
+    from scipy import ndimage
+    rng = np.random.default_rng(seed)
+    a = np.full((1440, 2560, 3), 30, np.float32)
+    h, w = 1340, 1353
+    blot = ndimage.gaussian_filter(rng.random((h, w)), 20)
+    blot = (blot - blot.min()) / (np.ptp(blot) + 1e-9)
+    navy, tan = np.array([25, 45, 60], np.float32), np.array([190, 150, 85], np.float32)
+    m = (blot > 0.55)[..., None]
+    art = np.where(m, tan, navy) + rng.normal(0, 6, (h, w, 3))
+    for k in range(40):                        # white labels / icons
+        y, x = rng.integers(20, h - 30), rng.integers(20, w - 120)
+        art[y:y + 14, x:x + 90:6] = 235
+    a[0:h, 604:604 + w] = art
+    Y, X = np.mgrid[0:1440, 0:2560]
+    if nxt:
+        d = np.hypot(X - nxt[0], Y - nxt[1]) < nxt[2]
+        a[d] = a[d] * 0.85 + 255 * 0.15
+    if decoy:
+        d = np.hypot(X - decoy[0], Y - decoy[1]) < decoy[2]
+        a[d] = a[d] * 0.7 + np.array([150, 60, 230]) * 0.3
+    if cur:
+        dist = np.hypot(X - cur[0], Y - cur[1])
+        out = (dist > cur[2])[..., None] & (X < 604 + w)[..., None] & (X >= 604)[..., None] & (Y < h)[..., None]
+        a = np.where(out, a * 0.55 + np.array([200, 70, 50], np.float32) * 0.45, a)
+        line = (np.abs(dist - cur[2]) < 2.5) & (X >= 604) & (X < 604 + w) & (Y < h)
+        a[line] *= 0.3
+    return np.clip(a, 0, 255).astype(np.uint8)
+
+
+def test_ring_circles_on_full_map():
+    """The ring reader finds the current ring (red tint outside) and the next ring (white see-through disc) on the
+    full map, in map % through the map transform, and refuses a coloured disc of another map feature."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ring
+    M = pcs_ring.M_DEFAULT
+    pct = lambda x, y, r: (x * M[0, 0] + M[2, 0], y * M[1, 1] + M[2, 1], r * M[0, 0])
+    cur, nxt = (1500, 740, 410), (1580, 900, 200)
+    r = pcs_ring.read(_ring_frame(cur, nxt, decoy=(1000, 400, 130)))
+    for key, want in (("cur", cur), ("next", nxt)):
+        got, exp = r[key], pct(*want)
+        assert got, (key, r)
+        assert abs(got["cx"] - exp[0]) < 0.5 and abs(got["cy"] - exp[1]) < 0.5 and abs(got["r"] - exp[2]) < 0.5, (key, got, exp)
+    # first ring stage: no current ring on the map yet, the next ring alone (bigger than half the map, partly off it)
+    r = pcs_ring.read(_ring_frame(None, (1350, 650, 560), decoy=(800, 1100, 150), seed=5))
+    exp = pct(1350, 650, 560)
+    assert r["cur"] is None and r["next"], r
+    assert abs(r["next"]["cx"] - exp[0]) < 0.5 and abs(r["next"]["r"] - exp[2]) < 0.5, (r, exp)
+    # nothing drawn: nothing read (the purple disc is not a ring)
+    r = pcs_ring.read(_ring_frame(None, None, decoy=(1300, 700, 200), seed=7))
+    assert r == {"cur": None, "next": None}, r
+    # a zoomed map is skipped
+    assert pcs_ring.read(_ring_frame(cur, nxt), np.array([[0.05, 0], [0, 0.05], [-20, 0]])) is None
+
+
+def test_ring_ends_and_speed():
+    """Per game: map-frame reads grouped by ring stage, the end circle of each ring (next ring shown during the round,
+    or the current circle during the next round's wait), and the closing speed = radius drop / closing time."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_ring, pcs_hud
+    ring = [{'round': 1, 'kind': 'wait', 'endsAt': 175.0, 'firstSeen': 100.0, 'firstV': 75},
+            {'round': 1, 'kind': 'closing', 'endsAt': 440.0, 'firstSeen': 184.0, 'firstV': 256},
+            {'round': 2, 'kind': 'wait', 'endsAt': 565.0, 'firstSeen': 445.0, 'firstV': 120},
+            {'round': 2, 'kind': 'closing', 'endsAt': 665.0, 'firstSeen': 570.0, 'firstV': 95}]
+    c = lambda cx, cy, r: {'cx': cx, 'cy': cy, 'r': r}
+    reads = [(150.0, 'ED', {'cur': None, 'next': c(50.0, 50.0, 30.0)}),
+             (151.0, 'ED', {'cur': None, 'next': c(50.1, 49.9, 30.1)}),
+             (152.0, 'ED', {'cur': None, 'next': c(70.0, 20.0, 5.0)}),            # a misread: outvoted
+             (500.0, 'ED', {'cur': c(50.05, 50.0, 30.05), 'next': c(55.0, 52.0, 15.0)}),
+             (501.0, 'ED', {'cur': c(50.0, 50.05, 30.0), 'next': c(55.1, 52.0, 15.1)}),
+             (600.0, 'ED', {'cur': c(52.0, 51.0, 22.0), 'next': c(55.0, 52.05, 15.0)}),
+             (2500.0, 'ED', {'cur': c(1, 1, 1), 'next': None})]                    # the next game's: left out
+    games = [{'map': 'ED', 'tStart': 100.0, 'ring': ring}, {'map': 'ED', 'tStart': 2000.0, 'ring': []}]
+    pcs_ring.attach(games, reads)
+    g = games[0]
+    st = [(e['stage'], e['phase']) for e in g['ringCircles']]
+    assert st == [(1, 'wait'), (2, 'wait'), (2, 'closing')], st
+    w1 = g['ringCircles'][0]
+    assert 'r' not in w1 and 'mapR' not in w1 and w1['next']['r'] == 30.05 and abs(w1['conf'] - 2 / 3) < 0.01, w1
+    w2 = g['ringCircles'][1]          # the review player's map reads {t, mapX, mapY, mapR}
+    assert (w2['t'], w2['mapX'], w2['mapY'], w2['mapR'], w2['round']) == (500.0, w2['cx'], w2['cy'], w2['r'], 2), w2
+    ends = {e['ring']: e for e in g['ringEnds']}
+    assert ends[1]['from'] == ['current', 'next'] and ends[1]['agree'] and abs(ends[1]['r'] - 30.0) < 0.1, ends[1]
+    assert abs(ends[2]['r'] - 15.0) < 0.1 and ends[2]['from'] == ['next'], ends[2]
+    u = pcs_ring.units_per_pct('ED')
+    assert u == pcs_hud.CAL['ED'][0] and ends[2]['rUnits'] == round(ends[2]['r'] * u), (u, ends[2])
+    sp = g['ringSpeed']
+    assert len(sp) == 1 and sp[0]['ring'] == 2 and sp[0]['seconds'] == 100.0, sp
+    assert abs(sp[0]['unitsPerS'] - (ends[1]['rUnits'] - ends[2]['rUnits']) / 100.0) < 0.2, sp
+    assert [e['t'] for e in games[1]['ringCircles']] == [2500.0], games[1]
+
+
+def _card_frame(cards, dy=0):
+    """Bottom-left squad cards (synthetic): per card a white name at x 184, then a white health bar (alive) or a lime
+    status line (dead). cards: list of (name row, 'alive' | 'dead', frame RGB)."""
+    import numpy as np
+    a = np.full((1440, 2560, 3), 40, np.uint8)
+    for y, state, col in cards:
+        y += dy
+        a[y - 12:y + 50, 70:110] = col                         # coloured frame next to the portrait
+        for k in range(10):                                    # name: letters 3 px wide, 6 px apart
+            a[y:y + 18, 184 + 9 * k:187 + 9 * k] = 235
+        if state == 'alive':
+            a[y + 22:y + 27, 186:330] = (150, 60, 230)         # shield
+            a[y + 29:y + 39, 185:300] = 240                    # health
+        elif state == 'dead':
+            for k in range(22):
+                a[y + 24:y + 42, 186 + 9 * k:190 + 9 * k] = (160, 196, 64)
+    return a
+
+
+def test_respawn_cards_and_events():
+    """Squad cards: alive (bar) and dead (lime status line) are told apart; a teammate dead for a while and then alive
+    again in the same game is a respawn; the player's own death = spectating, back in his own view = respawned."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_respawn as P
+    teal, orange = (40, 200, 200), (240, 150, 30)
+    cs = P.read_cards(_card_frame([(1058, 'alive', teal), (1146, 'dead', orange)]))
+    assert [(c['y'], c['state']) for c in cs] == [(1058, 'alive'), (1146, 'dead')], cs
+    assert P.hue_name(cs[0]['hue']) == 'teal' and P.slot_of(1146) == 1 and P.slot_of(1100) is None
+    assert P.read_cards(_card_frame([])) == []
+    # the spectator layout puts the cards 85 px higher: read too, but such frames are dropped by own_view
+    assert [c['state'] for c in P.read_cards(_card_frame([(1058, 'dead', teal)], dy=-85))] == ['dead']
+    A = lambda: {'y': 1146, 'state': 'alive', 'hue': 35}
+    D = lambda: {'y': 1146, 'state': 'dead', 'hue': 80}
+    T0 = {'y': 1058, 'state': 'alive', 'hue': 180}
+    reads = [(t, [dict(T0), D()], False) for t in range(100, 130)]
+    reads += [(130, [dict(T0), A()], False)]                     # one odd read: not a respawn yet
+    reads += [(t, [dict(T0), D()], False) for t in range(131, 140)]
+    reads += [(t, [dict(T0), A()], None) for t in range(140, 150)]   # no ring read on these frames: nearest sample
+    reads += [(t, [dict(T0), D()], True) for t in range(150, 160)]   # spectating: someone else's cards
+    reads += [(t, [dict(T0), A()], True) for t in range(160, 170)]
+    samples = [[float(t), 0, 60.0, t >= 150, 0, 0, 0, 0.0, False, False] for t in range(100, 170, 2)]
+    games = [{'tStart': 90.0}, {'tStart': 1000.0}]
+    P.attach(games, reads, samples)
+    r = games[0]['respawns']
+    assert len(r) == 1 and r[0]['t'] == 140 and r[0]['who'] == 'teammate' and r[0]['slot'] == 2, r
+    assert r[0]['color'] == 'orange' and r[0]['deadSince'] == 100 and r[0]['lastDeadRead'] == 139, r
+    # own death and respawn: spectator layout from 200 to 230, own view again at 236, then a fall from the dropship
+    S = [[float(t), 0, 60.0, False, 0, 0, 3000, 0.0] for t in range(150, 200, 2)]
+    S += [[float(t), 0, 60.0, True, None, None, None, None] for t in range(200, 232, 2)]
+    S += [[float(t), 0, 60.0, False, 0, 0, 9000 - t, 1200.0 if t < 250 else 300.0] for t in range(236, 300, 2)]
+    S += [[float(t), 0, 60.0, True, None, None, None, None] for t in range(300, 320, 2)]   # dies again: game over
+    deaths, own = P.own_deaths(S, 100, 1000)
+    assert deaths == [200.0, 300.0], deaths
+    assert own == [{'t': 236.0, 'who': 'self', 'how': 'dropship', 'deadSince': 200.0}], own
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
