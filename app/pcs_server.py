@@ -747,6 +747,12 @@ class Backend:
             raise ValueError("unknown action")
         return self.notes(item_id, player)
 
+    # ------------------------------------------------------------- minimap pictures (team hub)
+    def minimap(self, code: str) -> dict:
+        """The Map panel's picture and transform for a map (pcs_recorder.minimaps): downloaded once with the key."""
+        from pcs_recorder import minimaps
+        return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
+
     # ------------------------------------------------------------- watch together (team hub sessions)
     @property
     def watch(self):
@@ -1036,6 +1042,16 @@ class Server:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _file(self, f, ctype):
+                data = Path(f).read_bytes()
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=3600")
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(data)
+
             # -- video with seeking
             def _audio(self, item_id, n):
                 it = b.find(item_id)
@@ -1112,13 +1128,19 @@ class Server:
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
                 path = unquote(u.path)
-                if not path.startswith(("/api/", "/video/", "/audio/", "/talk/")):
+                if not path.startswith(("/api/", "/video/", "/audio/", "/talk/", "/minimap/")):
                     if not self._ok_origin():
                         return self._json({"error": "forbidden"}, 403)
                     return self._static(path)
                 if not self._authed(q):
                     return self._json({"error": "forbidden"}, 403)
                 try:
+                    if path.startswith("/minimap/"):            # the map picture kept in the data folder
+                        from pcs_recorder import minimaps
+                        pic = minimaps.picture(path.split("/")[2])
+                        return self._file(*pic) if pic else self._json({"error": "not found"}, 404)
+                    if path.startswith("/api/minimap/"):
+                        return self._json(b.minimap(path.split("/")[3]))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
                         return self._video(None, str(b.watch.audio(path.split("/")[2])))
                     if path.startswith("/audio/"):

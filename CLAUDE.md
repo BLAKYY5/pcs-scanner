@@ -162,6 +162,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   folder and file name are set back after; if that fails, the next game start prepares OBS again. Segments
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
+- **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.1 collection `minimaps`): the review player
+  draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`)
+  on the game's own minimap, with the marker at the video's moment, the landing and the harvesters (map % = picture
+  fraction). World -> picture: `(x - pos_x) / scale / size`, `(pos_y - y) / scale / size` (the game's transform, from the
+  hub document). The pictures are EA's: the coach uploads them to the hub (`tools/upload_minimaps.py` in the hub repo),
+  each app downloads them with the key into the data folder (`minimaps/`), never in this repo. No hub / no key: "Minimap
+  needs the team hub"; no picture (Olympus) or map `?`: "No minimap for this map yet". Drawn on changes only (time,
+  view, size), never in an animation loop. Key M = map (mute moved to U).
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for

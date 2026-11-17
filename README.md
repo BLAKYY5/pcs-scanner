@@ -20,8 +20,10 @@ The window (1.9+) has four parts:
   (VODs too), tick several and **Scan selected**. Scans wait by themselves while Apex is running.
 - **Review**: plays a recording with the scan on a timeline under it: games, drop map, jump, landing, ring
   timers and every kill-feed line. Click a marker (or an event on the right) to jump there. Keys: Space, ←/→ 5 s,
-  J/L 10 s, `,`/`.` one frame, `[`/`]` previous/next event, F full screen, M mute. Tabs: events, kill-feed images,
-  drop spots of all squads.
+  J/L 10 s, `,`/`.` one frame, `[`/`]` previous/next event, F full screen, M map, U mute. Tabs: events, kill-feed images,
+  drop spots of all squads. **Map**: your path in the game on the game's own minimap, a marker that follows the
+  video, the landing spot and the harvesters; click the path to go to that moment, wheel to zoom, drag to move.
+  The minimap pictures come from the team hub (downloaded once with your key, kept in the app's data folder).
 - **Settings**: name, role, Google, start with Windows, auto-record limits and quality, team hub address.
 
 ### Auto-record (1.8+): never forget to record

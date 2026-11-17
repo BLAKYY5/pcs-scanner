@@ -479,7 +479,7 @@ async function renderReview(id) {
               <button class="btn small" id="rvTheatre" title="Video across the whole window (T)">Theatre</button><button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
           <div id="mixer"></div>
-          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen ·<kbd>M</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
+          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen · <kbd>M</kbd> map · <kbd>U</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
         </div>
       </div>
       <aside class="card side">
@@ -509,6 +509,7 @@ async function renderReview(id) {
   setupInk(v);
   loadNotes(d.id);
   if (window.reviewExtras) reviewExtras(d, v);                          // session bookmarks, review talk (review-extras.js)
+  if (window.minimapSetup) minimapSetup(d, v);                          // Map panel: your path on the game's minimap (minimap.js)
 }
 async function showVideoError(v, id) {   /* say which: file missing, can't be read, damaged, or a format not supported */
   const code = v.error ? v.error.code : 0;
@@ -651,7 +652,8 @@ document.addEventListener('keydown', e => {
   else if (k === 'f' || k === 'F') fullScreen();
   else if (k === 't' || k === 'T') theatre();
   else if (k === 'v' || k === 'V') { const o = $('#seen'); if (o && RV.d.scan) { o.hidden = !o.hidden; try { localStorage.setItem('pcs-seen', o.hidden ? '0' : '1'); } catch (x) {} } }
-  else if (k === 'm' || k === 'M') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
+  else if ((k === 'm' || k === 'M') && window.minimapToggle) minimapToggle();
+  else if (k === 'u' || k === 'U') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
   else return;
   e.preventDefault();
 });
