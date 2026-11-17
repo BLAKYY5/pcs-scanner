@@ -57,6 +57,7 @@ class Recorder:
         self.apex = False                        # Apex running at the last tick()
         self.lock = threading.RLock()
         self.youtube = None                      # youtube.Uploader, attached by the app
+        self.talk = None                         # talk.Talk (review talk of a Watch together session), by the app
         self.night = None                        # night.Night (night uploads, turning the PC off)
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
@@ -82,6 +83,11 @@ class Recorder:
         with self.lock:
             apex = self.is_apex_running()
             self.apex = apex                     # read by the window (it polls less often during games)
+            if apex and self.talk is not None and self.talk.active:
+                try:                                 # the game recording comes first: keep what was said, stop
+                    self.talk.stop(why="Apex started")
+                except Exception:
+                    log.exception("review talk stop failed")
             if apex and self.current is None:
                 self._start()
             elif not apex and self.current is not None:

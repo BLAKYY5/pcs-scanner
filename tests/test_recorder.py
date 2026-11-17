@@ -1833,6 +1833,100 @@ def test_silent_voice_or_mic_track_warned_once():
     assert [t for t, *_ in ui.notes] == ["Mic track was silent"] and read == [1]      # mic = 2nd track here
 
 
+def test_youtube_video_map_to_hub():
+    """After a block is on YouTube, the app tells the hub which recordings the video holds, at what offsets (Watch
+    together). No hub: nothing. Same retry rules as the scan results; an older hub (404) is asked again later."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from pcs_recorder import hub, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    folder = TMP / f"ytmap-{time.time_ns()}"
+    folder.mkdir()
+    idx = {}
+    for key, jump in (("a", 300.5), ("b", 120.0)):
+        v = folder / f"Apex Legends_2026.11.13-17.2{key == 'b' and 9 or 4}.mp4"
+        v.write_bytes(b"x")
+        (v.with_suffix(".scan")).mkdir()
+        (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps(
+            {"games": [{"map": "SP", "tStart": 10.0, "landing": {"exitAtExact": jump}}, {"map": "SP", "tStart": 5.0}]}))
+        idx[key] = retention.Entry(path=str(v), started=time.time() - 7200, status="scanned")
+    seen, answer = [], {"code": 200}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            seen.append((self.path, self.headers.get("Authorization"), json.loads(self.rfile.read(n))))
+            data = b'{"ok": true}'
+            self.send_response(answer["code"])
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    key = "pcs_" + "K" * 43                                                  # an obviously fake key
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    clock = [1000.0]
+    s = settings.Settings(player="Moe", folder=str(folder), yt_enabled=True, hub_url="")
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False, clock=lambda: clock[0])
+    up.state = {"a": {"keys": ["a", "b"], "status": "done", "video": "AbCdEfGhIjK", "title": "Scrims", "at": 1.0,
+                      "offsets": [0.0, 3600.25], "durations": [3600.25, 1800.0], "privacy_used": "unlisted",
+                      "hub_video": "pending"}}
+    try:
+        hub.set_key(None)
+        hub.reset()
+        assert up.send_to_hub() == 0 and not seen                            # no hub address
+        s.hub_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        assert up.send_to_hub() == 0 and not seen                            # no key
+        hub.set_key(key)
+        answer["code"] = 500                                                 # the hub fails: backoff
+        assert up.send_to_hub() == 0 and len(seen) == 1 and up.hub_next == clock[0] + 60
+        assert up.send_to_hub() == 0 and len(seen) == 1                      # not before the backoff
+        clock[0] += 61
+        answer["code"] = 404                                                 # a hub from before 0.5
+        assert up.send_to_hub() == 0 and len(seen) == 2 and up.state["a"]["hub_video_next"] == clock[0] + 6 * 3600
+        assert up.send_to_hub() == 0 and len(seen) == 2
+        clock[0] += 6 * 3600 + 1
+        answer["code"] = 200
+        assert up.send_to_hub() == 1 and up.state["a"]["hub_video"] == "sent"
+        path, auth, body = seen[-1]
+        assert path == "/api/videos" and auth == "Bearer " + key and key not in json.dumps(body)
+        assert body == {"video": "AbCdEfGhIjK", "privacy": "unlisted", "title": "Scrims", "duration": 5400.25,
+                        "recordings": [{"file": "Apex Legends_2026.11.13-17.24", "offset": 0.0, "duration": 3600.25},
+                                       {"file": "Apex Legends_2026.11.13-17.29", "offset": 3600.25, "duration": 1800.0}],
+                        "games": [{"file": "Apex Legends_2026.11.13-17.24", "jumpAt": 300.5, "videoAt": 300.5},
+                                  {"file": "Apex Legends_2026.11.13-17.29", "jumpAt": 120.0, "videoAt": 3720.25}]}, body
+        assert json.loads(youtube.STATE_FILE.read_text())["a"]["hub_video"] == "sent"
+        assert up.send_to_hub() == 0 and len(seen) == 3                      # never twice
+        # the hub says no (another player's video): not asked again
+        up.state["c"] = dict(up.state["a"], video="ZZZZZZZZZZZ", hub_video="pending", at=2.0)
+        answer["code"] = 403
+        assert up.send_to_hub() == 0 and up.state["c"]["hub_video"] == "refused" and len(seen) == 4
+        assert up.send_to_hub() == 0 and len(seen) == 4
+        # recordings gone: nothing to tell
+        up.state["d"] = dict(up.state["a"], keys=["x"], video="YYYYYYYYYYY", hub_video="pending", at=3.0)
+        assert up.send_to_hub() == 0 and up.state["d"]["hub_video"] == "gone" and len(seen) == 4
+        # Apex running: the YouTube tick does nothing at all
+        up.state["c"]["hub_video"] = "pending"
+        up.is_apex_running = lambda: True
+        up.tick()
+        assert len(seen) == 4
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        hub.set_key(None)
+        hub.reset()
+
+
 def test_audio_tracks_cut_after_recording():
     """The review's separate audio tracks are queued for cutting as soon as a recording ends (not when the review
     opens); at start, recent recordings without tracks are queued again and unfinished .part files removed."""
