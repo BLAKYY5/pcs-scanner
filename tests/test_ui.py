@@ -128,6 +128,74 @@ def test_server():
         srv.stop()
 
 
+def test_recording_date_and_game_data_for_review():
+    """'Recorded' is when the recording started (file name, else the scan's recStart), not the file's time; the
+    review page gets each game's legend select, banner, mode, squads left and the player's own numbers."""
+    import datetime
+    folder = TMP / "review-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    named = folder / "Apex Legends_2026.11.07-21.42.mp4"           # OBS's name: the start time
+    by_scan = folder / "scrim game 3.mp4"                            # renamed by hand, scan knows the start
+    bare = folder / "clip.mp4"                                       # nothing tells: the file's time
+    for v in (named, by_scan, bare):
+        v.write_bytes(b"x" * 1000)
+        os.utime(v, (1_900_000_000, 1_900_000_000))                  # written much later than recorded
+    game = {"map": "SP", "mode": "ranked", "tStart": 541.0, "tEnd": 665.0, "drop": None, "ring": [], "landing": None,
+            "select": {"tFirst": 516.0, "tLast": 541.0, "ranked": True,
+                       "squad": [{"slot": 1, "legend": "bangalore", "self": False, "hue": 77},
+                                 {"slot": 2, "legend": "crypto", "self": True, "hue": 39}]},
+            "banner": {"t": 461.0, "mode": "ranked", "map": "SP"},
+            "squadsLeft": [[579.0, 20], [593.0, 19], [944.0, 5]],
+            "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
+            "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
+            "samples": [[550.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False]]}
+    old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}              # a scan from before 1.10.8
+    for v, games, rs in ((named, [game, old], "2026-11-07T21:42:00"), (by_scan, [old], "2026-11-03T22:17:00"), (bare, [old], None)):
+        d = v.with_suffix(".scan")
+        d.mkdir(exist_ok=True)
+        (d / (v.stem + ".scan.json")).write_text(json.dumps({"games": games, "recStart": rs}))
+    assert pcs_server.recorded_at(str(named)) == datetime.datetime(2026, 11, 7, 21, 42).timestamp()
+    assert pcs_server.recorded_at("Apex Legends_2026.13.40-99.99.mp4") is None           # not a date: no crash
+    b = pcs_server.Backend()
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(named), str(by_scan), str(bare)]
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        lib = {x["name"]: x for x in call(srv, "/api/library")[1]}
+        assert lib[named.name]["recorded"] == datetime.datetime(2026, 11, 7, 21, 42).timestamp()
+        assert lib[by_scan.name]["recorded"] == datetime.datetime(2026, 11, 3, 22, 17).timestamp()
+        assert lib[bare.name]["recorded"] == lib[bare.name]["mtime"] == 1_900_000_000
+        names = [x["name"] for x in call(srv, "/api/library")[1]]
+        assert names == [bare.name, named.name, by_scan.name], names                   # newest recording first
+        d = call(srv, f"/api/library/{lib[named.name]['id']}")[1]
+        g, o = d["games"]
+        assert g["select"]["squad"][1] == {"slot": 2, "legend": "crypto", "self": True, "hue": 39}
+        assert g["banner"]["mode"] == "ranked" and g["mode"] == "ranked"
+        assert g["squadsLeft"][-1] == [944.0, 5]
+        assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
+        assert g["feedStats"]["players"][0]["legend"] == "crypto"
+        assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
+        assert o["drop"]["spots"] == []
+        # a missing file: the player can say so (404), not "format not supported"
+        vid = lib[named.name]["id"]
+        named.unlink()
+        assert call(srv, f"/video/{vid}", raw=True)[0] == 404
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
+
+
+def test_review_page_texts():
+    """The words the review player and Settings show (no browser in the tests: read from app.js)."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "Your microphone is never recorded" not in js                       # Settings offers mic recording
+    assert "Changes apply right away" not in js                                # most fields need Save changes
+    assert "'Legend select'" in js and "'Game start'" in js and "Unsaved changes" in js
+    assert "+ 480)" not in js and "r.gbPerHour + ' GB" not in js               # GB per hour: one formula (gbHour)
+    assert "File missing" in js and "Video format not supported" in js
+
+
 class _S:            # recorder settings stand-in
     enabled, start_with_windows, player, hub_url = True, True, "", ""
     keep_days, max_gb, bitrate_mbps, game_audio, auto_scan, scan_delay_s, capture = 7, 100, 12, True, True, 60, "window"

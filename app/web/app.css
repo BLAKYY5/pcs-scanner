@@ -257,3 +257,20 @@ input:disabled{opacity:.5}
 .ev.note.editing{outline:1px solid #ffd60a}
 .ev.note .nacts{margin-top:6px;gap:6px}
 .mk.note{background:#ffd60a}
+/* game header under the video: mode, map, squad, the player's own numbers, squads left */
+.mk.select,.mk.start{background:#e6ad45}
+.gamebar{margin-top:12px;padding:10px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 22px}
+.gamebar .gtitle{font:600 16px var(--display);letter-spacing:.05em;text-transform:uppercase;color:var(--ink)}
+.gamebar .gsquad{color:var(--muted)}.gamebar .gsquad b{color:var(--ink);font-weight:600}
+.gamebar .gstats{display:flex;flex-wrap:wrap;gap:4px 18px;margin-left:auto}
+.gstat{display:flex;flex-direction:column;line-height:1.15}
+.gstat small{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+.gstat b{font:600 18px var(--mono)}
+.gstat[title]{cursor:help}
+.sqt{position:absolute;bottom:0;width:1px;height:6px;background:rgba(241,239,234,.45);pointer-events:auto;cursor:pointer}
+.sqt::after{content:"";position:absolute;left:-3px;right:-3px;top:-2px;bottom:0}
+.unit{text-transform:none}
+/* settings: unsaved changes */
+.dirty{font-size:12px;color:var(--warn)}
+.dialog{position:fixed;inset:0;z-index:60;display:grid;place-items:center;background:rgba(0,0,0,.6)}
+.dialog>div{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:18px 20px;max-width:420px;width:calc(100% - 32px);display:flex;flex-direction:column;gap:12px}
