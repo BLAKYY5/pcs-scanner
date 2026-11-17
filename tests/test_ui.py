@@ -555,7 +555,7 @@ def test_update_relaunch_arguments():
     b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
     got, spawned = [], []
     real_install, real_blocked = core.install_update, b.update_blocked
-    core.install_update = lambda url, log, size=None, show=False: (got.append(show), False)[1]
+    core.install_update = lambda url, log, size=None, show=False, digest=None: (got.append(show), False)[1]
     b.update_blocked = lambda: None
     srv = pcs_server.Server(b)
     srv.start()
@@ -568,14 +568,18 @@ def test_update_relaunch_arguments():
     # what install_update starts: the downloaded exe with --finish-update, and --show only when asked
     new = TMP / "dl" / "PCS-Scanner.exe"
     new.parent.mkdir(exist_ok=True)
-    real = (sys.executable, core.spawn_detached, core.urllib.request.urlretrieve, getattr(sys, "frozen", None))
+    real = (sys.executable, core.spawn_detached, core.download, getattr(sys, "frozen", None), dict(core.BUILD))
     sys.executable, core.spawn_detached, sys.frozen = str(new), spawned.append, True
-    core.urllib.request.urlretrieve = lambda url, p: Path(p).write_bytes(b"MZ" + b"x" * 10)
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    core.download = lambda url, p: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
+    url = "https://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe"
     try:
-        assert core.install_update("https://x", lambda m: None, 12, show=False)
-        assert core.install_update("https://x", lambda m: None, 12, show=True)
+        assert core.install_update(url, lambda m: None, 12, show=False)
+        assert core.install_update(url, lambda m: None, 12, show=True, digest="sha256:" + "ab" * 32)
     finally:
-        sys.executable, core.spawn_detached, core.urllib.request.urlretrieve = real[:3]
+        sys.executable, core.spawn_detached, core.download = real[:3]
+        core.BUILD.clear()
+        core.BUILD.update(real[4])
         if real[3] is None:
             del sys.frozen
         else:
@@ -587,6 +591,186 @@ def test_update_relaunch_arguments():
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
     assert "if background and not updated and not" in src and "'--updated' in sys.argv" in src
     assert "show='--show' in sys.argv" in src
+
+
+def test_update_download_checked():
+    """The new exe comes only from this app's GitHub releases over HTTPS, and must match the SHA-256 GitHub lists for
+    it: anything else is refused and never started (nothing left next to the app)."""
+    folder = TMP / "dl-check"
+    folder.mkdir(exist_ok=True)
+    cur = folder / "PCS-Scanner.exe"
+    staged = Path(core.staged_path(str(cur)))
+    real = (sys.executable, core.spawn_detached, core.download, getattr(sys, "frozen", None), dict(core.BUILD))
+    spawned, fetched = [], []
+    sys.executable, core.spawn_detached, sys.frozen = str(cur), spawned.append, True
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    good = "https://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe"
+    body = b"MZ" + b"new version" * 10
+    import hashlib
+    sha = hashlib.sha256(body).hexdigest()
+
+    def fake_download(url, p):
+        fetched.append(url)
+        Path(p).write_bytes(body)
+        return hashlib.sha256(body).hexdigest()
+    core.download = fake_download
+    try:
+        # addresses: only https, only github.com, only this repo's release files
+        assert core.update_url_ok(good)
+        for bad in ("http://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://github.com.evil.example/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://evil.example/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://github.com/someone/else/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://user:pw@github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "", None):
+            assert not core.update_url_ok(bad), bad
+        # redirects of the download: GitHub's file hosts over https only
+        assert core.update_url_ok("https://release-assets.githubusercontent.com/x?y=1", core.UPDATE_REDIRECT_HOSTS)
+        assert not core.update_url_ok("http://release-assets.githubusercontent.com/x", core.UPDATE_REDIRECT_HOSTS)
+        h = core._HttpsOnlyRedirect()
+        try:
+            h.redirect_request(urllib.request.Request(good), None, 302, "Found", {}, "http://evil.example/x.exe")
+            raise AssertionError("redirect to http accepted")
+        except urllib.error.URLError:
+            pass
+        # a foreign address is refused before anything is downloaded
+        try:
+            core.install_update("https://evil.example/PCS-Scanner.exe", lambda m: None, len(body), digest="sha256:" + sha)
+            raise AssertionError("foreign address accepted")
+        except RuntimeError:
+            pass
+        assert not fetched and not spawned
+        # wrong SHA-256: refused, the download removed, nothing started
+        try:
+            core.install_update(good, lambda m: None, len(body), digest="sha256:" + "0" * 64)
+            raise AssertionError("wrong digest accepted")
+        except RuntimeError as e:
+            assert "doesn't match" in str(e)
+        assert not spawned and not staged.exists() and not Path(str(staged) + ".part").exists()
+        assert "bad download: SHA-256" in Path(core.UPDATE_LOG).read_text()
+        # right SHA-256: started
+        assert core.install_update(good, lambda m: None, len(body), digest="SHA256:" + sha.upper())
+        assert spawned and spawned[-1][0] == str(staged) and staged.read_bytes() == body
+        assert "matches the release" in Path(core.UPDATE_LOG).read_text()
+    finally:
+        sys.executable, core.spawn_detached, core.download = real[:3]
+        core.BUILD.clear()
+        core.BUILD.update(real[4])
+        if real[3] is None:
+            del sys.frozen
+        else:
+            sys.frozen = real[3]
+    # the update check passes GitHub's digest on, and ignores a release file that isn't on this repo's releases
+    rel = {"tag_name": "v99.0.0", "html_url": "https://github.com/BLAKYY5/pcs-scanner/releases/tag/v99.0.0",
+           "assets": [{"name": "PCS-Scanner.exe", "browser_download_url": good, "size": 5, "digest": "sha256:" + sha}]}
+    real_open, real_build = core.urllib.request.urlopen, dict(core.BUILD)
+
+    class _R:
+        def __init__(self, d):
+            self.d = json.dumps(d).encode()
+
+        def read(self, *a):
+            return self.d
+    core.urllib.request.urlopen = lambda req, timeout=0: _R(rel)
+    core.BUILD.update({"repo": "BLAKYY5/pcs-scanner", "version": "1.0.0"})
+    try:
+        assert core.check_update() == ("v99.0.0", good, rel["html_url"], 5, "sha256:" + sha)
+        rel["assets"][0]["browser_download_url"] = "http://evil.example/PCS-Scanner.exe"
+        assert core.check_update() is None
+    finally:
+        core.urllib.request.urlopen = real_open
+        core.BUILD.clear()
+        core.BUILD.update(real_build)
+
+
+def test_sign_in_tokens_encrypted():
+    """Google Drive and YouTube sign-ins are kept encrypted for this Windows user; a file in clear from an older
+    version is encrypted the first time it is read, and an unreadable file means "sign in again"."""
+    f = TMP / "appdata" / "test_token.json"
+    info = {"token": "at-123", "refresh_token": "rt-secret-456", "client_id": "cid", "client_secret": "cs",
+            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.SCOPES}
+    core.write_token(str(f), json.dumps(info))
+    assert core.read_token(str(f)) == info
+    if os.name == "nt":
+        assert b"rt-secret-456" not in f.read_bytes() and "dpapi" in json.loads(f.read_text())
+    # an older version's file in clear: read, then encrypted in place
+    f.write_text(json.dumps(info))
+    assert core.read_token(str(f)) == info
+    if os.name == "nt":
+        assert b"rt-secret-456" not in f.read_bytes()
+    assert core.read_token(str(f)) == info
+    # google-auth reads it back
+    creds = core._saved_creds(str(f), core.SCOPES)
+    assert creds is not None and creds.refresh_token == "rt-secret-456"
+    # unreadable (another user's encryption, damaged): no sign-in, no crash
+    f.write_text(json.dumps({"dpapi": "AAAA"}))
+    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.SCOPES) is None
+    f.write_text("not json")
+    assert core.read_token(str(f)) is None
+    assert core.read_token(str(TMP / "appdata" / "missing_token.json")) is None
+    # the sign-in code writes through write_token, never in clear
+    src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
+    assert "write_token(TOKEN_F, creds.to_json())" in src and "write_token(YT_TOKEN_F, creds.to_json())" in src
+    assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
+
+
+def test_request_body_limit():
+    """The page sends small JSON only: a huge request body is refused before it is read."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=10)
+        c.putrequest("POST", "/api/label")
+        c.putheader("X-PCS-Token", srv.token)
+        c.putheader("Content-Type", "application/json")
+        c.putheader("Content-Length", str(pcs_server.MAX_BODY + 1))
+        c.endheaders()
+        r = c.getresponse()
+        assert r.status == 413, r.status
+        c.close()
+    finally:
+        srv.stop()
+
+
+def test_show_guard_not_blocked_by_a_silent_client():
+    """A program that connects to the single-instance port and sends nothing can't stop "show window" requests."""
+    import socket
+    import threading
+    from pcs_recorder import runtime
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real, runtime.GUARD_PORT = runtime.GUARD_PORT, port
+    shown = threading.Event()
+    try:
+        s = runtime.hold_guard(shown.set)
+        assert s is not None
+        silent = socket.create_connection(("127.0.0.1", port), timeout=2)
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+                c.sendall(b"show")
+            assert shown.wait(6), "show request blocked"
+        finally:
+            silent.close()
+            s.close()
+    finally:
+        runtime.GUARD_PORT = real
+
+
+def test_hub_notes_cleaned_for_the_page():
+    """Times and colours from the hub go straight into the page's markup: whatever a hub sends, the page gets
+    numbers and plain colours there (text is escaped by the page)."""
+    from pcs_recorder import notes
+    n = notes.clean_note({"id": "an-1", "t": '1"><img src=x onerror=alert(1)>', "dur": "7",
+                          "drawings": [{"kind": "pen", "color": "red;background:url(x)", "pts": [[0.1, "0.2"], ["x", 1]]},
+                                       {"kind": "line", "color": "#ffd60a", "pts": [[0, 0], [1, 1]]}, "junk"],
+                          "text": "<b>kept as text</b>"})
+    assert n["t"] == 0.0 and n["dur"] == 7.0 and n["text"] == "<b>kept as text</b>"
+    assert [d["color"] for d in n["drawings"]] == ["#ffd60a", "#ffd60a"]
+    assert n["drawings"][0]["pts"] == [[0.1, 0.2], [0.0, 1.0]]
+    assert notes.num(float("nan")) == 0.0 and notes.num("12.5") == 12.5 and notes.num(None, 3.0) == 3.0
 
 
 def test_no_password_in_app_log():

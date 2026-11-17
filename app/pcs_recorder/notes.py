@@ -57,7 +57,33 @@ def _answer(r) -> dict:
     d = r.json()
     if not isinstance(d, dict) or not isinstance(d.get("notes"), list):
         raise hub.HubError("the team hub sent something unexpected", "http", r.status_code)
+    d["notes"] = [clean_note(n) for n in d["notes"] if isinstance(n, dict)]
     return d
+
+
+COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
+
+
+def num(v, default: float = 0.0) -> float:
+    """A number from the hub, or `default`: the page puts these straight into its markup (times, positions)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return default
+    return f if f == f and abs(f) < 1e7 else default
+
+
+def clean_note(n: dict) -> dict:
+    """The hub checks notes when they are written; the page still gets only numbers where it expects numbers and
+    plain colours, whatever a hub sends."""
+    n = dict(n)
+    n["t"], n["dur"] = num(n.get("t")), num(n.get("dur"), 5.0)
+    dr = n.get("drawings") if isinstance(n.get("drawings"), list) else []
+    n["drawings"] = [{**s, "color": s.get("color") if COLOR_RE.fullmatch(str(s.get("color") or "")) else "#ffd60a",
+                      "pts": [[num(p[0]), num(p[1])] for p in (s.get("pts") or []) if isinstance(p, (list, tuple))
+                              and len(p) == 2]}
+                     for s in dr if isinstance(s, dict)]
+    return n
 
 
 def fetch(url: str, path: str, item_id: str, player: str | None = None) -> dict:
@@ -72,7 +98,8 @@ def fetch(url: str, path: str, item_id: str, player: str | None = None) -> dict:
         d = _answer(r)
     except (hub.HubError, ValueError) as e:
         cached = _load(item_id).get(player or "")
-        base = cached if isinstance(cached, dict) else {"notes": [], "known": False, "players": []}
+        base = dict(cached) if isinstance(cached, dict) else {"notes": [], "known": False, "players": []}
+        base["notes"] = [clean_note(n) for n in base.get("notes") or [] if isinstance(n, dict)]
         return {**base, "available": bool(cached) or getattr(e, "kind", "") != "refused",
                 "offline": True, "error": str(e)}
     _save(item_id, player, d)

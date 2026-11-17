@@ -38,6 +38,7 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
               "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
+MAX_BODY = 4 << 20                  # largest request body the page may send (bytes)
 
 
 def to_recycle_bin(path: str) -> None:
@@ -225,8 +226,9 @@ class Backend:
         why = self.update_blocked()
         if why:
             return why
-        if self.update and self.update[1] and core.install_update(
-                self.update[1], self.say, self.update[3] if len(self.update) > 3 else None, show=show):
+        u = self.update
+        if u and u[1] and core.install_update(u[1], self.say, u[3] if len(u) > 3 else None, show=show,
+                                              digest=u[4] if len(u) > 4 else None):
             threading.Timer(1.0, self.quit).start()
         return None
 
@@ -1048,10 +1050,13 @@ class Server:
                 n = int(self.headers.get("Content-Length") or 0)
                 if not n:
                     return {}
+                if n > MAX_BODY:                            # the page only sends small JSON (a drawing at most)
+                    raise ValueError("request too large")
                 try:
-                    return json.loads(self.rfile.read(n))
-                except json.JSONDecodeError:
+                    d = json.loads(self.rfile.read(n))
+                except (json.JSONDecodeError, UnicodeDecodeError):
                     return {}
+                return d if isinstance(d, dict) else {}
 
             # -- static pages
             def _static(self, path):
@@ -1213,7 +1218,11 @@ class Server:
                 path = unquote(u.path)
                 if not self._authed(q):
                     return self._json({"error": "forbidden"}, 403)
-                body = self._body()
+                try:
+                    body = self._body()
+                except ValueError as e:
+                    self.close_connection = True                # the unread body stays on the connection
+                    return self._json({"error": str(e)}, 413)
                 try:
                     if path == "/api/settings":
                         b.save_settings(body)

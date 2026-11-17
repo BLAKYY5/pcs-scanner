@@ -103,7 +103,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
-  Dev builds are offered releases ≥ their `base`. The restart is in the tray (`--background --updated`: a corner
+  Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
+  (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
+  without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
   message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).
 - **Quiet window** (a slower Apex session, 17 Nov 2026): WebView2 does not stop drawing when its window goes to the
   tray. A hidden window with the old pulsing dots drew 358 frames/s on a 360 Hz screen (~70 % of a CPU core plus GPU)
@@ -113,6 +115,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
 - **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
   through `pcs_core.redact`. `scrub_log` cleans old lines at start; the obs-websocket password is renewed once
   (`obs.renew_password`, only while our OBS is closed).
+- **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
+  `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
+  sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
 - **Results to hub and Drive**: a recording is "uploaded" once the hub OR Drive took its results; where they went is
   kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
