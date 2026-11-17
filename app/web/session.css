@@ -1,0 +1,30 @@
+/* Watch together (session.js) */
+.wt{display:flex;flex-direction:column;gap:12px}
+.wt-stage{position:relative;width:100%;min-height:200px}
+.wt-pov{position:absolute;background:#000;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.wt-pov.big{border-color:#45423c}
+.wt-pov.pick{cursor:pointer}
+.wt-pov.pick:hover{border-color:var(--accent)}
+.wt-yt,.wt-pov iframe{position:absolute;inset:0;width:100%;height:100%;border:0}
+.wt-shield{position:absolute;inset:0;z-index:1}                 /* clicks never reach YouTube's own player */
+.wt-name{position:absolute;left:8px;top:6px;z-index:2;font:600 13px var(--display);letter-spacing:.05em;text-transform:uppercase;
+  background:rgba(0,0,0,.6);padding:2px 8px;border-radius:4px;pointer-events:none}
+.wt-pov.big .wt-name{font-size:15px}
+.wt-msg{position:absolute;inset:0;z-index:2;display:grid;place-items:center;text-align:center;padding:12px;color:var(--muted);
+  background:rgba(18,18,17,.82);pointer-events:none}
+.wt-ink{position:absolute;z-index:3;pointer-events:none}
+.wt-ink.coach{pointer-events:auto;cursor:crosshair;touch-action:none}
+.wt-bar{display:flex;flex-direction:column;gap:10px;padding:12px 14px}
+.wt-transport{flex-wrap:nowrap}
+.wt-seek{flex:1;min-width:120px;accent-color:var(--brand)}
+.wt-vol{width:110px;accent-color:var(--muted)}
+.wt-time{min-width:58px;text-align:right}
+.wt-bar select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit}
+.wt-members{display:flex;flex-wrap:wrap;gap:8px 16px}
+.wt-member{display:inline-flex;align-items:center;gap:6px}
+.wt-card h3{margin:14px 0 6px;font:600 14px var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.wt-row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+.wt-row>div{display:flex;flex-direction:column;min-width:0}
+.wt-joinbar{position:sticky;top:57px;z-index:19;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;
+  padding:8px 18px;background:var(--info-soft);border-bottom:1px solid #2a4270}
+@media (max-width:999px){.wt-transport{flex-wrap:wrap}}

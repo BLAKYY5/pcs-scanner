@@ -116,6 +116,7 @@ function route() {
   else if (page === 'settings') renderSettings();
   else if (page === 'youtube') renderYouTube();
   else if (page === 'team') renderTeam();
+  else if (page === 'watch') { if (window.renderWatch) renderWatch(); }   // Watch together (session.js, loaded next)
   else location.hash = '#home';
 }
 window.addEventListener('hashchange', route);
@@ -763,6 +764,10 @@ function paintInk(act) {
   g.clearRect(0, 0, W, H);
   const shapes = RV.ed ? RV.ed.drawings.concat(RV.ed.cur ? [RV.ed.cur] : []) :
     (act || activeNotes($('#vid').currentTime)).flatMap(n => n.drawings || []);
+  drawShapes(g, W, H, shapes);
+}
+/* shapes in 0..1 frame coordinates on a canvas of W x H (coach notes, and Watch together in session.js) */
+function drawShapes(g, W, H, shapes) {
   const lw = Math.max(2, W * 0.0035);
   g.lineWidth = lw; g.lineCap = g.lineJoin = 'round'; g.shadowColor = 'rgba(0,0,0,.7)'; g.shadowBlur = lw;
   shapes.forEach(s => {
@@ -1188,7 +1193,8 @@ function renderTeam() {
         <button class="btn" data-p="/lootbook/">Loot Book</button>
         <button class="btn" data-p="/#/scanner">Scans</button>
         ${l.role === 'coach' ? '<button class="btn ghost" data-p="/keys">Keys</button>' : ''}
-      </div></section>`;
+      </div></section><div id="watchCard"></div>`;
+  if (window.watchCard) watchCard($('#watchCard'));                    // Watch together (session.js)
   $$('[data-p]').forEach(b => b.onclick = async () => {
     b.disabled = true;
     try { const r = await api('/api/hub/open', {path: b.dataset.p}); toast(r.window ? 'Opened in a new window.' : 'Opened in your browser. If it asks for a key, open the sign-in link from your coach.'); }

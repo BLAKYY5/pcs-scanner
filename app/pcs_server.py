@@ -722,6 +722,36 @@ class Backend:
             raise ValueError("unknown action")
         return self.notes(item_id, player)
 
+    # ------------------------------------------------------------- watch together (team hub sessions)
+    @property
+    def watch(self):
+        """pcs_recorder.watch.Watch: shared review sessions through the hub (the key stays in this process)."""
+        if getattr(self, "_watch", None) is None:
+            from pcs_recorder import watch
+            self._watch = watch.Watch(lambda: self.auto.s.hub_url if self.auto else "")
+        return self._watch
+
+    def watch_post(self, action: str, body: dict) -> dict:
+        w = self.watch
+        if action == "start":
+            return w.start(body.get("gameKey") or "")
+        if action == "join":
+            return w.join(body.get("id") or "")
+        if action == "control":
+            return w.control(body)
+        if action == "draw":
+            return w.draw(body)
+        if action == "report":
+            w.report(body.get("t"), bool(body.get("buffering")))
+            return {"ok": True}
+        if action == "leave":
+            w.leave()
+            return w.snapshot()
+        if action == "end":
+            w.end()
+            return w.snapshot()
+        raise ValueError("unknown action")
+
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
         """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
@@ -1008,6 +1038,10 @@ class Server:
                         return self._json(b.mics())
                     if path == "/api/voiceapps":
                         return self._json(b.voice_apps())
+                    if path == "/api/watch/list":
+                        return self._json(b.watch.listing(fresh=bool((q.get("fresh") or [""])[0])))
+                    if path == "/api/watch/poll":
+                        return self._json(b.watch.poll(int((q.get("seq") or ["-1"])[0]), float((q.get("wait") or ["15"])[0])))
                     if path.startswith("/api/library/") and path.endswith("/notes"):
                         return self._json(b.notes(path.split("/")[3], (q.get("player") or [""])[0] or None))
                     if path.startswith("/api/library/") and path.endswith("/levels"):
@@ -1053,6 +1087,8 @@ class Server:
                                                      body.get("title"), body.get("privacy")))
                     if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen"):
                         return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
+                    if path.startswith("/api/watch/"):
+                        return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
                     if path == "/api/label":
                         return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
                     if path == "/api/signin":

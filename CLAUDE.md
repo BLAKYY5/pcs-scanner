@@ -39,7 +39,7 @@ app/pcs_levels.py       loudness per track, fight and mic-peak detection for the
 app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket), core (Recorder),
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types)
-app/web/                the UI: index.html, app.css, app.js (no build step, no framework)
+app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together) (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
 .github/workflows/build.yml   Windows build, tests, PyInstaller onefile exe, selftest, release
@@ -116,6 +116,21 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is
   notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
   never. Last answer cached in `notes-cache/` for offline. Full screen is the player box (F / button), the video's
   own full-screen button is hidden, or the drawings would not show.
+- **Watch together** (`pcs_recorder/watch.py`, `web/session.js` + `session.css`, hub 0.5 `/api/videos`, `/api/sessions`,
+  contract in the hub's `AGENT.md`): the coach and the squad watch one game together, every player's view side by
+  side, the coach in control (play, pause, seek, speed, large view, drawings live). The views are the players' YouTube
+  videos: after a block upload `youtube.Uploader.send_to_hub` tells the hub which recordings the video holds at what
+  offsets (`offsets` / `durations` kept in `youtube.json`; same retry rules as the scan results; hub before 0.5 = asked
+  again after 6 h). Game time 0 = the jump; a view's video time = its `videoAt` + game time. The window never holds the
+  key: the app keeps one websocket to the hub per session (key in the header) and the page long-polls
+  `/api/watch/poll`; ping / pong gives the hub clock (`offset`). Each page keeps its YouTube players within 0.5 s of the
+  shared moment (seek with a learned lead per player; paused = same frame), so a slow PC never holds the others; it
+  reports its position and the coach sees who is behind. Players' sound and volume are their own (remembered); the
+  page starts muted when the browser refuses autoplay with sound ("Sound on"). YouTube's IFrame API is the only outside
+  script; embeds play from the `http://127.0.0.1` page (checked in Chromium; `origin` = the page's own). Private videos
+  can't be embedded for others: the default upload privacy is unlisted. Iframes are never moved in the page (that
+  reloads them): only their boxes change when the large view changes. Entry: Team tab (coach: games with videos,
+  Start session; players: Join) and a join bar on every page while a session runs.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon

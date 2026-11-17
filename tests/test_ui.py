@@ -1173,6 +1173,253 @@ def test_hub_retry_with_real_hub_requests():
         _fresh_hub()
 
 
+class SessionHub:
+    """A hub 0.5 with Watch together, on localhost, kept small: GOOD_KEY = the coach (Blakey), PLAYER_KEY = Moe.
+    HTTP as the real hub (AGENT.md) and a hand-made websocket (handshake + text frames) for the pushes."""
+
+    def __init__(self, clock_ahead=5.0):
+        import base64
+        import hashlib
+        import socket
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import urlsplit
+        self.calls, self.ws_auth, self.socks, self.reports = [], [], [], []
+        self.ahead, self.state = clock_ahead, None
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if n else {}
+                p = urlsplit(self.path).path
+                auth = self.headers.get("Authorization", "")
+                hub.calls.append((self.command, self.path, body, auth))
+                me = {"Bearer " + GOOD_KEY: ("Blakey", "coach"), "Bearer " + PLAYER_KEY: ("Moe", "player")}.get(auth)
+                if not me:
+                    return self._send(401, {"detail": "bad key", "error": "bad_key"})
+                if p.endswith("/ws") and self.headers.get("Upgrade", "").lower() == "websocket":
+                    hub.ws_auth.append((self.path, auth))
+                    acc = base64.b64encode(hashlib.sha1((self.headers["Sec-WebSocket-Key"] +
+                                                         "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+                    self.send_response(101)
+                    self.send_header("Upgrade", "websocket")
+                    self.send_header("Connection", "Upgrade")
+                    self.send_header("Sec-WebSocket-Accept", acc)
+                    self.end_headers()
+                    self.wfile.flush()
+                    sock = self.connection
+                    hub.socks.append(sock)
+                    hub.push({"type": "state", "state": hub.state, "me": {"name": me[0], "role": me[1]}}, [sock])
+                    try:
+                        while True:
+                            m = hub.read_frame(sock)
+                            if m is None:
+                                break
+                            m = json.loads(m)
+                            if m["type"] == "ping":
+                                hub.push({"type": "pong", "c": m["c"], "s": m["c"] + hub.ahead}, [sock])
+                            elif m["type"] == "report":
+                                hub.reports.append((me[0], m))
+                    except OSError:
+                        pass
+                    self.close_connection = True
+                    return
+                coach = me[1] == "coach"
+                if p == "/api/me":
+                    return self._send(200, {"name": me[0], "role": me[1]})
+                if p == "/api/sessions" and self.command == "GET":
+                    return self._send(200, {"sessions": [{"id": "s-1", "coach": "Blakey", "game": {"map": "SP"},
+                                                          "members": ["Blakey"], "canJoin": True}] if hub.state else []})
+                if p == "/api/videos":
+                    return self._send(200, {"games": [{"gameKey": "g-1", "map": "SP", "players": ["Moe"], "videos": ["Moe"]}]})
+                if p == "/api/sessions" and self.command == "POST":
+                    if not coach:
+                        return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
+                    hub.state = {"id": "s-1", "coach": "Blakey", "gameKey": body["gameKey"], "povs": [], "focus": "Moe",
+                                 "playing": False, "t": 0, "at": 0, "speed": 1, "strokes": [], "members": {}, "rev": 0,
+                                 "range": [-150, 600]}
+                    return self._send(200, hub.state)
+                if p == "/api/sessions/s-1" and self.command == "GET":
+                    return self._send(200, hub.state)
+                if p == "/api/sessions/s-1/join":
+                    return self._send(200, hub.state)
+                if p == "/api/sessions/s-1/leave":
+                    return self._send(200, {"left": True})
+                if not coach:
+                    return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
+                if p == "/api/sessions/s-1/control":
+                    hub.state = dict(hub.state, playing=body["action"] == "play", t=body.get("t", 0), rev=hub.state["rev"] + 1)
+                    hub.push({"type": "state", "state": hub.state})
+                    return self._send(200, hub.state)
+                if p == "/api/sessions/s-1/draw":
+                    hub.state = dict(hub.state, strokes=hub.state["strokes"] + [body["stroke"]], rev=hub.state["rev"] + 1)
+                    hub.push({"type": "stroke", "op": "put", "stroke": body["stroke"], "rev": hub.state["rev"]})
+                    return self._send(200, {"rev": hub.state["rev"]})
+                if p == "/api/sessions/s-1/end":
+                    hub.push({"type": "ended", "reason": "ended"})
+                    hub.state = None
+                    return self._send(200, {"ended": True})
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        self._socket = socket
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    @staticmethod
+    def read_frame(sock):
+        def exact(n):
+            b = b""
+            while len(b) < n:
+                c = sock.recv(n - len(b))
+                if not c:
+                    raise OSError("closed")
+                b += c
+            return b
+        b0, b1 = exact(2)
+        n = b1 & 0x7F
+        if n == 126:
+            n = int.from_bytes(exact(2), "big")
+        elif n == 127:
+            n = int.from_bytes(exact(8), "big")
+        mask = exact(4) if b1 & 0x80 else b"\0\0\0\0"
+        data = bytes(c ^ mask[i % 4] for i, c in enumerate(exact(n)))
+        return None if b0 & 0x0F == 8 else data.decode()
+
+    def push(self, msg, socks=None):
+        data = json.dumps(msg).encode()
+        n = len(data)
+        head = bytes([0x81, n]) if n < 126 else bytes([0x81, 126]) + n.to_bytes(2, "big") if n < 65536 else \
+            bytes([0x81, 127]) + n.to_bytes(8, "big")
+        for s in list(socks or self.socks):
+            try:
+                s.sendall(head + data)
+            except OSError:
+                pass
+
+    def stop(self):
+        for s in self.socks:
+            try:
+                s.close()
+            except OSError:
+                pass
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_watch_together():
+    """Watch together through the app: the window talks to the app only, the app talks to the hub with the key in
+    the header (HTTP and websocket), keeps the session state from the pushes, estimates the hub's clock."""
+    hub = _fresh_hub()
+    fake = SessionHub(clock_ahead=5.0)
+    auto = _Auto(str(TMP / "watchrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    srv = pcs_server.Server(b)
+    srv.start()
+
+    def wait_for(cond, s=5):
+        end = time.time() + s
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    try:
+        assert call(srv, "/api/watch/list")[1] == {"available": False, "sessions": [], "games": [], "role": ""}
+        assert call(srv, "/api/watch/list", token=False)[0] == 403
+        assert not fake.calls                                               # no key: nothing asked of the hub
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert r["available"] and r["role"] == "coach" and r["games"][0]["gameKey"] == "g-1" and r["sessions"] == []
+        code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "g-1"})
+        assert code == 200 and snap["sid"] == "s-1" and snap["state"]["gameKey"] == "g-1", snap
+        assert fake.calls[-1][:3] == ("POST", "/api/sessions", {"gameKey": "g-1"})
+        assert wait_for(lambda: b.watch.connected and len(b.watch.samples) >= 3)
+        assert fake.ws_auth == [("/api/sessions/s-1/ws", "Bearer " + GOOD_KEY)]
+        assert all(GOOD_KEY not in c[1] for c in fake.calls)                 # never in an address
+        snap = call(srv, f"/api/watch/poll?seq={snap['seq']}&wait=2")[1]
+        assert snap["connected"] and snap["me"] == {"name": "Blakey", "role": "coach"}
+        assert abs(snap["offset"] - 5.0) < 0.2 and snap["rtt"] is not None   # the hub's clock, 5 s ahead here
+        # the coach plays: the answer and the push both carry the new state
+        code, snap, _ = call(srv, "/api/watch/control", {"action": "play", "t": 12.5, "junk": 1})
+        assert code == 200 and snap["state"]["playing"] and snap["state"]["rev"] == 1
+        assert fake.calls[-1][2] == {"action": "play", "t": 12.5}
+        # a drawing: pushed as a stroke, applied to the state the window reads
+        seq = snap["seq"]
+        stroke = {"id": "k1", "kind": "arrow", "color": "#ffd60a", "pts": [[0.1, 0.1], [0.5, 0.5]]}
+        assert call(srv, "/api/watch/draw", {"op": "put", "stroke": stroke})[0] == 200
+        snap = call(srv, f"/api/watch/poll?seq={seq}&wait=3")[1]
+        assert wait_for(lambda: b.watch.state["strokes"] == [stroke]) and b.watch.state["rev"] == 2
+        # a push that skips a revision: the app asks for the whole state
+        fake.state = dict(fake.state, rev=9, focus="Zed")
+        fake.push({"type": "stroke", "op": "clear", "rev": 9})
+        assert wait_for(lambda: b.watch.state["focus"] == "Zed" and b.watch.state["rev"] == 9)
+        assert ("GET", "/api/sessions/s-1", {}, "Bearer " + GOOD_KEY) in fake.calls
+        # presence and positions, and this app's own report over the websocket
+        fake.push({"type": "members", "members": {"Moe": {"t": 3.0, "connected": True}}})
+        assert wait_for(lambda: b.watch.state["members"].get("Moe", {}).get("t") == 3.0)
+        assert call(srv, "/api/watch/report", {"t": 14.25, "buffering": True})[1] == {"ok": True}
+        assert wait_for(lambda: fake.reports == [("Blakey", {"type": "report", "t": 14.25, "buffering": True})])
+        # the window's long poll returns at once on a change, else after the wait
+        t0 = time.time()
+        s2 = call(srv, f"/api/watch/poll?seq={b.watch.seq}&wait=0.5")[1]
+        assert 0.4 < time.time() - t0 < 3 and s2["seq"] == b.watch.seq
+        # the coach ends it: ended for the window, websocket closed
+        snap = call(srv, "/api/watch/end", {})[1]
+        assert snap["ended"] == "ended" and not snap["connected"]
+        assert call(srv, "/api/watch/control", {"action": "play"})[0] == 500   # not in a session any more
+        # a player: joins a running session, can't control it (the hub's words come back)
+        call(srv, "/api/watch/start", {"gameKey": "g-2"})
+        hub.set_key(PLAYER_KEY)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert r["role"] == "player" and r["games"] == [] and r["sessions"][0]["id"] == "s-1"
+        snap = call(srv, "/api/watch/join", {"id": "s-1"})[1]
+        assert snap["sid"] == "s-1" and wait_for(lambda: b.watch.connected)
+        code, r, _ = call(srv, "/api/watch/control", {"action": "pause"})
+        assert code == 500 and "403" in r["error"] and "Coach only" in r["error"], r
+        assert call(srv, "/api/watch/join", {"id": "../evil"})[0] == 500
+        snap = call(srv, "/api/watch/leave", {})[1]
+        assert snap["ended"] == "left" and fake.calls[-1][1] == "/api/sessions/s-1/leave"
+    finally:
+        srv.stop()
+        fake.stop()
+        b.watch.leave()
+        _fresh_hub()
+
+
+def test_watch_page_files():
+    """The session page is its own files, loaded by the window's page; YouTube's player API is the only outside
+    script, and app.js only routes to it."""
+    web = Path(pcs_server.WEB)
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert '<script src="session.js"></script>' in html and 'href="session.css"' in html
+    assert html.index("app.js") < html.index("session.js")
+    js = (web / "session.js").read_text(encoding="utf-8")
+    assert "https://www.youtube.com/iframe_api" in js
+    assert [u for u in __import__("re").findall(r"https?://[^\s'\"`)]+", js) if "youtube.com" not in u] == []
+    for text in ("No video for", "Start session", "Join", "End session", "Leave", "Sound on"):
+        assert text in js, text
+    assert "drawShapes(" in (web / "app.js").read_text(encoding="utf-8")
+
+
 if __name__ == "__main__":
     try:
         for name, fn in list(globals().items()):
