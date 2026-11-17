@@ -83,21 +83,6 @@ def audio_tracks(video: str) -> list[dict]:
              "label": label.get(names[i], names[i]) if i < len(names) else f"Audio {i + 1}"} for i in range(n)]
 
 
-def track_file(video: str, n: int) -> Path:
-    """One audio track as its own file (made once, then reused). Next to the recording for the app's own
-    recordings (so it's deleted with it); in the app's cache for files added by hand."""
-    v = Path(video)
-    folder = v.parent if v.with_suffix(".events.json").exists() else Path(core.DATA) / "audio-cache"
-    folder.mkdir(parents=True, exist_ok=True)
-    out = folder / (f"{v.stem}.track{n + 1}.m4a" if folder == v.parent else f"{vid(video)}.track{n + 1}.m4a")
-    if not out.exists() or out.stat().st_mtime < v.stat().st_mtime:
-        from pcs_recorder.core import extract_track
-        tmp = out.with_name(out.stem + ".part.m4a")
-        extract_track(video, n, tmp)
-        os.replace(tmp, out)
-    return out
-
-
 def vid(path: str) -> str:
     return hashlib.sha1(os.path.normcase(os.path.abspath(path)).encode()).hexdigest()[:12]
 
@@ -126,8 +111,45 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
-GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "ring", "landing", "rankedShare", "clockStart", "harvesters",
+GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
                "select", "banner", "squadsLeft", "own", "feedStats")
+
+
+def _same_sig(a, b) -> bool:
+    """Two name shapes from the scanner (pcs_hud._sig) close enough to be the same name."""
+    if not a or not b:
+        return a == b
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1") <= 26
+    except ValueError:
+        return False
+
+
+def feed_lines(lines: list[dict]) -> tuple[list[dict], bool]:
+    """Kill-feed lines for the review: picture and time, plus what the scanner read (1.10.x+): knock or kill, who is
+    on each side (our squad or not, the squad colour), weapon, headshot. The feed scrolls and fades, so one line is
+    often captured 2 or 3 times: repeats of a line involving our squad get "dup" (counted once, like the scan's
+    feedStats). Second value: whether this scan read the sides at all (older scans didn't)."""
+    out, seen, sides = [], [], False
+    for l in lines:
+        x = {"t": l.get("t"), "jpg": l.get("jpg")}
+        for k in ("event", "weaponName", "headshot"):
+            if l.get(k) is not None:
+                x[k] = l[k]
+        for k in ("killer", "victim"):
+            if isinstance(l.get(k), dict):
+                x[k] = {kk: l[k][kk] for kk in ("side", "hue", "color") if kk in l[k]}
+                sides = True
+        ks, vs = (x.get("killer") or {}).get("side"), (x.get("victim") or {}).get("side")
+        if l.get("event") and (ks == "squad") != (vs == "squad") and isinstance(l.get("t"), (int, float)):
+            if any(l["t"] - p["t"] < 25 and p.get("event") == l.get("event") and p.get("weapon") == l.get("weapon")
+                   and _same_sig(p.get("killerSig"), l.get("killerSig"))
+                   and _same_sig(p.get("victimSig"), l.get("victimSig")) for p in seen):
+                x["dup"] = True
+            else:
+                seen.append(l)
+        out.append(x)
+    return out, sides
 
 
 def scan_files(video: str) -> tuple[Path | None, Path | None]:
@@ -155,6 +177,9 @@ class Backend:
         self.scan_started = 0.0
         self._levels_locks: dict[str, threading.Lock] = {}
         self._worker_running = False
+        from pcs_recorder import tracks
+        self.cutter = tracks.CUTTER                        # audio tracks for the review, cut in the background
+        self.cutter.clean()                                # unfinished cuts of hand-added files (audio cache)
         self.pick_files = lambda kind="video": []          # native "open files" dialog
         self.open_path = lambda p: os.startfile(p) if os.name == "nt" else None
         self.open_window = lambda url, title: False        # a second app window (pywebview); False = none
@@ -459,7 +484,7 @@ class Backend:
             it["games"] = games
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
-            it["feed"] = [{"t": l.get("t"), "jpg": l.get("jpg")} for l in f.get("lines", [])]
+            it["feed"], it["feedSides"] = feed_lines(f.get("lines", []))
         ev = Path(it["path"]).with_suffix(".events.json")
         if ev.exists():
             try:
@@ -905,14 +930,17 @@ class Server:
                 pass
 
             # -- helpers
-            def _json(self, obj, code=200):
+            def _json(self, obj, code=200, headers=None):
                 data = json.dumps(obj).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
                 self.end_headers()
-                self.wfile.write(data)
+                if self.command != "HEAD":                  # a body after a HEAD answer breaks the next request
+                    self.wfile.write(data)
 
             def _ok_origin(self) -> bool:
                 host = self.headers.get("Host", "")
@@ -951,10 +979,14 @@ class Server:
                 if not it:
                     return self._json({"error": "not found"}, 404)
                 try:
-                    p = str(track_file(it["path"], int(n)))
+                    st, p = b.cutter.state(it["path"], int(n))
                 except Exception as e:
                     return self._json({"error": f"audio track not available: {e}"}, 404)
-                return self._video(item_id, p)
+                if st == "preparing":                       # being cut in the background: the page asks again
+                    return self._json({"error": "preparing", "preparing": True}, 503, {"Retry-After": "3"})
+                if st != "ready":
+                    return self._json({"error": f"audio track not available: {p}"}, 404)
+                return self._video(item_id, str(p))
 
             def _video(self, item_id, p=None):
                 it = b.find(item_id)

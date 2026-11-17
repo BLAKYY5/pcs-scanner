@@ -28,6 +28,7 @@ def selftest(out):
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, websocket   # noqa: F401
+        import pcs_recorder.tracks   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')

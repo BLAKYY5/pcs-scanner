@@ -27,10 +27,19 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r app/requirements.txt pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
 
+      # A fixed ffmpeg, checked by its SHA-256: the scanner parses ffmpeg's text output (pts_time) and relies on its GPU
+      # decoding, so every build ships the same one. BtbN keeps its month-end builds; the daily ones are deleted after
+      # about two weeks. To bump: see "ffmpeg" in CLAUDE.md.
       - name: Get ffmpeg
         shell: pwsh
+        env:
+          FFMPEG_TAG: autobuild-2026-10-31-12-59
+          FFMPEG_ZIP: ffmpeg-N-128227-g4811625b5f-win64-gpl.zip
+          FFMPEG_SHA256: 3a5cdb3b83dd1b62b29d946d3655a14d787e5e81d947ad68202a1a400095d2f8
         run: |
-          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip" -OutFile ffmpeg.zip
+          Invoke-WebRequest -Uri "https://github.com/BtbN/FFmpeg-Builds/releases/download/$env:FFMPEG_TAG/$env:FFMPEG_ZIP" -OutFile ffmpeg.zip
+          $hash = (Get-FileHash ffmpeg.zip -Algorithm SHA256).Hash.ToLower()
+          if ($hash -ne $env:FFMPEG_SHA256) { throw "ffmpeg.zip SHA-256 is $hash, expected $env:FFMPEG_SHA256" }
           Expand-Archive ffmpeg.zip -DestinationPath ffx
           New-Item -ItemType Directory -Force -Path ffmpeg | Out-Null
           Get-ChildItem -Recurse ffx -Include ffmpeg.exe,ffprobe.exe | Copy-Item -Destination ffmpeg

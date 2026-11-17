@@ -140,7 +140,9 @@ def test_recording_date_and_game_data_for_review():
     for v in (named, by_scan, bare):
         v.write_bytes(b"x" * 1000)
         os.utime(v, (1_900_000_000, 1_900_000_000))                  # written much later than recorded
-    game = {"map": "SP", "mode": "ranked", "tStart": 541.0, "tEnd": 665.0, "drop": None, "ring": [], "landing": None,
+    game = {"map": "SP", "mode": "ranked", "tStart": 541.0, "tEnd": 665.0, "tEndGame": 951.5, "drop": None,
+            "ring": [{"kind": "wait", "round": 4, "firstSeen": 900.0, "endsAt": 990.0, "endsAfterGame": True}],
+            "landing": None,
             "select": {"tFirst": 516.0, "tLast": 541.0, "ranked": True,
                        "squad": [{"slot": 1, "legend": "bangalore", "self": False, "hue": 77},
                                  {"slot": 2, "legend": "crypto", "self": True, "hue": 39}]},
@@ -173,6 +175,9 @@ def test_recording_date_and_game_data_for_review():
         assert g["select"]["squad"][1] == {"slot": 2, "legend": "crypto", "self": True, "hue": 39}
         assert g["banner"]["mode"] == "ranked" and g["mode"] == "ranked"
         assert g["squadsLeft"][-1] == [944.0, 5]
+        assert g["tEndGame"] == 951.5 and g["ring"][0]["endsAfterGame"] is True      # game span; ring after the game
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "g.tEndGame != null ? g.tEndGame" in js and "after your game ended" in js
         assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
         assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
@@ -361,8 +366,16 @@ def test_audio_tracks():
         assert [a["label"] for a in d["audio"]] == ["Game", "Discord", "Microphone"], d["audio"]
         assert d["marks"] == [{"t": 1.5, "kind": "mark"}]
         code, body, h = call(srv, f"/audio/{it['id']}/2", raw=True)
+        assert code == 503 and json.loads(body)["preparing"], (code, body)    # cut in the background, not now
+        for _ in range(100):
+            code, body, h = call(srv, f"/audio/{it['id']}/2", raw=True)
+            if code != 503:
+                break
+            time.sleep(0.1)
         assert code == 200 and h["Content-Type"] == "audio/mp4" and len(body) > 1000
         assert v.with_name(v.stem + ".track3.m4a").exists()          # kept next to the recording, deleted with it
+        assert v.with_name(v.stem + ".track1.m4a").exists()          # all tracks in one go
+        assert not list(v.parent.glob("*.part.m4a"))
         code, body, h = call(srv, f"/audio/{it['id']}/1", headers={"Range": "bytes=0-99"}, raw=True)
         assert code == 206 and len(body) == 100
         assert call(srv, f"/audio/{it['id']}/7", raw=True)[0] == 404
@@ -524,12 +537,30 @@ def test_update_finisher():
     assert "copied, starting the new version" in Path(core.UPDATE_LOG).read_text()
 
 
+class Skipped(Exception):
+    """A test that cannot run here: the runner reports it as skipped, not failed."""
+
+
+def _app_already_running():
+    """True when another PCS Scanner holds the single-instance mutex (e.g. the installed app on the coach's PC)."""
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenMutexW.restype = ctypes.c_void_p
+    h = k32.OpenMutexW(0x00100000, False, "Local\\PCS-Scanner-app")      # SYNCHRONIZE
+    if not h:
+        return False
+    k32.CloseHandle(ctypes.c_void_p(h))
+    return True
+
+
 def test_single_instance():
-    """Only one PCS Scanner per Windows session (a second start just shows the first one's window)."""
+    """Only one PCS Scanner per Windows session (a second start just shows the first one's window).
+    Skipped when a PCS Scanner already runs on this PC (it holds the mutex); CI has none, so it runs there."""
     import pcs_app
     if os.name != "nt":
-        print("  (not Windows: single-instance test skipped)")
-        return
+        raise Skipped("not Windows")
+    if _app_already_running():
+        raise Skipped("another PCS Scanner is running on this PC (close it to run this test)")
     assert pcs_app.first_instance() is True
     first = pcs_app._MUTEX
     assert pcs_app.first_instance() is False             # a second app in the same session is refused
@@ -1420,10 +1451,153 @@ def test_watch_page_files():
     assert "drawShapes(" in (web / "app.js").read_text(encoding="utf-8")
 
 
+def test_audio_track_never_blocks_the_review():
+    """A track that isn't cut yet: the server answers at once ("preparing", 503), the cut runs in the background
+    (the review page asks again), and a later request gets the file. Background cuts (after a recording) never run
+    while Apex runs; a track the review waits for does. A stopped cut leaves no broken track file."""
+    import subprocess
+    import threading
+    from pcs_recorder import tracks
+    folder = TMP / "cutq"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "Apex Legends_2026.11.17-15.27.mp4"
+    v.write_bytes(b"v" * 1000)
+    v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"]}))
+    apex, cuts, gate = [False], [], threading.Event()
+
+    def slow_cut(video, outs):                        # stands in for ffmpeg on a 3-hour recording
+        cuts.append([n for n, _ in outs])
+        gate.wait(10)
+        for _, out in outs:
+            out.write_bytes(b"m4a-track-" + out.name.encode())
+    c = tracks.Cutter(is_apex_running=lambda: apex[0], cut=slow_cut, count=lambda video: 3, wait_s=0.05)
+    b = pcs_server.Backend()
+    b.cutter = c
+    b.add_paths([str(v)])
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = next(x["id"] for x in b.library() if x["path"] == str(v))
+        t0 = time.time()
+        code, body, h = call(srv, f"/audio/{vid}/0", raw=True)
+        assert code == 503 and json.loads(body)["preparing"] and h.get("Retry-After") == "3", (code, body)
+        assert time.time() - t0 < 1.0
+        req = urllib.request.Request(f"http://127.0.0.1:{srv.port}/audio/{vid}/1", method="HEAD",
+                                     headers={"X-PCS-Token": srv.token})
+        try:
+            urllib.request.urlopen(req, timeout=5)
+            raise AssertionError("HEAD should say 503 while the track is cut")
+        except urllib.error.HTTPError as e:
+            assert e.code == 503 and e.read() == b""                 # HEAD: headers only
+        gate.set()
+        for _ in range(100):
+            code, body, h = call(srv, f"/audio/{vid}/1", raw=True)
+            if code != 503:
+                break
+            time.sleep(0.05)
+        assert code == 200 and body == b"m4a-track-" + (v.stem + ".track2.m4a").encode(), (code, body)
+        assert cuts == [[0, 1, 2]], cuts                               # one cut for all tracks, once
+        assert call(srv, f"/audio/{vid}/5", raw=True)[0] == 404        # no such track: not "preparing" forever
+    finally:
+        srv.stop()
+    # background cuts wait while Apex runs, then go; a cut the review waits for goes even during a game
+    for f in folder.glob("*.m4a"):
+        f.unlink()
+    cuts.clear()
+    apex[0] = True
+    c.add(str(v))
+    time.sleep(0.4)
+    assert cuts == [] and c.busy()
+    w = folder / "Apex Legends_2026.11.17-18.00.mp4"
+    w.write_bytes(b"w" * 1000)
+    w.with_suffix(".events.json").write_text("{}")
+    assert c.state(str(w), 0)[0] == "preparing"
+    for _ in range(100):
+        if cuts and c.state(str(w), 0)[0] == "ready":
+            break
+        time.sleep(0.02)
+    assert len(cuts) == 1 and c.state(str(w), 0)[0] == "ready", cuts
+    time.sleep(0.2)
+    assert len(cuts) == 1                                              # v still waits: Apex is running
+    apex[0] = False
+    for _ in range(100):
+        if not c.busy():
+            break
+        time.sleep(0.05)
+    assert len(cuts) == 2 and c.state(str(v), 2)[0] == "ready", cuts
+    # a cut stopped halfway (ffmpeg fails, the app closes): no .m4a, no .part left behind
+    if shutil.which("ffmpeg"):
+        bad = folder / "Apex Legends_bad.mp4"
+        bad.write_bytes(b"not a video")
+        out = folder / "Apex Legends_bad.track1.m4a"
+        try:
+            tracks.cut_tracks(str(bad), [(0, out)])
+            raise AssertionError("ffmpeg should fail on a broken file")
+        except subprocess.CalledProcessError:
+            pass
+        assert not out.exists() and not tracks.part_of(out).exists()
+    stale = folder / "Apex Legends_2026.11.17-15.27.track1.part.m4a"
+    stale.write_bytes(b"half")
+    c2 = tracks.Cutter(is_apex_running=lambda: False)
+    c2.clean([folder])
+    assert not stale.exists() and (folder / "Apex Legends_2026.11.17-15.27.track1.m4a").exists()
+
+
+def test_review_kill_feed_our_squad():
+    """Kill feed in the review: each line carries what the scan read (knock / kill, sides, weapon, headshot);
+    repeats of a squad line are marked once; older scans say they have no sides. The page's words."""
+    sig_a, sig_b = "f" * 36, "0" * 36
+    lines = [
+        {"t": 10.0, "jpg": "A", "event": "knock", "weapon": "r97", "weaponName": "R-99", "arrow": True,
+         "killer": {"side": "squad", "hue": 40, "color": "orange"}, "victim": {"side": "other"},
+         "killerSig": sig_a, "victimSig": sig_b},
+        {"t": 11.0, "jpg": "B", "event": "knock", "weapon": "r97", "weaponName": "R-99",    # same line, captured again
+         "killer": {"side": "squad", "hue": 41, "color": "orange"}, "victim": {"side": "other"},
+         "killerSig": sig_a, "victimSig": sig_b},
+        {"t": 20.0, "jpg": "C", "event": "kill", "weaponName": "Wingman", "headshot": True,
+         "killer": {"side": "other"}, "victim": {"side": "squad", "hue": 179, "color": "teal"}},
+        {"t": 30.0, "jpg": "D", "event": "kill", "killer": {"side": "other"}, "victim": {"side": "other"}},
+        {"t": 40.0, "jpg": "E"},
+    ]
+    out, sides = pcs_server.feed_lines(lines)
+    assert sides and len(out) == 5 and [x.get("dup", False) for x in out] == [False, True, False, False, False]
+    assert out[0]["killer"] == {"side": "squad", "hue": 40, "color": "orange"} and "killerSig" not in out[0]
+    assert out[2]["headshot"] is True and out[2]["victim"]["side"] == "squad"
+    old, sides = pcs_server.feed_lines([{"t": 5.0, "jpg": "X"}])
+    assert not sides and old == [{"t": 5.0, "jpg": "X"}]
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
+                 "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
+        assert text in js, text
+
+
+def run_all(tests):
+    """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
+    import traceback
+    failed, skipped = [], []
+    for name, fn in tests:
+        try:
+            fn()
+        except Skipped as e:
+            skipped.append(name)
+            print(f"skip {name}: {e}", flush=True)
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            failed.append(name)
+            print(f"FAIL {name}", flush=True)
+            traceback.print_exc()
+        else:
+            print("ok", name, flush=True)
+    print(f"\n{len(tests) - len(failed) - len(skipped)} passed, {len(failed)} failed, {len(skipped)} skipped", flush=True)
+    for name in failed:
+        print("  failed:", name, flush=True)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     try:
-        for name, fn in list(globals().items()):
-            if name.startswith("test_"):
-                fn(); print("ok", name)
+        code = run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")])
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
+    sys.exit(code)

@@ -1364,6 +1364,83 @@ def test_squads_left_counter():
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
 
 
+def test_game_end_time():
+    """games[].tEndGame = the last in-game HUD read (ring clock, squads counter, own strip, full map) before the next
+    game starts; the debug overlay alone does not count (it also shows in the firing range). tEnd is unchanged.
+    Ring phases first seen after the next game started are dropped; a countdown ending after the game ended for
+    this recording is marked endsAfterGame."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_scan as SCAN
+
+    def s(t, ring=None, pos=True):          # [t, label, ring value, spectating, x, y, z, vel, fine, pre]
+        return [t, 0, ring, False] + ([1.0, 2.0, 3.0] if pos else [None, None, None]) + [0.0, False, False]
+    samples = [s(100, 300), s(400, 50), s(460, None), s(900, None)]           # game 1: ring read last at 400, then overlay only
+    samples += [s(1000, 200), s(1100, 10)]                                       # game 2
+    games = [{"tStart": 90.0, "tEnd": 90.0, "ring": [{"firstSeen": 100.0, "endsAt": 400.0}, {"firstSeen": 400.0, "endsAt": 450.0},
+                                                      {"firstSeen": 960.0, "endsAt": 1100.0}]},
+             {"tStart": 950.0, "tEnd": 950.0, "ring": []}]
+    SCAN.game_ends(games, samples, squads=[(420, 5), (990, 20)], own=[(430, {"damage": 5}), (1150, {"kills": 1})])
+    g1, g2 = games
+    assert g1["tEnd"] == 90.0 and g1["tEndGame"] == 430.0, g1               # own strip at 430; overlay at 460 / 900 not
+    assert g2["tEndGame"] == 1150.0, g2                                       # last game: no cap
+    assert [r["firstSeen"] for r in g1["ring"]] == [100.0, 400.0]             # the phase at 960 is the next game's
+    assert "endsAfterGame" not in g1["ring"][0] and g1["ring"][1]["endsAfterGame"] is True
+    lone = [{"tStart": 5.0, "tEnd": 5.0}]
+    assert SCAN.game_ends(lone, [], None, None)[0]["tEndGame"] == 5.0         # nothing read: ends where it starts
+
+
+def test_scanner_build_stamp():
+    """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
+    build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import json as _json
+    import pcs_scan as SCAN
+    V = SCAN.VERSION
+    with tempfile.TemporaryDirectory() as d:
+        assert SCAN.build_stamp(d) == V + "+source"                            # from source: no build.json
+        b = Path(d) / "build.json"
+        b.write_text(_json.dumps({"version": "dev-52", "base": V}), encoding="utf-8-sig")   # BOM like PowerShell 5 writes
+        assert SCAN.build_stamp(d) == V + "+dev.52"
+        b.write_text(_json.dumps({"version": V, "base": V}))
+        assert SCAN.build_stamp(d) == V
+
+
+def test_fast_colour_masks_identical():
+    """The faster readers (channel planes instead of .min(2) / .max(2), no whole-frame int16 copies, one integral
+    image per feed line) give exactly what the old code gave."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    rng = np.random.default_rng(3)
+    a = rng.integers(0, 256, (60, 90, 3), dtype=np.uint8)
+    a[::7] = 230; a[:, ::5] = (240, 235, 250)                                  # some white strokes
+    p = a.astype(np.int16)
+    mn, mx = HUD.minmax(a)
+    assert np.array_equal(mn, p.min(2)) and np.array_equal(mx, p.max(2)) and np.array_equal(mx - mn, np.ptp(p, axis=2))
+    assert np.array_equal(HUD.minmax(p)[0], p.min(2))
+    for lo in (170, 180):
+        assert np.array_equal(HUD.white(a, lo), (p.min(2) > lo) & (np.ptp(p, axis=2) < 50))
+    old_text = lambda q: ((q.min(2) > 222) & (np.ptp(q, axis=2) < 40)) | \
+        ((q[..., 0] > 210) & (q[..., 1] > 90) & (q[..., 2] < 110) & (q[..., 0] - q[..., 2] > 120)) | \
+        ((q.max(2) > 170) & ((q.max(2) - q.min(2)) > 0.45 * q.max(2)) & ~((q[..., 0] > 150) & (q[..., 1] < 100) & (q[..., 2] < 100)))
+    assert np.array_equal(HUD.Feed._text(p), old_text(p))
+    c = rng.random((40, 120)) * 255                                            # box sums: shared integral image = per-call one
+    I = HUD.Weapons._integral(c)
+    for h, w in ((5, 7), (12, 30)):
+        assert np.array_equal(HUD.Weapons._box(None, h, w, I), HUD.Weapons._box(c, h, w))
+    # whole frames: uint8 in = int16 in (the readers make int16 only the parts they compute on)
+    img = rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8)
+    img[1362:1430] = 10; img[1375:1420, 80:120] = 230                           # the full-map key bar and 'M' keycap
+    img[88:1088:4, 1520:2520:4] = (200, 20, 20)                                 # drop screen gates
+    img[1125:1180, 1740:1800] = (20, 200, 20); img[1125:1180, 2020:2075] = (200, 20, 20)
+    for st in (False, True):
+        assert SCAN.read_dropscreen(img, st) == SCAN.read_dropscreen(img.astype(np.int16), st)
+        assert SCAN.MapReader.is_map(img) == SCAN.MapReader.is_map(img.astype(np.int16)) is True
+        assert SCAN.MapReader().read(img, st) == SCAN.MapReader().read(img.astype(np.int16), st)
+    assert HUD.read_ring(img) == HUD.read_ring(img.astype(np.int16)) and HUD.read_dbg(img) == HUD.read_dbg(img.astype(np.int16))
+
+
 def _tools():
     root = Path(__file__).resolve().parent.parent
     for p in (root / "scanner", root / "tools"):
@@ -1803,7 +1880,72 @@ def test_youtube_video_map_to_hub():
         hub.reset()
 
 
+def test_audio_tracks_cut_after_recording():
+    """The review's separate audio tracks are queued for cutting as soon as a recording ends (not when the review
+    opens); at start, recent recordings without tracks are queued again and unfinished .part files removed."""
+    class FakeCutter:
+        def __init__(self):
+            self.added, self.cleaned = [], []
+
+        def add(self, path, asked=False):
+            self.added.append((Path(path).name, asked))
+
+        def clean(self, folders=()):
+            self.cleaned.append(set(folders))
+    r, ui, clock, read = _silence_recorder({"game": [], "discord": [], "mic": []})
+    r.cutter = FakeCutter()
+    apex = {"on": False}
+    r.is_apex_running = lambda: apex["on"]
+    r._final_file = lambda p, wait_s=0: p
+    apex["on"] = True; r.tick()
+    apex["on"] = False; r.tick()
+    assert r.cutter.added == [("Apex Legends_1.mp4", False)], r.cutter.added       # background, right away
+    # one track only: nothing to cut (the video plays its own sound)
+    r2, *_ = _silence_recorder({"game": []}, tracks=("game",), consent=False)
+    r2.cutter = FakeCutter()
+    r2._queue_tracks(str(TMP / "x.mp4"))
+    assert r2.cutter.added == []
+    # start of the app: a stopped cut's .part file goes, recent recordings without tracks are queued, old ones not
+    folder = Path(r.s.folder)
+    old = make_file(folder, "Apex Legends_old.mp4", 1000)
+    done = make_file(folder, "Apex Legends_done.mp4", 1000)
+    done.with_suffix(".events.json").write_text("{}")
+    time.sleep(0.05)
+    (folder / "Apex Legends_done.track1.m4a").write_bytes(b"x")
+    now = clock["t"]
+    r.idx["old"] = retention.Entry(path=str(old), started=now - 3 * 86400, status="uploaded")
+    r.idx["done"] = retention.Entry(path=str(done), started=now - 3600, status="uploaded")
+    c = r.cutter = FakeCutter()
+    r.resume_tracks()
+    assert c.cleaned and str(folder) in c.cleaned[0]
+    assert c.added == [("Apex Legends_1.mp4", False)], c.added
+    from pcs_recorder import tracks
+    part = folder / "Apex Legends_1.track2.part.m4a"
+    part.write_bytes(b"half")
+    assert tracks.clean_parts([folder]) == 1 and not part.exists()
+    assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
+
+
+def run_all(tests):
+    """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
+    import traceback
+    failed = []
+    for name, fn in tests:
+        try:
+            fn()
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            failed.append(name)
+            print(f"FAIL {name}", flush=True)
+            traceback.print_exc()
+        else:
+            print("ok", name, flush=True)
+    print(f"\n{len(tests) - len(failed)} passed, {len(failed)} failed", flush=True)
+    for name in failed:
+        print("  failed:", name, flush=True)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn(); print("ok", name)
+    sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))

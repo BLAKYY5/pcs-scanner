@@ -19,10 +19,16 @@ NUMRX = re.compile(r'(?<![\d])(-?\d{1,6})[.?\-](\d\d)(?!\d)')
 # map % = cx + X/sx , cy - Y/sy  (fitted from 220 map opens: own arrow vs POS, Oct 2026)
 CAL = {'WE': (914.2, 49.46, 885.1, 49.82), 'ED': (902.9, 49.03, 861.1, 50.39), 'SP': (1024.1, 49.17, 1070.4, 50.63)}
 
+def minmax(s):
+    """Per-pixel min and max over the colour channels, as int16. Same values as s.min(2) / s.max(2), but numpy's
+    reduction over a 3-long last axis is slow (about 8x slower than combining the three channel planes)."""
+    r, g, b = s[..., 0], s[..., 1], s[..., 2]
+    return (np.minimum(np.minimum(r, g), b).astype(np.int16), np.maximum(np.maximum(r, g), b).astype(np.int16))
+
 def white(s, lo=180):
-    s = s.astype(np.int16)
     if LOOSE: lo = min(lo, 165)
-    return (s.min(2) > lo) & ((s.max(2) - s.min(2)) < 50)
+    mn, mx = minmax(s)
+    return (mn > lo) & ((mx - mn) < 50)
 
 # ---------- ring clock ----------
 def _glyph(m, T=RING_T, hmin=18, hmax=26):
@@ -48,7 +54,7 @@ def _runs(m, x0, x1, n):
 def read_ring(a):
     for off in (0, SPEC_OFF):
         if white(a[441 + off:442 + off, 70:370]).mean() < 0.8: continue
-        m = white(a[449 + off:478 + off])
+        m = white(a[449 + off:478 + off, :400])     # the clock's columns only (digits to x 375, label from x 60)
         d = [_glyph(m[:, x0 - 2:x1 + 2]) for x0, x1 in RSLOTS]
         if None in d: return None
         sep = m[:, 314:336]
@@ -63,12 +69,14 @@ def read_ring(a):
         c = a[417 + off:465 + off, 131:179].astype(np.int16)
         orange = (c[..., 0] > 190) & (c[..., 1] > 90) & (c[..., 1] < 180) & (c[..., 2] < 90)
         reddish = (c[..., 0] > 110) & (c[..., 0] - c[..., 2] > 25) & (c[..., 0] - c[..., 1] > 25)   # later rounds: dull red ring
-        ring_w = ((c.min(2) > 190) & (np.ptp(c, axis=2) < 40)).sum()
+        cmn, cmx = minmax(c)
+        icon = (cmn > 190) & ((cmx - cmn) < 40)
+        ring_w = icon.sum()
         if orange.sum() < 30 and not (reddish.sum() >= 30 and ring_w >= 40) and not (LOOSE and ring_w >= 150): continue
-        m = (a[422 + off:460 + off].astype(np.int16).min(2) > (165 if LOOSE else 190)) & (np.ptp(a[422 + off:460 + off].astype(np.int16), axis=2) < 40)
+        mn, mx = minmax(a[422 + off:460 + off, :400])     # the clock's columns only (digits to x 345)
+        m = (mn > (165 if LOOSE else 190)) & ((mx - mn) < 40)
         d = [_glyph(m[:, x0:x1], PRE_T, 24, 34) for x0, x1 in (_runs(m, 195, 345, 4) if LOOSE else PSLOTS)]
         if None in d or d[2] > 5: return None
-        icon = (c.min(2) > 190) & (np.ptp(c, axis=2) < 40)
         return {'v': (d[0] * 10 + d[1]) * 60 + d[2] * 10 + d[3], 'fine': False, 'spec': off > 0, 'lab': icon, 'pre': True}
     return None
 
@@ -311,8 +319,12 @@ class Weapons:
                 self.T.append((n, t.shape, float(np.sqrt((tz * tz).sum())) + 1e-6, np.conj(np.fft.rfft2(pad))))
         except Exception: self.T = []
     @staticmethod
-    def _box(a, h, w):
-        c = np.pad(a, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    def _integral(a):
+        return np.pad(a, ((1, 0), (1, 0))).cumsum(0).cumsum(1)
+    @staticmethod
+    def _box(a, h, w, c=None):
+        """Sums of every h x w window of a; c: a's integral image (_integral), computed once for all icons."""
+        if c is None: c = Weapons._integral(a)
         return c[h:, w:] - c[:-h, w:] - c[h:, :-w] + c[:-h, :-w]
     def match(self, rgb):
         """rgb: one feed line at full size (rows x cols x 3). -> None or {'weapon', 'score', 'x', 'y', 'w', 'h'}."""
@@ -320,10 +332,11 @@ class Weapons:
         g = np.asarray(rgb, np.float32).min(2)[:self.FH, :self.FW]     # white icon stays bright, coloured names drop
         H, Wd = g.shape; c = np.zeros((self.FH, self.FW), np.float64); c[:H, :Wd] = g
         G = np.fft.rfft2(c); best = None; good = []
+        I1 = self._integral(c[:H, :Wd]); I2 = self._integral(c[:H, :Wd] ** 2)     # once per line, not per icon
         for n, (th, tw), tn, F in self.T:
             if th > H or tw > Wd: continue
             num = np.fft.irfft2(G * F, s=(self.FH, self.FW))[:H - th + 1, :Wd - tw + 1]
-            k = th * tw; S = self._box(c[:H, :Wd], th, tw); S2 = self._box(c[:H, :Wd] ** 2, th, tw)
+            k = th * tw; S = self._box(None, th, tw, I1); S2 = self._box(None, th, tw, I2)
             sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * self.STD ** 2)) * tn)
             i = int(sc.argmax()); y, x = divmod(i, sc.shape[1])
             r = {'weapon': n, 'score': float(sc[y, x]), 'x': x, 'y': y, 'w': tw, 'h': th}
@@ -477,9 +490,9 @@ class Feed:
     @staticmethod
     def _text(p):
         r, g, b = p[..., 0], p[..., 1], p[..., 2]
-        white = (p.min(2) > 222) & (np.ptp(p, axis=2) < 40)
+        mn, mx = minmax(p)
+        white = (mn > 222) & ((mx - mn) < 40)
         warm = (r > 210) & (g > 90) & (b < 110) & (r - b > 120)          # orange / yellow highlights
-        mx = p.max(2); mn = p.min(2)
         squad = (mx > 170) & ((mx - mn) > 0.45 * mx) & ~((r > 150) & (g < 100) & (b < 100))   # squad-coloured names (teal, blue, green, purple...), not the red knock arrow
         return white | warm | squad
     @staticmethod

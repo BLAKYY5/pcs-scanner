@@ -385,18 +385,23 @@ function buildEvents(d) {
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: 'Jumped from the ship'});
     if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: ours ? 'at ' + poiName(ours.poi) : ''});
     (g.ring || []).forEach(r => {
-      const n = r.round ? ' ' + r.round : '';
+      const n = r.round ? ' ' + r.round : '', after = r.endsAfterGame ? ' · after your game ended' : '';
       if (r.kind === 'wait') {
-        ev.push({t: r.appearedAt ?? r.firstSeen, k: 'ring', g: gi, title: `Ring${n} announced`, sub: r.endsAt ? 'closes at ' + fmtT(r.endsAt) : ''});
-        if (r.endsAt) ev.push({t: r.endsAt, k: 'ringclose', g: gi, title: `Ring${n} starts closing`});
+        ev.push({t: r.appearedAt ?? r.firstSeen, k: 'ring', g: gi, title: `Ring${n} announced`, sub: r.endsAt ? 'closes at ' + fmtT(r.endsAt) + after : ''});
+        if (r.endsAt) ev.push({t: r.endsAt, k: 'ringclose', g: gi, title: `Ring${n} starts closing`, sub: after.slice(3), after: !!r.endsAfterGame});
       } else {
-        ev.push({t: r.firstSeen, k: 'ringclose', g: gi, title: `Ring${n} closing`, sub: r.endsAt ? 'until ' + fmtT(r.endsAt) : ''});
+        ev.push({t: r.firstSeen, k: 'ringclose', g: gi, title: `Ring${n} closing`, sub: r.endsAt ? 'until ' + fmtT(r.endsAt) + after : ''});
       }
     });
   });
-  const groups = new Map();
-  (d.feed || []).forEach(l => { const k = l.t.toFixed(2); groups.set(k, (groups.get(k) || 0) + 1); });
-  groups.forEach((n, k) => ev.push({t: +k, k: 'feed', title: 'Kill feed', sub: n > 1 ? n + ' lines' : ''}));
+  // kill feed: only the lines with our squad on one side (each line once; older scans without sides: none)
+  const games = d.games || [];
+  const gameOf = t => { let gi = games.length ? 0 : -1; games.forEach((g, i) => { if (gameStart(g) <= t + 1) gi = i; }); return gi; };
+  if (d.feedSides) (d.feed || []).forEach(l => {
+    if (l.dup) return;
+    const gi = gameOf(l.t), e = feedEvent(l, games[gi]);
+    if (e) ev.push(Object.assign(e, {t: l.t, k: 'feed'}, gi >= 0 ? {g: gi} : {}));
+  });
   (d.marks || []).forEach(m => {
     if (m.kind === 'mark') ev.push({t: m.t, k: 'mark', title: 'Marked moment', sub: 'hotkey pressed in game'});
     else if (m.kind === 'mute') ev.push({t: m.t, k: 'mute', title: `${TRACKN[m.track] || m.track} ${m.muted ? 'muted' : 'back on'}`});
@@ -404,10 +409,35 @@ function buildEvents(d) {
   ev.sort((a, b) => a.t - b.t);
   return ev;
 }
+/* a kill-feed line and our squad: 'us' (one of us knocked or killed), 'them' (one of us went down), or null
+   (not our squad on either side, both sides ours = firing range / friendly, or a line the scan couldn't read) */
+function feedSide(l) {
+  const k = l.killer && l.killer.side === 'squad', v = l.victim && l.victim.side === 'squad';
+  if (!l.event || k === v) return null;
+  return k ? 'us' : 'them';
+}
+function squadWho(side, g) {       /* 'You' or the legend of the squad slot drawn in that colour, else null */
+  const sq = (g && g.select && g.select.squad) || [];
+  if (!side || side.hue == null) return null;
+  let best = null, bd = 21;
+  sq.forEach(q => { if (q.hue == null) return; const dh = Math.abs(side.hue - q.hue), dd = Math.min(dh, 360 - dh); if (dd < bd) { bd = dd; best = q; } });
+  if (!best) return null;
+  return best.self ? 'You' : best.legend ? legendName(best.legend) : null;
+}
+function feedEvent(l, g) {
+  const side = feedSide(l); if (!side) return null;
+  const knock = l.event === 'knock';
+  let what;
+  if (side === 'us') what = `${squadWho(l.killer, g) || 'We'} ${knock ? 'knocked' : 'killed'}`;
+  else { const who = squadWho(l.victim, g) || 'We'; what = `${who} ${knock ? 'got knocked' : 'died'}`; }
+  return {title: [what, l.weaponName, l.headshot ? 'headshot' : ''].filter(Boolean).join(' · '), lost: side === 'them'};
+}
 function gameSpans(d) {
   return (d.games || []).map(g => {
     const tr = g.track || [];
-    const end = Math.max(g.tEnd || 0, tr.length ? tr[tr.length - 1][0] : 0, ...(g.ring || []).map(r => r.lastSeen || 0));
+    // tEndGame (scanner 1.10.9+): the last in-game HUD read = the game's end for this recording; older scans: guessed
+    const end = g.tEndGame != null ? g.tEndGame :
+      Math.max(g.tEnd || 0, tr.length ? tr[tr.length - 1][0] : 0, ...(g.ring || []).map(r => r.lastSeen || 0));
     return {from: g.tStart, to: end, map: g.map, mode: g.mode};
   });
 }
@@ -426,7 +456,7 @@ async function renderReview(id) {
       <div class="toolbar"><a class="btn ghost" href="#recordings">← Recordings</a>
         ${!d.scan ? '<button class="btn brand" id="rvScan">Scan this recording</button>' : ''}
         <button class="btn" id="rvOpen">Open file</button></div></div>
-    <div class="review">
+    <div class="review${theatreOn() ? ' theatre' : ''}">
       <div>
         <div class="player" id="player"><video id="vid" controls controlslist="nofullscreen" preload="metadata" src="/video/${d.id}?t=${encodeURIComponent(TOKEN)}"></video>
           <canvas class="ink" id="ink" hidden></canvas><div class="cnote" id="cnote" hidden></div>
@@ -444,12 +474,12 @@ async function renderReview(id) {
             <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>We knocked / killed</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>We went down</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
-              <button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
+              <button class="btn small" id="rvTheatre" title="Video across the whole window (T)">Theatre</button><button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
           <div id="mixer"></div>
-          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>F</kbd> full screen · <kbd>M</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
+          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen ·<kbd>M</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
         </div>
       </div>
       <aside class="card side">
@@ -475,6 +505,7 @@ async function renderReview(id) {
   drawTimeline(); drawSide();
   loadLevels(d.id);
   $('#rvFull').onclick = fullScreen;
+  $('#rvTheatre').onclick = () => theatre(); theatre(theatreOn(), true);
   setupInk(v);
   loadNotes(d.id);
 }
@@ -496,6 +527,18 @@ function fullScreen() {           /* the player box, not the bare video: the coa
   const p = $('#player'); if (!p) return;
   document.fullscreenElement ? document.exitFullscreen() : p.requestFullscreen().catch(() => {});
 }
+/* theatre: the video across the whole window, the events / kill feed / drop panel below it (remembered) */
+function theatreOn() { try { return localStorage.getItem('pcs-theatre') === '1'; } catch (x) { return false; } }
+function theatre(on, quiet) {
+  const r = $('.review'); if (!r) return;
+  if (on == null) on = !r.classList.contains('theatre');
+  r.classList.toggle('theatre', on);
+  const b = $('#rvTheatre'); if (b) { b.classList.toggle('brand', on); b.textContent = on ? 'Normal view' : 'Theatre'; }
+  if (quiet) return;
+  try { localStorage.setItem('pcs-theatre', on ? '1' : '0'); } catch (x) {}
+  fitInk(); drawSound();                    // the drawings follow the picture's new size at once
+  requestAnimationFrame(() => { fitInk(); drawSound(); });
+}
 function dur() {
   if (RV.dur) return RV.dur;
   const last = Math.max(0, ...RV.ev.map(e => e.t), ...RV.spans.map(s => s.to || 0));
@@ -515,7 +558,7 @@ function drawTimeline() {
     (RV.d.games || []).map(g => (g.squadsLeft || []).map(([t, n]) =>
       `<i class="sqt" data-t="${t}" style="left:${pct(t)}" title="${fmtT(t)} · ${n} squad${n === 1 ? '' : 's'} left"></i>`).join('')).join('');
   $('#laneE').innerHTML = '<span class="lane-label">Start · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
-    `<button class="mk ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
+    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
     const marks = RV.d.marks || [], spans = [], open = {};
@@ -525,8 +568,8 @@ function drawTimeline() {
       spans.map(([tr, a, b]) => `<div class="muted-span ${tr}" data-t="${a}" style="left:${pct(a)};width:${pct(b - a)}" title="${esc(TRACKN[tr] || tr)} muted ${fmtT(a)}–${fmtT(b)}"></div>`).join('') +
       marks.filter(m => m.kind === 'mark').map(m => `<button class="mk mark" data-t="${m.t}" style="left:${pct(m.t)}" title="${fmtT(m.t)} · marked moment">★</button>`).join('');
   }
-  $('#laneF').innerHTML = '<span class="lane-label">Kill feed</span>' + RV.ev.filter(e => e.k === 'feed').map(e =>
-    `<div class="tick" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · kill feed${e.sub ? ' (' + e.sub + ')' : ''}"></div>`).join('');
+  $('#laneF').innerHTML = '<span class="lane-label">Kill feed · our squad</span>' + RV.ev.filter(e => e.k === 'feed').map(e =>
+    `<div class="tick${e.lost ? ' lost' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}"></div>`).join('');
   const ln = $('#laneN'), notes = (RV.notes && RV.notes.notes) || [];
   if (ln) {
     ln.hidden = !notes.length;
@@ -542,16 +585,19 @@ function drawSide() {
   if (RV.tab === 'events') {
     let html = '', g = -1;
     RV.ev.forEach((e, i) => {
-      if (e.k === 'feed') return;                     // kill feed lines have their own tab
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
-      const col = {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
+      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
       html += `<div class="ev" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';
   } else if (RV.tab === 'feed') {
-    const f = d.feed || [];
-    body.innerHTML = f.length ? '<div class="feed">' + f.map(l => `<div class="ln" data-t="${l.t}"><time class="mono muted">${fmtT(l.t)}</time><img alt="Kill feed line at ${fmtT(l.t)}" src="data:image/jpeg;base64,${l.jpg}"></div>`).join('') + '</div>' :
-      '<div class="empty">No kill feed lines in this recording.</div>';
+    const all = d.feed || [], only = RV.feedOnly !== false && !!d.feedSides;
+    const f = only ? all.filter(l => feedSide(l)) : all;
+    const head = !all.length ? '' : d.feedSides ? `<label class="feedopt"><input type="checkbox" id="feedOnly" ${only ? 'checked' : ''}> Only our squad</label>` :
+      '<div class="feedopt faint">Kill feed sides not read in this scan</div>';
+    body.innerHTML = head + (f.length ? '<div class="feed">' + f.map(l => `<div class="ln" data-t="${l.t}"><time class="mono muted">${fmtT(l.t)}</time><img alt="Kill feed line at ${fmtT(l.t)}" src="data:image/jpeg;base64,${l.jpg}"></div>`).join('') + '</div>' :
+      `<div class="empty">${all.length ? 'No kill feed lines with your squad.' : 'No kill feed lines in this recording.'}</div>`);
+    const fo = $('#feedOnly', body); if (fo) fo.onchange = () => { RV.feedOnly = fo.checked; drawSide(); };
   } else {
     body.innerHTML = (d.games || []).map((g, i) => dropHTML(g, i)).join('') || '<div class="empty">No drop map found.</div>';
   }
@@ -602,6 +648,7 @@ document.addEventListener('keydown', e => {
   else if (k === ']') { const n = times.find(t => t > v.currentTime + 0.3); if (n != null) seek(n); }
   else if (k === '[') { const p = times.filter(t => t < v.currentTime - 1).pop(); seek(p != null ? p : 0); }
   else if (k === 'f' || k === 'F') fullScreen();
+  else if (k === 't' || k === 'T') theatre();
   else if (k === 'v' || k === 'V') { const o = $('#seen'); if (o && RV.d.scan) { o.hidden = !o.hidden; try { localStorage.setItem('pcs-seen', o.hidden ? '0' : '1'); } catch (x) {} } }
   else if (k === 'm' || k === 'M') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
   else return;
@@ -902,27 +949,57 @@ function setupAudio(d, v) {
   const tracks = d.audio || [];
   if (tracks.length < 2) return;                       // one track: the video plays it itself
   v.muted = true;
-  RV.aud = tracks.map(t => ({t, a: new Audio(`/audio/${d.id}/${t.n}?t=${encodeURIComponent(TOKEN)}`), vol: 1, mute: false}));
-  RV.aud.forEach(x => { x.a.preload = 'auto'; x.a.addEventListener('error', () => { x.err = true; drawMixer(); }); });
-  const all = f => RV.aud.forEach(x => { try { f(x.a); } catch (e) {} });
+  const url = t => `/audio/${d.id}/${t.n}?t=${encodeURIComponent(TOKEN)}`;
+  // each track is its own file, cut from the recording in the background: until it is ready the server answers
+  // 503 and the mixer says "Preparing…"; the track joins at the video's position as soon as it is there
+  const aud = RV.aud = tracks.map(t => ({t, a: null, vol: 1, mute: false, prep: false, err: false}));
+  const live = () => page === 'review' && RV && RV.aud === aud;
+  const all = f => aud.forEach(x => { if (x.a) try { f(x.a); } catch (e) {} });
+  const sync = a => {               // to the video's time, speed and play state (a no-op until the track has data)
+    if (!live() || a.readyState < 1) return;
+    try {
+      if (Math.abs(a.currentTime - v.currentTime) > 0.2) a.currentTime = v.currentTime;
+      a.playbackRate = v.playbackRate;
+      if (v.paused) a.pause(); else if (a.paused) a.play().catch(() => {});
+    } catch (e) {}
+  };
+  const attach = x => {
+    const a = new Audio(); x.a = a; x.prep = false;
+    a.preload = 'auto'; a.volume = x.vol; a.muted = x.mute;
+    a.addEventListener('error', () => { x.err = true; drawMixer(); });
+    // a time set before the track's data arrived is ignored: set it again once it can be used
+    ['loadedmetadata', 'canplay'].forEach(n => a.addEventListener(n, () => sync(a)));
+    a.src = url(x.t);
+    drawMixer();
+  };
+  const check = async x => {
+    if (!live()) return;
+    let st = 0;
+    try { st = (await fetch(url(x.t), {method: 'HEAD'})).status; } catch (e) { st = -1; }
+    if (!live()) return;
+    if (st === 200 || st === 206) return attach(x);
+    if (st === 503 || st === -1) { if (!x.prep) { x.prep = true; drawMixer(); } setTimeout(() => check(x), 3000); return; }
+    x.err = true; x.prep = false; drawMixer();
+  };
+  aud.forEach(check);
   v.addEventListener('play', () => all(a => { a.currentTime = v.currentTime; a.playbackRate = v.playbackRate; a.play().catch(() => {}); }));
   v.addEventListener('pause', () => all(a => a.pause()));
   v.addEventListener('seeking', () => all(a => a.currentTime = v.currentTime));
   v.addEventListener('ratechange', () => all(a => a.playbackRate = v.playbackRate));
   v.addEventListener('volumechange', () => { if (!v.muted) v.muted = true; });   // sound comes from the tracks
   setupAudio.h = setInterval(() => {
-    if (page !== 'review' || !RV || !RV.aud) { clearInterval(setupAudio.h); all(a => a.pause()); return; }
-    if (!v.paused) all(a => { if (Math.abs(a.currentTime - v.currentTime) > 0.2) a.currentTime = v.currentTime; });
+    if (!live()) { clearInterval(setupAudio.h); all(a => { a.pause(); a.removeAttribute('src'); a.load(); }); return; }
+    all(a => { if (!v.paused || !a.paused) sync(a); });
   }, 500);
   applyMix(); drawMixer();
 }
-function applyMix() { (RV.aud || []).forEach(x => { x.a.volume = x.vol; x.a.muted = x.mute; }); }
+function applyMix() { (RV.aud || []).forEach(x => { if (x.a) { x.a.volume = x.vol; x.a.muted = x.mute; } }); }
 function drawMixer() {
   const m = $('#mixer'); if (!m || !RV.aud) return;
   m.innerHTML = '<div class="mixer">' + RV.aud.map((x, i) => `<div class="trk ${x.mute ? 'off' : ''}">
       <button class="btn small ${x.mute ? '' : 'brand'}" data-i="${i}" data-a="mute" title="Mute / unmute">${esc(x.t.label)}</button>
       <input type="range" min="0" max="1" step="0.05" value="${x.vol}" data-i="${i}" aria-label="${esc(x.t.label)} volume">
-      ${x.err ? '<span class="pill bad">not available</span>' : ''}</div>`).join('') + '</div>';
+      ${x.err ? '<span class="pill bad">not available</span>' : x.prep ? `<span class="pill warn" title="Being copied out of the recording. It starts by itself when ready.">Preparing ${x.t.key === 'game' ? 'game sound' : esc(x.t.label)}…</span>` : ''}</div>`).join('') + '</div>';
   $$('[data-a=mute]', m).forEach(b => b.onclick = () => { const x = RV.aud[+b.dataset.i]; x.mute = !x.mute; applyMix(); drawMixer(); });
   $$('input[type=range]', m).forEach(r => r.oninput = () => { RV.aud[+r.dataset.i].vol = +r.value; applyMix(); });
 }
