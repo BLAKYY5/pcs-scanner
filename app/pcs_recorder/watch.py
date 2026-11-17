@@ -130,12 +130,12 @@ class Watch:
         except Exception:
             return False
         log.info("Apex started: leaving the session")
-        self.leave("apex")
-        if self.on_apex_left:
+        if self.on_apex_left:                      # first, like a leave by hand (review talk stops, then leave)
             try:
                 self.on_apex_left()
             except Exception:
-                log.exception("after leaving for Apex")
+                log.exception("before leaving for Apex")
+        self.leave("apex")
         return True
 
     def leave(self, why: str = "left") -> None:
