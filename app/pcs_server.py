@@ -148,7 +148,8 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
-               "select", "banner", "squadsLeft", "own", "feedStats")
+               "select", "banner", "squadsLeft", "own", "feedStats",
+               "ringCircles")
 
 
 def _same_sig(a, b) -> bool:
@@ -826,6 +827,21 @@ class Backend:
         from pcs_recorder import minimaps
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
 
+    def squad_paths(self, q: dict) -> dict:
+        """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
+        from pcs_recorder import squadpaths
+        url, one = (self.auto.s.hub_url if self.auto else ""), (lambda k: (q.get(k) or [""])[0])
+        if one("gameKey"):
+            return squadpaths.get(url, game_key=one("gameKey")[:60])
+        it = self.find(one("id"))
+        if not it:
+            raise RuntimeError("Recording not found")
+        try:
+            jump = float(one("jump"))
+        except ValueError:
+            jump = None
+        return squadpaths.get(url, recording=Path(it["path"]).stem, jump=jump)
+
     # ------------------------------------------------------------- watch together (team hub sessions)
     @property
     def watch(self):
@@ -1226,6 +1242,8 @@ class Server:
                         return self._file(*pic) if pic else self._json({"error": "not found"}, 404)
                     if path.startswith("/api/minimap/"):
                         return self._json(b.minimap(path.split("/")[3]))
+                    if path == "/api/squadpaths":                # teammates' paths on the map (minimap.js)
+                        return self._json(b.squad_paths(q))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
                         return self._video(None, str(b.watch.audio(path.split("/")[2])))
                     if path.startswith("/audio/"):

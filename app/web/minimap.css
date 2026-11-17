@@ -31,3 +31,15 @@
   .side:has(> .mm:not([hidden])) .tabs{grid-column:2;grid-row:1;margin:-4px 0 12px}
   .side:has(> .mm:not([hidden])) .scroll{grid-column:2;grid-row:2;max-height:min(41vw,56vh);margin:0}
 }
+/* marks on the map (rings, kill feed, coach notes) and the Squad switch (teammates' paths) */
+.mm-k.ring{background:none;border:2px solid #fff;width:9px;height:9px}
+.mm-k.kill,.mm-k.down{border-radius:0;background:linear-gradient(45deg,transparent 40%,#ff453a 40%,#ff453a 60%,transparent 60%),linear-gradient(-45deg,transparent 40%,#ff453a 40%,#ff453a 60%,transparent 60%)}
+.mm-k.down{background:linear-gradient(45deg,transparent 40%,#b8b5ad 40%,#b8b5ad 60%,transparent 60%),linear-gradient(-45deg,transparent 40%,#b8b5ad 40%,#b8b5ad 60%,transparent 60%)}
+.mm-k.note{background:#ffd60a;border-radius:1px}
+.mm-head .btn.on{border-color:var(--accent);color:var(--ink)}
+.mm-squad{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:12px}
+.mm-squad span{display:inline-flex;align-items:center;gap:5px}
+/* Watch together: the large view's player on the map, beside the members and lists */
+.wt-map{width:min(100%,380px);margin:0}
+.wt-map .mm-box{max-width:none;max-height:none}
+@media(max-width:999px){.wt-map{width:100%}.wt-map .mm-box{max-width:min(100%,60vh);margin:0 auto}}
