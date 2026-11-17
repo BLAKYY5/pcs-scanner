@@ -679,6 +679,53 @@ def test_quality_setting():
     assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
 
 
+def test_obs_password_renewed_once_while_obs_closed():
+    """Versions up to 1.10.10 had the remote-control password written in app.log: it is replaced once by a new
+    random one, only while our OBS is closed, written to OBS's config before OBS starts, saved in recorder.json,
+    and the recorder connects with it."""
+    import json
+    from pcs_recorder import obs as obsmod
+    from pcs_recorder import runtime
+    s = settings.Settings(folder=str(TMP / "pw"))
+    s.obs_password, s.obs_password_new = "old-logged-one", False
+    running, events = [True], []
+
+    class FakeOBS:
+        def __init__(self, st):
+            self.s = st
+
+        def connect(self, wait_s=40):
+            written = json.loads((obsmod.CONFIG / "plugin_config" / "obs-websocket" / "config.json").read_text())
+            events.append(("connect", self.s.obs_password, written["server_password"]))
+
+        def prepare(self, w, h, enc=None):
+            pass
+    saved = (obsmod.OBS, obsmod.installed, obsmod.is_running, obsmod.launch, obsmod.close, runtime.screen_size)
+    obsmod.OBS, obsmod.installed = FakeOBS, lambda: True
+    obsmod.is_running = lambda: running[0]
+    obsmod.launch = lambda: (events.append("launch"), running.__setitem__(0, True))
+    obsmod.close = lambda: (events.append("close"), running.__setitem__(0, False))
+    runtime.screen_size = lambda: (1920, 1080)
+    try:
+        # OBS already running (it may be recording): not now
+        assert obsmod.renew_password(s) is False and s.obs_password == "old-logged-one"
+        a = runtime.ObsAdapter(s)
+        a.ensure_ready()                     # left running by an older start: restarted, renewed while closed
+        assert events[:2] == ["close", "launch"], events
+        new = s.obs_password
+        assert new != "old-logged-one" and len(new) >= 20 and s.obs_password_new
+        assert events[2] == ("connect", new, new)                 # OBS got it, the recorder uses it
+        on_disk = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+        assert on_disk["obs_password"] == new and on_disk["obs_password_new"] is True
+        # next OBS start: same password (once only)
+        running[0], a.ready = False, False
+        a.ensure_ready()
+        assert s.obs_password == new and events[-1] == ("connect", new, new)
+        assert settings.load().obs_password == new
+    finally:
+        obsmod.OBS, obsmod.installed, obsmod.is_running, obsmod.launch, obsmod.close, runtime.screen_size = saved
+
+
 def test_message_window_placement():
     """Runs where a screen exists (the Windows build machine); skipped elsewhere."""
     try:

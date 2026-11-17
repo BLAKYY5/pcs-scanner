@@ -533,8 +533,95 @@ def test_update_finisher():
         core.finish_update(str(cur), "999999")             # that process doesn't exist: no waiting
     finally:
         sys.executable, core.spawn_detached = real_exe, real_spawn
-    assert cur.read_bytes() == b"MZ new version" and started == [[str(cur)]]
-    assert "copied, starting the new version" in Path(core.UPDATE_LOG).read_text()
+    # started by an older version (no --show) or from the corner message: back in the tray, saying it updated
+    assert cur.read_bytes() == b"MZ new version" and started == [[str(cur), "--background", "--updated"]]
+    assert "copied, starting the new version (tray)" in Path(core.UPDATE_LOG).read_text()
+    # the player pressed Update in the open window: the window comes back
+    started.clear()
+    sys.executable, core.spawn_detached = str(new), started.append
+    try:
+        core.finish_update(str(cur), "999999", show=True)
+    finally:
+        sys.executable, core.spawn_detached = real_exe, real_spawn
+    assert started == [[str(cur)]]
+    # copy failed: the old version is started as before, with its window (it doesn't know --updated)
+    assert core.relaunch_args(str(cur), False, False) == [str(cur)]
+
+
+def test_update_relaunch_arguments():
+    """The window's Update button restarts with the window; the corner message's button (window not open) in the
+    tray. The finisher is started with --show only in the first case."""
+    b = pcs_server.Backend(_Auto(str(TMP / "recs-upd2")))
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
+    got, spawned = [], []
+    real_install, real_blocked = core.install_update, b.update_blocked
+    core.install_update = lambda url, log, size=None, show=False: (got.append(show), False)[1]
+    b.update_blocked = lambda: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        assert call(srv, "/api/update", {})[0] == 200 and got == [True]
+        assert b.install_update() is None and got == [True, False]
+    finally:
+        core.install_update = real_install
+        srv.stop()
+    # what install_update starts: the downloaded exe with --finish-update, and --show only when asked
+    new = TMP / "dl" / "PCS-Scanner.exe"
+    new.parent.mkdir(exist_ok=True)
+    real = (sys.executable, core.spawn_detached, core.urllib.request.urlretrieve, getattr(sys, "frozen", None))
+    sys.executable, core.spawn_detached, sys.frozen = str(new), spawned.append, True
+    core.urllib.request.urlretrieve = lambda url, p: Path(p).write_bytes(b"MZ" + b"x" * 10)
+    try:
+        assert core.install_update("https://x", lambda m: None, 12, show=False)
+        assert core.install_update("https://x", lambda m: None, 12, show=True)
+    finally:
+        sys.executable, core.spawn_detached, core.urllib.request.urlretrieve = real[:3]
+        if real[3] is None:
+            del sys.frozen
+        else:
+            sys.frozen = real[3]
+    staged = str(new.parent / "PCS-Scanner.update.exe")
+    assert spawned[0] == [staged, "--finish-update", str(new), str(os.getpid())], spawned
+    assert spawned[1] == [staged, "--finish-update", str(new), str(os.getpid()), "--show"], spawned
+    # the app restarted by the updater never closes itself, even with auto-record and start-with-Windows off
+    src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+    assert "if background and not updated and not" in src and "'--updated' in sys.argv" in src
+    assert "show='--show' in sys.argv" in src
+
+
+def test_no_password_in_app_log():
+    """The OBS library logs its password when it connects: that never reaches app.log, and lines an older version
+    wrote are cleaned at start (the file otherwise unchanged; a file held open elsewhere is left for next time)."""
+    import logging
+    secret = "Zq9-secretPW_4466"
+    log_f = Path(core.LOG_F)
+    import obsws_python as obsws
+    try:
+        obsws.ReqClient(host="127.0.0.1", port=1, password=secret, timeout=1)    # nothing listens: fails at once
+    except Exception:
+        pass
+    logging.getLogger("obsws_python.baseclient.ObsClient").warning(
+        "Connecting with parameters: host='127.0.0.1' port=4466 password='%s' subs=0 timeout=5", secret)
+    logging.getLogger("recorder").info("ReqClient(host='x', port=1, password=%s, timeout=5)", secret)
+    for h in logging.getLogger().handlers:
+        h.flush()
+    text = log_f.read_text(encoding="utf-8", errors="replace")
+    assert secret not in text and text.count("password=***") >= 2, text[-600:]
+    # an old log
+    old = TMP / "old-app.log"
+    lines = ["2026-11-15 18:00:01 INFO recorder: Recording started\n",
+             f"2026-11-15 18:00:02 INFO obsws_python.baseclient.ObsClient: Connecting with parameters: host='127.0.0.1' "
+             f"port=4466 password='{secret}' subs=0 timeout=5\n",
+             "2026-11-15 18:00:03 INFO recorder: café → fine\n"]
+    old.write_text("".join(lines), encoding="utf-8")
+    if os.name == "nt":                                    # held open by another program: left as it is
+        with open(old, "a", encoding="utf-8"):
+            assert core.scrub_log(str(old)) == 0
+        assert secret in old.read_text(encoding="utf-8") and not Path(str(old) + ".scrub").exists()
+    assert core.scrub_log(str(old)) == 1
+    assert old.read_text(encoding="utf-8") == "".join(lines).replace(f"password='{secret}'", "password=***")
+    assert core.scrub_log(str(old)) == 0                   # nothing left to clean
+    assert core.scrub_log(str(TMP / "missing.log")) == 0
 
 
 class Skipped(Exception):
@@ -1322,6 +1409,127 @@ def test_review_kill_feed_our_squad():
     for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
                  "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
         assert text in js, text
+
+
+def _edge():
+    for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
+        p = Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+        if base and p.exists():
+            return p
+    return None
+
+
+class _Page:
+    """The app's page in a headless Edge, driven over the DevTools protocol (no extra library: websocket-client
+    comes with the OBS library). Skipped where Edge isn't installed."""
+
+    def __init__(self, url):
+        import subprocess
+        import websocket
+        self.proc = None
+        port = int(os.environ.get("PCS_TEST_CDP_PORT") or 0)   # a browser already open with remote debugging
+        if not port:
+            edge = _edge()
+            if os.name != "nt" or not edge:
+                raise Skipped("no Microsoft Edge on this PC")
+            self.prof = Path(tempfile.mkdtemp(dir=TMP))
+            self.proc = subprocess.Popen([str(edge), "--headless=new", "--remote-debugging-port=0", "--no-first-run",
+                                          f"--user-data-dir={self.prof}", "--window-size=1320,860", "about:blank"])
+            port_f, end = self.prof / "DevToolsActivePort", time.time() + 30
+            while not (port_f.exists() and port_f.read_text().strip()) and time.time() < end:
+                time.sleep(0.2)
+            port = int(port_f.read_text().split()[0])
+        end = time.time() + 20
+        while True:
+            try:
+                tabs = json.load(urllib.request.urlopen(f"http://127.0.0.1:{port}/json", timeout=5))
+                page = next(t for t in tabs if t.get("type") == "page")
+                break
+            except Exception:
+                if time.time() > end:
+                    raise
+                time.sleep(0.3)
+        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
+        self.n = 0
+        self.send("Page.navigate", {"url": url})
+        end = time.time() + 20
+        while self.js("typeof PCS_POLL") != "object":
+            if time.time() > end:
+                raise AssertionError("the page didn't load")
+            time.sleep(0.2)
+        # document.hidden is set by the test (headless Edge has no window to hide); the page reads it at each step
+        self.js("let __h = false; Object.defineProperty(document, 'hidden', {configurable: true, get: () => __h});"
+                "Object.defineProperty(document, 'visibilityState', {configurable: true, get: () => __h ? 'hidden' : 'visible'});"
+                "window.__setHidden = v => { __h = v; document.dispatchEvent(new Event('visibilitychange')); }; 1")
+
+    def send(self, method, params=None):
+        self.n += 1
+        self.ws.send(json.dumps({"id": self.n, "method": method, "params": params or {}}))
+        while True:
+            m = json.loads(self.ws.recv())
+            if m.get("id") == self.n:
+                return m.get("result", {})
+
+    def js(self, expr):
+        r = self.send("Runtime.evaluate", {"expression": expr, "returnByValue": True})
+        return r.get("result", {}).get("value")
+
+    def close(self):
+        try:
+            self.ws.close()
+        finally:
+            if self.proc:
+                self.proc.kill()
+                self.proc.wait(10)
+
+
+def test_window_polls_only_when_seen():
+    """The page asks the app for its state every 2 s while it is seen, not at all while hidden (tray, minimized),
+    every 10 s while Apex runs unless the player is using the window; shown again = asked at once.
+    And no endless animation in the page's style (it made the window draw at the screen's refresh rate)."""
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    import re
+    for rule in re.findall(r"[^{}]*\{[^{}]*animation:[^}]*infinite[^}]*\}", css):
+        assert "spin" in rule, rule                        # only the scanning spinner (paused while Apex runs)
+    assert "@keyframes pulse" not in css and "@keyframes glow" not in css
+    assert ".quiet *{animation-play-state:paused" in css
+    b = pcs_server.Backend()
+    calls, apex = [], [False]
+    real = b.state
+    b.state = lambda: (calls.append(time.time()), {**real(), "apex": apex[0]})[1]
+    srv = pcs_server.Server(b)
+    srv.start()
+    page = _Page(srv.url)
+    try:
+        def wait(cond, s):
+            end = time.time() + s
+            while time.time() < end and not cond():
+                time.sleep(0.1)
+            return cond()
+        assert wait(lambda: len(calls) >= 3, 15), calls          # seen: every 2 s
+        page.js("__setHidden(true)")
+        time.sleep(0.5)
+        n = len(calls)
+        time.sleep(5)
+        assert len(calls) == n, len(calls) - n                    # hidden: nothing at all
+        assert page.js("PCS_POLL.active()") is False
+        t = time.time()
+        page.js("__setHidden(false)")
+        assert wait(lambda: len(calls) > n, 2) and calls[n] - t < 1.5   # shown: asked at once
+        apex[0] = True
+        assert wait(lambda: page.js("PCS_POLL.delay()") == 10000, 5)
+        assert page.js("document.body.classList.contains('quiet')") is True
+        time.sleep(1)
+        n = len(calls)
+        time.sleep(6)
+        assert len(calls) - n <= 1, len(calls) - n                 # Apex running: every 10 s
+        n = len(calls)
+        page.js("document.dispatchEvent(new KeyboardEvent('keydown', {key: 'a'}))")
+        assert wait(lambda: len(calls) > n, 2)               # the player uses the window: fresh at once…
+        assert page.js("PCS_POLL.delay()") == 2000                # …and every 2 s while they do
+    finally:
+        page.close()
+        srv.stop()
 
 
 def run_all(tests):

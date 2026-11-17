@@ -69,6 +69,7 @@ function renderTop() {
   else if (r.enabled) { cls += ' on'; text = 'Ready · waiting for Apex'; }
   if (S && S.scans.now) { cls = 'live on'; text = 'Scanning'; }
   pill.className = cls; pill.querySelector('span').textContent = text;
+  document.body.classList.toggle('quiet', !!(S && S.apex));          // Apex runs: no animation at all (app.css)
   const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
@@ -84,7 +85,25 @@ $('#updateBtn').onclick = async () => {
 };
 function confirmBox(msg) { return window.confirm(msg); }
 
+/* The window stays quiet while it isn't seen and while Apex runs (it shares the graphics card with the game):
+   no polling at all when hidden (tray) or minimized, every 10 s while Apex runs unless the player is using the
+   window, every 2 s otherwise. Shown again = refreshed at once. */
+const POLL_MS = 2000, POLL_APEX_MS = 10000, ACTIVE_MS = 30000;
+let pollTimer = null, polling = false, lastInput = 0;
+['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, () => {
+  const idle = Date.now() - lastInput > ACTIVE_MS; lastInput = Date.now();
+  if (idle && S && S.apex && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
+}, {capture: true, passive: true}));
+function pollDelay() { return S && S.apex && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
+function schedulePoll(ms) {
+  clearTimeout(pollTimer); pollTimer = null;
+  if (document.hidden || polling) return;                             // hidden: nothing runs until it's shown
+  pollTimer = setTimeout(poll, ms ?? pollDelay());
+}
 async function poll() {
+  pollTimer = null;
+  if (document.hidden) return;
+  polling = true;
   try {
     const prev = S; S = await api('/api/state');
     renderTop();
@@ -92,8 +111,11 @@ async function poll() {
     if (page === 'recordings' && (!prev || JSON.stringify(prev.scans) !== JSON.stringify(S.scans) ||
         (prev.recorder && S.recorder && prev.recorder.status !== S.recorder.status))) loadLibrary();
   } catch (e) { S = null; renderTop(); }
-  setTimeout(poll, 2000);
+  polling = false;
+  schedulePoll();
 }
+document.addEventListener('visibilitychange', () => schedulePoll(0));   // shown: refresh now; hidden: stop
+window.PCS_POLL = {delay: pollDelay, active: () => pollTimer !== null || polling};   // read by the tests
 
 /* ------------------------------------------------------------------ router */
 function route() {

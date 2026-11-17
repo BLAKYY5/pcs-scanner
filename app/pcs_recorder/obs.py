@@ -17,7 +17,9 @@ import time
 import zipfile
 from pathlib import Path
 
-from .settings import APP_DIR, Settings, valid_exe
+import secrets
+
+from .settings import APP_DIR, Settings, save, valid_exe
 
 log = logging.getLogger("recorder.obs")
 OBS_ROOT = APP_DIR / "obs"
@@ -134,6 +136,20 @@ def encoder_settings(encoder: str, mbps: int) -> dict:
     if "qsv" in encoder:
         return base | {"target_usage": "TU4", "bframes": 0}
     return base
+
+
+def renew_password(s: Settings) -> bool:
+    """Once per PC: a new random remote-control password. Up to 1.10.10 the OBS library wrote the password into
+    app.log; the old one is useless once OBS runs with a new one. Only while our OBS is closed (so never during a
+    recording), right before write_config() gives OBS the new one; the recorder connects with s.obs_password.
+    -> True when it was renewed now."""
+    if s.obs_password_new or is_running():
+        return False
+    s.obs_password = secrets.token_urlsafe(16)
+    s.obs_password_new = True
+    save(s)
+    log.info("remote-control password renewed")
+    return True
 
 
 def write_config(s: Settings, encoder: str, width: int, height: int) -> None:

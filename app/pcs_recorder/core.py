@@ -54,6 +54,7 @@ class Recorder:
         self.next_upload = 0.0
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
+        self.apex = False                        # Apex running at the last tick()
         self.lock = threading.RLock()
         self.youtube = None                      # youtube.Uploader, attached by the app
         self.night = None                        # night.Night (night uploads, turning the PC off)
@@ -80,6 +81,7 @@ class Recorder:
     def tick(self) -> None:
         with self.lock:
             apex = self.is_apex_running()
+            self.apex = apex                     # read by the window (it polls less often during games)
             if apex and self.current is None:
                 self._start()
             elif not apex and self.current is not None:
