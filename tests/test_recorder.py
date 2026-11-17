@@ -2068,6 +2068,200 @@ def test_audio_tracks_cut_after_recording():
     assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
 
 
+# ------------------------------------------------------------------ crash reports to the team hub
+
+def _crash_setup(hub_url="http://hub.test:8420", on=True, key=True):
+    """The crash reporter attached to a scratch settings object, with a fake key and a send() that records."""
+    from pcs_recorder import crash, hub
+    s = settings.Settings(hub_url=hub_url, crash_reports=on, encoder="jim_nvenc")
+    s.obs_password = "Obs-Pw-" + "q7" * 6
+    log_f = TMP / f"app-{time.time_ns()}.log"
+    log_f.write_text("".join(f"2026-11-17 20:00:00 INFO recorder: line {i} " + "x" * 600 + "\n" for i in range(500)),
+                     encoding="utf-8")
+    crash.R.__init__()
+    crash.R.attach(s, "1.10.99", "1.10.98", str(log_f))
+    crash.R.sync = True
+    sent = []
+    crash.R.send = lambda rep: (sent.append(rep), True)[1]
+    hub.S.loaded, hub.S.key = True, ("pcs_" + "T3st" * 10 + "abc") if key else None
+    return crash, s, sent
+
+
+def _crash_teardown():
+    from pcs_recorder import crash, hub
+    crash.R.__init__()
+    hub.S.loaded, hub.S.key = False, None
+
+
+def test_crash_redaction():
+    """Keys, tokens, passwords, e-mails, the Windows user / PC name and user folders never leave the PC."""
+    crash, s, sent = _crash_setup()
+    try:
+        key = "pcs_" + "T3st" * 10 + "abc"
+        old = os.environ.get("USERNAME"), os.environ.get("COMPUTERNAME")
+        os.environ["USERNAME"], os.environ["COMPUTERNAME"] = "Jeanne Testeur", "JEANNE-GAMINGPC"
+        try:
+            sec = crash.own_secrets(s)
+        finally:
+            for k, v in zip(("USERNAME", "COMPUTERNAME"), old):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        dirty = [f"hub key {key}", f"obs pw {s.obs_password}", "Authorization: Bearer abcdefghijklmnop1234",
+                 "C:\\Users\\Jeanne Testeur\\Videos\\PCS Recordings\\a.mp4", "c:/users/someone/AppData/Local/x",
+                 "mail player.one@example.org now", "token=ya29.a0Abc_def-ghi", "refresh 1//0gAbCdEfGhIjKlMnOpQrStUv",
+                 "obsws connect password='hunter22'", '{"hub_key": "zzz", "client_secret": "GOCSPX-abcdef"}',
+                 "http://hub:8420/login?next=/#key=" + key, "machine JEANNE-GAMINGPC user jeanne testeur",
+                 "D:\\OneDrive - Jeanne Testeur\\Videos"]
+        out = "\n".join(crash.clean_lines(dirty, sec))
+        for bad in (key, s.obs_password, "abcdefghijklmnop1234", "Jeanne", "jeanne", "someone", "player.one@example.org",
+                    "ya29.a0Abc", "1//0gAbCd", "hunter22", "zzz", "GOCSPX-abcdef", "GAMINGPC"):
+            assert bad not in out, (bad, out)
+        assert "Users\\<user>\\Videos" in out and "<email>" in out, out
+        plain = "2026-11-17 20:00:01 INFO recorder: encoder jim_av1_nvenc 12 Mb/s, capture window, hotkey ctrl+alt+m"
+        assert crash.redact(plain) == plain
+        t0 = time.time()
+        crash.clean_lines(["y" * 100000] * 200, sec)                  # long lines are cut first: stays fast
+        assert time.time() - t0 < 2
+    finally:
+        _crash_teardown()
+
+
+def test_crash_report_contents_and_limits():
+    """A report: kind, error, versions, Windows, GPU, context, the last 200 log lines (each cut), small in all."""
+    import json
+    crash, s, sent = _crash_setup()
+    crash._sysinfo["gpu"] = "NVIDIA GeForce RTX 3060 Ti"
+    try:
+        assert crash.report("record_start", "OBS didn't answer on port 4466", "Traceback ...",
+                            [("OBS log", ["12:00:00.000: line"] * 500)], {"minutes": 1.5})
+        rep = sent[0]
+        assert rep["kind"] == "record_start" and rep["error"] == "OBS didn't answer on port 4466"
+        assert rep["app"] == "1.10.99" and rep["scanner"] == "1.10.98" and rep["gpu"].startswith("NVIDIA")
+        assert rep["windows"] and len(rep["log"]) == crash.LOG_LINES and "line 499" in rep["log"][-1]
+        assert all(len(x) <= crash.MAX_LINE for x in rep["log"])
+        assert len(rep["attachments"][0]["lines"]) == crash.ATTACH_LINES
+        assert rep["context"]["encoder"] == "jim_nvenc" and rep["context"]["minutes"] == 1.5
+        assert "capture_apps" in rep["context"]
+        assert len(json.dumps(rep).encode()) < 200 * 1024                  # the hub takes up to 256 KB
+        assert crash.report("bogus", "x") and sent[-1]["kind"] == "other"
+    finally:
+        crash._sysinfo.clear()
+        _crash_teardown()
+
+
+def test_crash_reports_only_on_the_hub_and_when_on():
+    for kw in ({"hub_url": ""}, {"on": False}, {"key": False}):
+        crash, s, sent = _crash_setup(**kw)
+        try:
+            assert not crash.report("unhandled", "ValueError: x") and sent == [], kw
+        finally:
+            _crash_teardown()
+    from pcs_recorder import crash
+    assert not crash.report("unhandled", "not attached")                     # never set up: nothing, no error
+    assert settings.Settings().crash_reports is True                         # on by default (used only on the hub)
+
+
+def test_crash_throttle_and_retry():
+    """The same error once per 30 min, 10 a day; a hub that can't be reached gets them later."""
+    crash, s, sent = _crash_setup()
+    try:
+        assert crash.report("unhandled", "KeyError: 12")
+        assert not crash.report("unhandled", "KeyError: 13")               # same error (numbers don't count)
+        for i in range(12):
+            crash.report("scan_failed", f"error {chr(65 + i)}")
+        assert len(sent) == crash.PER_DAY, len(sent)
+        crash.R.__init__(); crash.R.attach(s, "1", "", None); crash.R.sync = True
+        crash.R.send = lambda rep: None                                    # hub not reachable
+        assert not crash.report("record_stop", "OBS didn't stop") and len(crash.R.pending) == 1
+        got = []
+        crash.R.send = lambda rep: (got.append(rep), True)[1]
+        crash.R.tick()
+        assert len(got) == 1 and crash.R.pending == []
+    finally:
+        _crash_teardown()
+
+
+def test_crash_reports_from_the_recorder():
+    """Recording that doesn't start / runs without OBS recording / gives no file, and a failed scan, are reported."""
+    import subprocess
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        s.folder_path.mkdir(parents=True, exist_ok=True)
+        apex = {"on": False}
+        clock = {"t": 1000.0}
+        obs = FakeOBS(s.folder_path)
+
+        def bad_start():
+            raise RuntimeError("OBS didn't answer on port 4466")
+        obs.start = bad_start
+        r = Recorder(s, obs, FakeHub(), FakeUI(False), fake_scan, is_apex_running=lambda: apex["on"],
+                     clock=lambda: clock["t"])
+        r._final_file = lambda p, wait_s=0: p
+        apex["on"] = True; r.tick()
+        assert sent[-1]["kind"] == "record_start" and "4466" in sent[-1]["error"], sent
+        # starts, but OBS never says it records: reported once, 30 s later
+        obs.start = lambda: None
+        obs.elapsed = lambda: None
+        crash.R.sent.clear()
+        r.tick(); n = len(sent)
+        clock["t"] += 31; r.tick(); r.tick()
+        assert len(sent) == n + 1 and "isn't recording" in sent[-1]["error"], sent[-1]
+        # Apex closes, OBS gives no file
+        obs.stop = lambda: None
+        apex["on"] = False; r.tick()
+        assert sent[-1]["kind"] == "record_stop" and "OBS wasn't recording" in sent[-1]["error"], sent[-1]
+        # a scan that fails
+        e = retention.Entry(path=str(make_file(s.folder_path, "Apex Legends_x.mp4", UNIT)), started=clock["t"],
+                            status="recorded")
+        r.idx["rec-x"] = e
+        (s.folder_path / "Apex Legends_x.scan").mkdir()
+        (s.folder_path / "Apex Legends_x.scan" / "scan.log").write_text("Traceback\nValueError: bad frame\n")
+        r.start_scan = lambda v, o: subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(2)"])
+        r._begin_scan("rec-x")
+        for _ in range(40):
+            r.tick(); time.sleep(0.1)
+            if r.scan_proc is None:
+                break
+        rep = sent[-1]
+        assert rep["kind"] == "scan_failed" and "exit code 2" in rep["error"], rep
+        assert rep["attachments"][0]["name"] == "scan.log" and "ValueError: bad frame" in rep["attachments"][0]["lines"]
+        assert rep["context"]["exit_code"] == 2
+    finally:
+        _crash_teardown()
+
+
+def test_crash_obs_crash_files():
+    """A new OBS crash file is reported once (on first run: those of the last 7 days, at most 3)."""
+    from pcs_recorder import obs as obsmod
+    crash, s, sent = _crash_setup()
+    try:
+        crashes = obsmod.CONFIG / "crashes"
+        crashes.mkdir(parents=True, exist_ok=True)
+        old = crashes / "Crash 2026-10-01 10-00-00.txt"
+        old.write_text("Unhandled exception: c0000005\nDate/Time: 2026-10-01\n")
+        os.utime(old, (time.time() - 30 * 86400,) * 2)
+        new = crashes / "Crash 2026-11-17 20-00-00.txt"
+        new.write_text("Unhandled exception: c0000005\nFault address: 7FF8 (c:\\users\\someone\\obs.dll)\n")
+        crash.STATE_FILE.unlink(missing_ok=True)
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 1
+        assert sent[-1]["kind"] == "obs_crash" and "c0000005" in sent[-1]["error"]
+        assert "someone" not in str(sent[-1])
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 0                              # not again
+        newer = crashes / "Crash 2026-11-17 21-00-00.txt"
+        newer.write_text("Unhandled exception: 80000003\n")
+        os.utime(newer, (time.time() + 5,) * 2)
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 1
+    finally:
+        _crash_teardown()
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback

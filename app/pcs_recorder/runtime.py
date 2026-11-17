@@ -15,6 +15,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from . import crash
 from . import hub as hubmod
 from . import obs as obsmod
 from . import settings as st
@@ -736,8 +737,11 @@ class AutoRecorder:
                 if self.s.enabled:
                     try:
                         self.rec.tick()
-                    except Exception:
+                    except Exception as e:
                         log.exception("tick failed")
+                        crash.report_exception("unhandled", e)
+                    if not self.rec.apex:
+                        crash.tick()                 # crash reports not delivered yet, new OBS crash files
                 time.sleep(3)
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()

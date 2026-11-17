@@ -51,6 +51,7 @@ class Settings:
     mic_audio: bool = True                             # track 3: the player's microphone (needs comms_consent)
     mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
+    crash_reports: bool = True                         # send crash reports to the team hub (only when on the hub)
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"
     hk_mute_mic: str = "ctrl+alt+3"

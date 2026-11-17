@@ -16,10 +16,11 @@ import threading
 import time
 from pathlib import Path
 
-from . import retention
+from . import crash, retention
 from .settings import Settings
 
 log = logging.getLogger("recorder")
+RECORDING_CHECK_S = 30          # after a recording starts, OBS must say it records (else a crash report)
 APEX_EXES = {"r5apex_dx12.exe", "r5apex.exe"}
 
 
@@ -92,6 +93,8 @@ class Recorder:
                 self._start()
             elif not apex and self.current is not None:
                 self._stop_and_offer_scan()
+            elif apex and self.current is not None:
+                self._check_recording()
             self._manage_scan(apex)
             if self.scan_proc is None:
                 self._next_in_queue(apex)
@@ -118,6 +121,7 @@ class Recorder:
             self.status = f"Couldn't start recording: {e}"
             self.ui.notify("PCS Recorder", f"Recording didn't start: {e}")
             log.exception("start failed")
+            crash.report_exception("record_start", e, crash.obs_log_tail())
             return
         key = f"rec-{int(self.clock())}"
         n = 2
@@ -129,17 +133,44 @@ class Recorder:
         self.events, self.muted = [], {}
         retention.save_index(self.idx)
         self.status = "Recording Apex"
+        self.rec_check_at = self.clock() + RECORDING_CHECK_S
         self.hub.report(self._report(key))
+
+    def _check_recording(self) -> None:
+        """Once, a little after the start: is OBS really recording? (A recording can "start" and never run: OBS
+        log ending before the recording starts, another capture program holding the GPU encoder.) -> crash report."""
+        at = getattr(self, "rec_check_at", 0)
+        if not at or self.clock() < at:
+            return
+        self.rec_check_at = 0
+        elapsed = getattr(self.obs, "elapsed", None)
+        try:
+            running = elapsed() if elapsed else True
+        except Exception:
+            running = None
+        if running is None:
+            log.warning("OBS isn't recording %d s after the start", RECORDING_CHECK_S)
+            crash.report("record_start", f"OBS isn't recording {RECORDING_CHECK_S} s after the start",
+                         "", crash.obs_log_tail())
 
     def _stop_and_offer_scan(self) -> None:
         key, self.current = self.current, None
         e = self.idx[key]
+        stop_error = None
         try:
             path = self.obs.stop()
         except Exception as ex:
-            path = None
+            path, stop_error = None, ex
             log.warning("stop failed: %s", ex)
         e.path = self._final_file(path) if path else ""
+        if not e.path:                           # a session with no file: tell the coach why (crash report)
+            mins = round((self.clock() - e.started) / 60, 1)
+            if stop_error is not None:
+                crash.report_exception("record_stop", stop_error, crash.obs_log_tail(), {"minutes": mins})
+            else:
+                crash.report("record_stop", "No recording file when Apex closed" + ("" if path else
+                             ": OBS wasn't recording"), f"OBS gave {Path(path).name if path else 'no file'}",
+                             crash.obs_log_tail(), {"minutes": mins})
         if e.path:
             self._write_events(key)
             self._start_silence_check(e.path, self.clock() - e.started)
@@ -247,6 +278,7 @@ class Recorder:
         except Exception as ex:
             e.status, e.note = "failed", f"scanner didn't start: {ex}"
             retention.save_index(self.idx)
+            crash.report_exception("scan_failed", ex)
             return
         self.scan_key = key
         e.status = "scanning"
@@ -303,6 +335,11 @@ class Recorder:
             e.status = "scanned" if code == 0 else "failed"
             e.note = "" if code == 0 else ("the scan couldn't read the video" if nothing else f"scanner exit code {code}")
             retention.save_index(self.idx)
+            if code != 0:
+                scanlog = Path(e.path).with_suffix(".scan") / "scan.log" if e.path else None
+                crash.report("scan_failed", f"Scan failed: {e.note}", f"recording {Path(e.path).name if e.path else '?'}",
+                             [("scan.log", crash.tail(scanlog, 150))] if scanlog else [],
+                             {"exit_code": code, "read_nothing": nothing})
             if code == 0:
                 self._add_extras(e)
                 e.nogame = no_game(e)
