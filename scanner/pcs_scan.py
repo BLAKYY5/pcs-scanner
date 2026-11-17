@@ -424,7 +424,9 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 events.append({'t': round(t, 2), 'kind': 'map', 'data': d}); votes[st] += 1
                 if t - ring_at >= RING_EVERY:     # ring circles on the full map (about 2 s a read)
                     ring_at = t
-                    try: rr = pcs_ring.read(view_map(img) if st else img, mr.cache[1])
+                    R = perf.get('_rings') or [(None, None, None)]
+                    hint = R[-1][2] if R[-1][1] == d['map'] and t - R[-1][0] < 90 else None    # same ring a moment ago
+                    try: rr = pcs_ring.read(view_map(img) if st else img, mr.cache[1], hint)
                     except Exception: rr = None
                     if rr and (rr['cur'] or rr['next']): perf.setdefault('_rings', []).append((round(t, 2), d['map'], rr))
                 break

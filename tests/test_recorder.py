@@ -1569,6 +1569,8 @@ def test_ring_ends_and_speed():
              (500.0, 'ED', {'cur': c(50.05, 50.0, 30.05), 'next': c(55.0, 52.0, 15.0)}),
              (501.0, 'ED', {'cur': c(50.0, 50.05, 30.0), 'next': c(55.1, 52.0, 15.1)}),
              (600.0, 'ED', {'cur': c(52.0, 51.0, 22.0), 'next': c(55.0, 52.05, 15.0)}),
+             (605.0, 'ED', {'cur': c(52.4, 51.2, 21.0), 'next': None}),          # closing: 0.2 % a second
+             (610.0, 'ED', {'cur': c(52.8, 51.4, 20.0), 'next': None}),
              (2500.0, 'ED', {'cur': c(1, 1, 1), 'next': None})]                    # the next game's: left out
     games = [{'map': 'ED', 'tStart': 100.0, 'ring': ring}, {'map': 'ED', 'tStart': 2000.0, 'ring': []}]
     pcs_ring.attach(games, reads)
@@ -1584,7 +1586,9 @@ def test_ring_ends_and_speed():
     assert abs(ends[2]['r'] - 15.0) < 0.1 and ends[2]['from'] == ['next'], ends[2]
     u = pcs_ring.units_per_pct('ED')
     assert u == pcs_hud.CAL['ED'][0] and ends[2]['rUnits'] == round(ends[2]['r'] * u), (u, ends[2])
-    sp = g['ringSpeed']
+    sp = {s['method']: s for s in g['ringSpeed']}
+    assert abs(sp['closing']['unitsPerS'] - 0.2 * u) < 0.5 and sp['closing']['ring'] == 2, sp
+    sp = [sp['ends']]
     assert len(sp) == 1 and sp[0]['ring'] == 2 and sp[0]['seconds'] == 100.0, sp
     assert abs(sp[0]['unitsPerS'] - (ends[1]['rUnits'] - ends[2]['rUnits']) / 100.0) < 0.2, sp
     assert [e['t'] for e in games[1]['ringCircles']] == [2500.0], games[1]

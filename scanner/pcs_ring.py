@@ -128,7 +128,9 @@ def measure_cur(c, T, cx, cy, r, d=4):
     xi, yi, xo, yo, vis = _arc(T.shape, cx, cy, r, d)
     if len(xi) < 12: return 0.0, 0.0, vis, len(xi)
     v = _samp(T, xi, yi) - _samp(T, xo, yo)
-    return float(np.median(v)), float((v > 0.08).mean()), vis, len(xi)
+    co = _samp(c, xo, yo)          # the outside must really be red-tinted (blue water next to purple land is not)
+    red = (co[:, 0] > 1.15 * co[:, 1]) & (co[:, 0] > 1.15 * co[:, 2])
+    return float(np.median(v)), float(((v > 0.08) & red).mean()), vis, len(xi)
 
 
 def measure_next(c, T, cx, cy, r, d=3):
@@ -138,7 +140,7 @@ def measure_next(c, T, cx, cy, r, d=3):
     if len(xi) < 12: return 0.0, 0.0, vis, len(xi)
     al = _alpha(c, xi, yi, xo, yo)
     a0 = float(np.median(al.mean(1)))
-    if not 0.09 < a0 < 0.24: return a0, 0.0, vis, len(xi)      # the overlay's fraction: 0.14..0.17 measured
+    if not 0.09 < a0 < 0.30: return a0, 0.0, vis, len(xi)      # the overlay's fraction: 0.14..0.26 measured
     am = al.mean(1)
     return a0, float(((am > 0.4 * a0) & (am < 2 * a0) & (al.min(1) > 0.25 * a0)).mean()), vis, len(xi)
 
@@ -164,22 +166,28 @@ def _refine(measure, c, T, cx, cy, r):
     return cx, cy, r
 
 
-def find_circle(edges, measure, c, T, rmin, rmax, pad, inside=None):
-    """Best circle from an edge set and a measure. inside: (cx, cy, r) the circle must lie in."""
+def find_circle(edges, measure, c, T, rmin, rmax, pad, inside=None, hints=(), accept=None):
+    """Best circle from an edge set and a measure. inside: (cx, cy, r) the circle must lie in. hints: (cx, cy, r)
+    starting guesses tried besides the Hough ones, also as they are (the same ring found on a frame just before).
+    accept(cx, cy, r): a last test for a candidate."""
     xs, ys, ux, uy = edges
     if inside is not None:      # only edges inside the outer circle can belong to the inner one
         k = np.hypot(xs - inside[0], ys - inside[1]) < inside[2] - 2
         xs, ys, ux, uy = xs[k], ys[k], ux[k], uy[k]
-    if len(xs) < 40: return None
+    starts = [h + (True,) for h in hints]
+    if len(xs) >= 40:
+        starts += [(cx, cy, r, False) for cx, cy in _hough(xs, ys, ux, uy, T.shape, rmin, rmax, pad)
+                   for r in _radius(xs, ys, ux, uy, cx, cy, rmin, rmax)]
     best = None; seen = []
-    for cx, cy in _hough(xs, ys, ux, uy, T.shape, rmin, rmax, pad):
-        for r in _radius(xs, ys, ux, uy, cx, cy, rmin, rmax):
-            if any(abs(cx - a) + abs(cy - b) + abs(r - q) < 6 for a, b, q in seen): continue
-            seen.append((cx, cy, r))
-            cx2, cy2, r2 = _refine(measure, c, T, cx, cy, r)
+    for cx, cy, r, hinted in starts:
+        if any(abs(cx - a) + abs(cy - b) + abs(r - q) < 6 for a, b, q in seen): continue
+        seen.append((cx, cy, r))
+        for cx2, cy2, r2 in [_refine(measure, c, T, cx, cy, r)] + ([(cx, cy, r)] if hinted else []):
             if inside is not None and np.hypot(cx2 - inside[0], cy2 - inside[1]) + r2 > inside[2] * 1.03 + 4: continue
+            if accept is not None and not accept(cx2, cy2, r2): continue
             con, sup, vis, n = measure(c, T, cx2, cy2, r2)
-            s = sup * min(1.0, n / 45.0)
+            if r2 < rmin: continue
+            s = sup * min(1.0, n / 45.0) + 0.0005 * r2      # a tie goes to the bigger circle (round icons are small)
             if best is None or s > best[0]: best = (s, cx2, cy2, r2, sup, vis)
     if best is None: return None
     return {'cx': best[1], 'cy': best[2], 'r': best[3], 'support': best[4], 'visible': best[5]}
@@ -188,18 +196,32 @@ def find_circle(edges, measure, c, T, rmin, rmax, pad, inside=None):
 MIN_SUPPORT = 0.6
 
 
-def read(a, M=None):
+def read(a, M=None, hint=None):
     """Ring circles on one full-map frame (2560 x 1440 RGB, 16:9 layout or rebuilt by the scanner's view_map).
     M: the map transform found by MapReader (screen px -> map %); None = the unzoomed default.
+    hint: an earlier result of this function (same game, a short while before): its circles are tried as starting
+    guesses too (the faint next-ring disc is found more often that way; it must still pass the same tests).
     Returns {'cur': circle or None, 'next': circle or None} (circle: cx, cy, r in map %, support, visible, px), or None
     when the map is zoomed."""
     M = M_DEFAULT if M is None else np.asarray(M)
     if abs(M[0, 0] - UNZOOMED) > 0.03 * UNZOOMED: return None      # zoomed map: circles cut off, skip
     c = half(a); T = tint(c)
-    cur = find_circle(edges_cur(c), measure_cur, c, T, 40, 560, 480)
+    hp = lambda k: [((h[k]['px'][0] - MAP_X0) / DS, h[k]['px'][1] / DS, h[k]['px'][2] / DS)
+                    for h in [hint or {}] if h.get(k)]
+    g = c[3::6, 3::6]; gy, gx = np.mgrid[3:c.shape[0]:6, 3:c.shape[1]:6]
+    red = (g[..., 0] > 1.15 * g[..., 1]) & (g[..., 0] > 1.15 * g[..., 2])
+
+    def all_red_outside(cx, cy, r):
+        """Outside the current ring the whole map is red-tinted (a coloured disc of another map feature has the
+        untinted inside of the real ring around it)."""
+        o = np.hypot(gx - cx, gy - cy) > r + 6
+        return o.sum() < 150 or red[o].mean() >= 0.75
+    # radii from 20 half-size px (2.9 % of the map, about 2,500 units): smaller rings (last stages) are not read,
+    # round map icons are about that small
+    cur = find_circle(edges_cur(c), measure_cur, c, T, 20, 560, 480, accept=all_red_outside)
     if not (cur and cur['support'] >= MIN_SUPPORT and cur['visible'] * 2 * np.pi * cur['r'] >= 250): cur = None
     inside = (cur['cx'], cur['cy'], cur['r']) if cur else None
-    nxt = find_circle(edges_next(c), measure_next, c, T, 15, 520, 420, inside)
+    nxt = find_circle(edges_next(c), measure_next, c, T, 20, 520, 420, inside, hints=hp('next'))
     if not (nxt and nxt['support'] >= MIN_SUPPORT and nxt['visible'] * 2 * np.pi * nxt['r'] >= 150): nxt = None
 
     def to_map(d):
@@ -260,6 +282,11 @@ def game_circles(reads, ring, mp, t0, t1):
         elif cur:
             t_, x = next((t_, x) for t_, x in L if x.get('cur'))
             e.update(cx=x['cur']['cx'], cy=x['cur']['cy'], r=x['cur']['r'], curAt=t_, curReads=len(cur)); conf.append(len(cur) / len(L))
+            tr = np.array([(t_, x['cur']['r']) for t_, x in L if x.get('cur')])
+            if len(tr) >= 3 and np.ptp(tr[:, 0]) >= 5:     # the ring closing in front of us: radius change per second
+                k, b = np.polyfit(tr[:, 0], tr[:, 1], 1)
+                if np.abs(tr[:, 1] - (k * tr[:, 0] + b)).max() < 0.4 and k < 0:
+                    e['rPerS'] = round(float(k), 4); e['rPerSSpan'] = round(float(np.ptp(tr[:, 0])), 1)
         if nxt:
             (cx, cy, r), n = _agree(nxt); e['next'] = {'cx': cx, 'cy': cy, 'r': r, 'reads': len(nxt)}; conf.append(n / len(L))
         if not cur and not nxt: continue
@@ -291,17 +318,25 @@ def ring_ends(circles, mp):
     return out
 
 
-def closing_speed(ends, ring):
-    """Radius drop / closing time for each stage whose own end and the previous end are both read:
-    [{ring, drop (units), seconds, unitsPerS}]. Closing time = the round's closing countdown end - its wait end."""
+def closing_speed(ends, ring, circles=(), mp=None):
+    """Closing speed of the ring, two ways:
+    'ends': radius drop / closing time for each stage whose own end and the previous end are both read
+            (closing time = the round's closing countdown end - its wait end);
+    'closing': the current circle read several times while it closes (radius change per second).
+    [{ring, method, unitsPerS, ...}]."""
+    k_u = units_per_pct(mp) if mp else None
+    out = []
+    for e in circles:
+        if e.get('rPerS') is not None and k_u:
+            out.append({'ring': e['stage'], 'method': 'closing', 'unitsPerS': round(-e['rPerS'] * k_u, 1),
+                        'seconds': e['rPerSSpan'], 'reads': e['curReads']})
     E = {e['ring']: e for e in ends if e.get('rUnits')}
     W = {r['round']: r['endsAt'] for r in ring or [] if r.get('kind') == 'wait' and r.get('round') and not r.get('fromSpectate')}
     C = {r['round']: r['endsAt'] for r in ring or [] if r.get('kind') == 'closing' and r.get('round') and not r.get('fromSpectate')}
-    out = []
     for k in sorted(E):
         if k - 1 in E and k in W and k in C and C[k] > W[k]:
             drop = E[k - 1]['rUnits'] - E[k]['rUnits']; secs = C[k] - W[k]
-            out.append({'ring': k, 'drop': drop, 'seconds': round(secs, 1), 'unitsPerS': round(drop / secs, 1)})
+            out.append({'ring': k, 'method': 'ends', 'drop': drop, 'seconds': round(secs, 1), 'unitsPerS': round(drop / secs, 1)})
     return out
 
 
@@ -313,6 +348,6 @@ def attach(games, reads):
         if not circles: continue
         g['ringCircles'] = circles
         g['ringEnds'] = ring_ends(circles, g.get('map'))
-        sp = closing_speed(g['ringEnds'], g.get('ring'))
+        sp = closing_speed(g['ringEnds'], g.get('ring'), circles, g.get('map'))
         if sp: g['ringSpeed'] = sp
     return games

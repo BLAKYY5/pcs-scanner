@@ -48,12 +48,12 @@ def read_cards(a):
     wn = white[:, :NAME_X1 - NAME_X0]
     cnt = wn.sum(1); tr = _trans(wn)
     left = np.where(wn.any(1), wn.argmax(1), 999)
-    rows = (cnt >= 6) & (tr >= 4) & (left <= 12)        # text starting at the name column
+    rows = (cnt >= 6) & (tr >= 4) & (left <= 22)        # text starting near the name column
     cards = []
-    wl = (lambda c: (np.minimum(np.minimum(c[..., 0], c[..., 1]), c[..., 2]) > 185))(a[Y0:Y1, 120:NAME_X0 - 2])
     for y0, y1 in _runs(rows, 8):
         if y1 - y0 > 26: continue
-        if wl[y0:y1].sum() >= 10: continue            # text running in from the left: the own card's 'MAX LEVEL' / 'NEXT LVL'
+        # names start at x 183..192; text running in from the left (the own card's 'MAX LEVEL' / 'NEXT LVL') at 180
+        if not 3 <= np.median(left[y0:y1]) <= 12: continue
         # under the name: a lime status line (dead) or a bar (alive: white health, solid from the name column)
         lo, hi = y1 + 2, min(y1 + 40, white.shape[0])
         lm = lime[lo:hi]; lrow = (lm.sum(1) >= 20) & (_trans(lm) >= 6)
