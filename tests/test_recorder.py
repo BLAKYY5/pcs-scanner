@@ -1786,6 +1786,52 @@ def test_silent_voice_or_mic_track_warned_once():
     assert [t for t, *_ in ui.notes] == ["Mic track was silent"] and read == [1]      # mic = 2nd track here
 
 
+def test_audio_tracks_cut_after_recording():
+    """The review's separate audio tracks are queued for cutting as soon as a recording ends (not when the review
+    opens); at start, recent recordings without tracks are queued again and unfinished .part files removed."""
+    class FakeCutter:
+        def __init__(self):
+            self.added, self.cleaned = [], []
+
+        def add(self, path, asked=False):
+            self.added.append((Path(path).name, asked))
+
+        def clean(self, folders=()):
+            self.cleaned.append(set(folders))
+    r, ui, clock, read = _silence_recorder({"game": [], "discord": [], "mic": []})
+    r.cutter = FakeCutter()
+    apex = {"on": False}
+    r.is_apex_running = lambda: apex["on"]
+    r._final_file = lambda p, wait_s=0: p
+    apex["on"] = True; r.tick()
+    apex["on"] = False; r.tick()
+    assert r.cutter.added == [("Apex Legends_1.mp4", False)], r.cutter.added       # background, right away
+    # one track only: nothing to cut (the video plays its own sound)
+    r2, *_ = _silence_recorder({"game": []}, tracks=("game",), consent=False)
+    r2.cutter = FakeCutter()
+    r2._queue_tracks(str(TMP / "x.mp4"))
+    assert r2.cutter.added == []
+    # start of the app: a stopped cut's .part file goes, recent recordings without tracks are queued, old ones not
+    folder = Path(r.s.folder)
+    old = make_file(folder, "Apex Legends_old.mp4", 1000)
+    done = make_file(folder, "Apex Legends_done.mp4", 1000)
+    done.with_suffix(".events.json").write_text("{}")
+    time.sleep(0.05)
+    (folder / "Apex Legends_done.track1.m4a").write_bytes(b"x")
+    now = clock["t"]
+    r.idx["old"] = retention.Entry(path=str(old), started=now - 3 * 86400, status="uploaded")
+    r.idx["done"] = retention.Entry(path=str(done), started=now - 3600, status="uploaded")
+    c = r.cutter = FakeCutter()
+    r.resume_tracks()
+    assert c.cleaned and str(folder) in c.cleaned[0]
+    assert c.added == [("Apex Legends_1.mp4", False)], c.added
+    from pcs_recorder import tracks
+    part = folder / "Apex Legends_1.track2.part.m4a"
+    part.write_bytes(b"half")
+    assert tracks.clean_parts([folder]) == 1 and not part.exists()
+    assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback

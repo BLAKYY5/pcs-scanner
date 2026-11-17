@@ -112,6 +112,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is
 - **Silent voice / mic track**: after a recording of 5 min or more, tracks 2 and 3 (when on, with consent, not muted
   by hotkey) are read (audio only, `pcs_levels.track_db`); loudest half second under -60 dBFS = silent, told once
   per setting (`silence.json`).
+- **Review audio tracks** (`pcs_recorder/tracks.py`): the review plays each track as its own `.trackN.m4a` (stream
+  copy, all tracks in one read of the file). Cut in the background right after a recording ends (low priority, never
+  while Apex runs; recordings of the last 24 h without tracks are queued again at start), or first in line when the
+  review asks for a track that isn't there: `/audio/<id>/<n>` answers 503 "preparing" at once and the page asks again
+  (a 3 h recording takes minutes to cut: the coach once heard no game sound because the request waited for it).
+  Written as `.part.m4a`, renamed when complete; stale `.part` files removed at start.
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).

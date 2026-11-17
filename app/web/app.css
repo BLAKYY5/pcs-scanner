@@ -184,6 +184,15 @@ select.label:disabled{opacity:.5;cursor:default}
 .mk.drop{background:#e6ad45}.mk.jump{background:#6aa0ff}.mk.land{background:#5fd08f}.mk.ring{background:#c48bff}.mk.ringclose{background:#8f5ee0;color:#fff}
 .tick{position:absolute;top:4px;bottom:4px;width:3px;margin-left:-1px;border-radius:2px;background:var(--accent);opacity:.85;cursor:pointer}
 .tick:hover{opacity:1;box-shadow:0 0 0 2px rgba(229,57,45,.35)}
+.tick.lost{background:#8a877f}
+.mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
+/* theatre: the video across the whole window, the side panel below it */
+.wrap:has(> .review.theatre){max-width:none}
+.review.theatre{grid-template-columns:minmax(0,1fr)}
+.review.theatre .player video{max-height:calc(100vh - 150px)}
+.review.theatre .side{position:static;max-height:70vh}
+.feedopt{display:flex;align-items:center;gap:8px;padding:2px 6px 10px;font-size:13px}
+.feedopt input{width:auto;margin:0}
 .head-line{position:absolute;top:0;bottom:0;width:2px;background:#fff;box-shadow:0 0 6px rgba(255,255,255,.6);pointer-events:none;z-index:4}
 .hover-time{position:absolute;top:-4px;transform:translate(-50%,-100%);font:11px var(--mono);background:#000;border:1px solid var(--line);padding:1px 6px;border-radius:4px;pointer-events:none;z-index:5}
 .legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-top:6px}

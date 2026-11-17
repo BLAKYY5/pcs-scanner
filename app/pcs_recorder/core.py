@@ -63,6 +63,7 @@ class Recorder:
         self.hub_next, self.hub_fails, self.hub_fail_url = 0.0, 0, ""   # hub retries: backoff after network errors
         self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
         self.silence_thread: threading.Thread | None = None
+        self.cutter = None                       # audio tracks for the review (tests); default tracks.CUTTER
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
         for k in sorted(self.idx, key=lambda k: self.idx[k].started):
             e = self.idx[k]
@@ -134,6 +135,7 @@ class Recorder:
         if e.path:
             self._write_events(key)
             self._start_silence_check(e.path, self.clock() - e.started)
+            self._queue_tracks(e.path)
         e.status = "recorded" if e.path else "failed"
         e.note = "" if e.path else "OBS didn't return a file"
         retention.save_index(self.idx)
@@ -530,6 +532,42 @@ class Recorder:
                 f.write_text(json.dumps(told), encoding="utf-8")
             except OSError:
                 pass
+
+    # ---------------------------------------------------------- audio tracks for the review player
+    TRACKS_RESUME_S = 24 * 3600    # at start: recordings this recent whose tracks aren't cut yet are queued again
+
+    def _cutter(self):
+        if self.cutter is None:
+            from .tracks import CUTTER
+            self.cutter = CUTTER
+        return self.cutter
+
+    def _queue_tracks(self, path: str) -> None:
+        """The review plays game, voice and mic as separate files: cut them now, in the background (low priority,
+        never while Apex runs), so they are ready when the review opens. Only with 2 tracks or more."""
+        if len(self.s.tracks()) < 2:
+            return
+        try:
+            self._cutter().add(path)
+        except Exception:
+            log.exception("track cut not queued")
+
+    def resume_tracks(self) -> None:
+        """At start: remove what a cut stopped halfway left behind, then queue recent recordings without tracks."""
+        from .tracks import track_path, fresh
+        c = self._cutter()
+        with self.lock:
+            entries = [e for e in self.idx.values() if e.path and e.status not in ("recording", "failed")]
+        try:
+            c.clean({str(Path(e.path).parent) for e in entries} | {self.s.folder})
+        except Exception:
+            log.exception("track clean-up failed")
+        if len(self.s.tracks()) < 2:
+            return
+        for e in sorted(entries, key=lambda e: -e.started):
+            if self.clock() - e.started < self.TRACKS_RESUME_S and Path(e.path).exists() \
+                    and not fresh(track_path(e.path, 0), e.path):
+                c.add(e.path)
 
     # ---------------------------------------------------------- housekeeping
     def cleanup(self) -> list[tuple[str, str]]:

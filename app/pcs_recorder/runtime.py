@@ -698,6 +698,10 @@ class AutoRecorder:
         if self.thread:
             return
         self.rec.cleanup()
+        try:
+            self.rec.resume_tracks()
+        except Exception:
+            log.exception("audio tracks not resumed")
         self.hotkeys.start()
 
         def loop():
