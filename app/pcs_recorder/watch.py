@@ -20,9 +20,13 @@ import logging
 import threading
 import time
 
+from pathlib import Path
+
 from . import hub
+from .settings import APP_DIR
 
 log = logging.getLogger("watch")
+AUDIO_CACHE = APP_DIR / "talk-cache"
 PING_EVERY = 5.0
 LIST_CACHE_S = 8.0
 
@@ -44,6 +48,8 @@ class Watch:
         self.thread: threading.Thread | None = None
         self.gen = 0                               # a newer session stops the older websocket thread
         self._list: tuple[float, dict] | None = None
+        self.pointer_at: dict | None = None        # the coach's pointer: {x, y, at} or {hide, at}
+        self.on_state = None                       # called with each new state (review talk timeline)
 
     # ------------------------------------------------------------ hub requests
     def _url(self) -> str:
@@ -90,7 +96,7 @@ class Watch:
         return self.snapshot()
 
     def control(self, body: dict) -> dict:
-        st = self._call("POST", f"/api/sessions/{self._need()}/control", _pick(body, ("action", "t", "speed", "player", "gameKey")))
+        st = self._call("POST", f"/api/sessions/{self._need()}/control", _pick(body, ("action", "t", "speed", "player", "gameKey", "id")))
         self._apply({"type": "state", "state": st})
         return self.snapshot()
 
@@ -113,15 +119,66 @@ class Watch:
             except Exception as e:
                 log.info("leave: %s", e)
 
-    def report(self, t, buffering: bool) -> None:
-        """Where this app's large view is (game time): the coach sees who is behind."""
+    def report(self, t, buffering: bool, browsing: bool = False) -> None:
+        """Where this app's large view is (game time), and whether the player is on their own moment (browsing):
+        the coach sees who is behind or browsing."""
         ws = self.ws
         if ws is None or t is None:
             return
         try:
-            ws.send(json.dumps({"type": "report", "t": round(float(t), 2), "buffering": bool(buffering)}))
+            ws.send(json.dumps({"type": "report", "t": round(float(t), 2), "buffering": bool(buffering),
+                                "browsing": bool(browsing)}))
         except Exception:
             pass
+
+    def pointer(self, body: dict) -> dict:
+        """Coach: the dot following his mouse on the large view (or hidden)."""
+        b = {"hide": True} if body.get("hide") else {"x": float(body.get("x", 0)), "y": float(body.get("y", 0))}
+        return self._call("POST", f"/api/sessions/{self._need()}/pointer", b, timeout=4)
+
+    def flag(self, t) -> dict:
+        """Player: "Look at this" at their moment."""
+        return self._call("POST", f"/api/sessions/{self._need()}/flag", {} if t is None else {"t": float(t)})
+
+    def bookmark(self, text: str, t=None) -> dict:
+        """Coach: mark this moment, with an optional one-line note."""
+        return self._call("POST", f"/api/sessions/{self._need()}/bookmark",
+                          {"text": str(text or "")[:200], **({} if t is None else {"t": float(t)})})
+
+    # ------------------------------------------------------------ afterwards, in the review player
+    def extras(self, path: str, player: str | None = None) -> dict:
+        """Session bookmarks and review talk for the games of this recording (hub 0.5); none without a hub."""
+        from .notes import recording_name
+        url = self.url_fn()
+        if not url or not hub.get_key():
+            return {"available": False, "games": []}
+        try:
+            r = hub.request(url, "GET", "/api/review-extras", timeout=8,
+                            params={"recording": recording_name(path), **({"player": player} if player else {})})
+        except hub.HubError as e:
+            return {"available": False, "games": [], "error": str(e)}
+        if r.status_code == 404:                       # a hub before 0.5
+            return {"available": False, "games": []}
+        hub._check(r)
+        return {**r.json(), "available": True}
+
+    def audio(self, aid: str) -> Path:
+        """One review talk track, downloaded once into the data folder (the window's player reads it from here)."""
+        import re
+        if not re.fullmatch(r"ta-[0-9a-f]{12}", aid or ""):
+            raise ValueError("bad talk id")
+        f = AUDIO_CACHE / f"{aid}.m4a"
+        if f.exists():
+            return f
+        r = hub.request(self._url(), "GET", f"/api/session-audio/{aid}", timeout=120, stream=True)
+        hub._check(r)
+        AUDIO_CACHE.mkdir(parents=True, exist_ok=True)
+        tmp = f.with_suffix(".part")
+        with open(tmp, "wb") as out:
+            for chunk in r.iter_content(1 << 20):
+                out.write(chunk)
+        tmp.replace(f)
+        return f
 
     def _need(self) -> str:
         if not self.sid or self.ended:
@@ -138,7 +195,7 @@ class Watch:
 
     def snapshot(self) -> dict:
         with self.cond:
-            return {"seq": self.seq, "sid": self.sid, "state": self.state, "me": self.me,
+            return {"seq": self.seq, "sid": self.sid, "state": self.state, "me": self.me, "pointer": self.pointer_at,
                     "connected": self.connected, "ended": self.ended, "error": self.error,
                     "offset": round(self.offset, 4), "rtt": round(min(self.samples)[0], 4) if self.samples else None}
 
@@ -277,6 +334,9 @@ class Watch:
                 self.state = {**st, "members": m.get("members") or {}}
             elif kind == "ended":
                 self.ended = m.get("reason") or "ended"
+            elif kind == "pointer":
+                self.pointer_at = {"hide": True} if m.get("hide") else {"x": m.get("x"), "y": m.get("y")}
+                self.pointer_at["at"] = self.clock()
             elif kind == "pong":
                 try:
                     t1, c, s = self.clock(), float(m["c"]), float(m["s"])
@@ -286,7 +346,13 @@ class Watch:
                 return                                # nothing for the window to redraw
             else:
                 return
+            st = self.state
         self._bump()
+        if self.on_state and st is not None and kind == "state":
+            try:
+                self.on_state(st, self.offset)
+            except Exception:
+                log.exception("review talk timeline")
         if refetch:
             try:
                 self._apply({"type": "state", "state": self._call("GET", f"/api/sessions/{self._need()}")})

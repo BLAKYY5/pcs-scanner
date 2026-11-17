@@ -147,6 +147,21 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   can't be embedded for others: the default upload privacy is unlisted. Iframes are never moved in the page (that
   reloads them): only their boxes change when the large view changes. Entry: Team tab (coach: games with videos,
   Start session; players: Join) and a join bar on every page while a session runs.
+  A player may pause / step (5 s, 10 s, one 1/60 s frame with , and .) their own view: only theirs leaves the group
+  ("Paused by you · Back to coach", Esc), reported as `browsing`. Drawings stay while paused and fade over 300 ms when
+  the moment moves (timer-based, also in a hidden window); the hub saves them as a squad coach note on the large
+  view's recording (no text: they stay on that recording). Coach: pointer dot (hidden after 2 s idle), bookmarks (B,
+  one-line note), players' "Look at this" flags (F) with Go. Afterwards the review player shows "Session bookmarks"
+  and a "Review talk" switch (`web/review-extras.js`, `/api/library/<id>/extras`, audio downloaded once to
+  `talk-cache/` and served at `/talk/<id>`): talk follows the video at the session's speed; talk while paused holds
+  the video, plays, then goes on.
+- **Review talk recording** (`pcs_recorder/talk.py`, coach's app only, only with `comms_consent`): the private OBS
+  records the mic and voice-app tracks (the only per-program audio capture available; ffmpeg has none) into
+  `talk/` (never the recordings folder), then the two tracks are copied out and the temporary video deleted. Never
+  while Apex runs or records: refused then, and `Recorder.tick` stops it before starting a game recording. OBS's
+  folder and file name are set back after; if that fails, the next game start prepares OBS again. Segments
+  (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
+  `talk/pending.json` until the hub takes them (4xx = kept, not resent).
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for

@@ -508,6 +508,7 @@ async function renderReview(id) {
   $('#rvTheatre').onclick = () => theatre(); theatre(theatreOn(), true);
   setupInk(v);
   loadNotes(d.id);
+  if (window.reviewExtras) reviewExtras(d, v);                          // session bookmarks, review talk (review-extras.js)
 }
 async function showVideoError(v, id) {   /* say which: file missing, can't be read, damaged, or a format not supported */
   const code = v.error ? v.error.code : 0;

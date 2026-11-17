@@ -1216,6 +1216,7 @@ class SessionHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         from urllib.parse import urlsplit
         self.calls, self.ws_auth, self.socks, self.reports = [], [], [], []
+        self.audio_gets, self.uploads, self.upload_code = [], [], 200
         self.ahead, self.state = clock_ahead, None
         hub = self
 
@@ -1235,7 +1236,9 @@ class SessionHub:
 
             def _go(self):
                 n = int(self.headers.get("Content-Length") or 0)
-                body = json.loads(self.rfile.read(n)) if n else {}
+                raw = self.rfile.read(n) if n else b""
+                multipart = "multipart/form-data" in self.headers.get("Content-Type", "")
+                body = {"_multipart": raw} if multipart else (json.loads(raw) if raw else {})
                 p = urlsplit(self.path).path
                 auth = self.headers.get("Authorization", "")
                 hub.calls.append((self.command, self.path, body, auth))
@@ -1290,6 +1293,22 @@ class SessionHub:
                     return self._send(200, hub.state)
                 if p == "/api/sessions/s-1/leave":
                     return self._send(200, {"left": True})
+                if p == "/api/sessions/s-1/flag":
+                    return self._send(200, {"id": "f-1", "player": me[0], "t": body.get("t")})
+                if p == "/api/review-extras":
+                    return self._send(200, {"recording": "x", "player": me[0], "games": [
+                        {"gameKey": "g-1", "jumpAt": 200.0, "bookmarks": [{"t": 75.0, "text": "Rotate here"}],
+                         "talk": [{"id": "ta-0123456789ab", "track": "mic", "segments": [
+                             {"a0": 0, "a1": 10, "g0": 70, "g1": 80, "speed": 1, "gameKey": "g-1"}]}]}]})
+                if p.startswith("/api/session-audio/"):
+                    data = b"TALK" * 1000
+                    hub.audio_gets.append(p)
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mp4")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if not coach:
                     return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
                 if p == "/api/sessions/s-1/control":
@@ -1304,6 +1323,14 @@ class SessionHub:
                     hub.push({"type": "ended", "reason": "ended"})
                     hub.state = None
                     return self._send(200, {"ended": True})
+                if p == "/api/sessions/s-1/pointer":
+                    hub.push({"type": "pointer", **body})
+                    return self._send(200, {"ok": True})
+                if p == "/api/sessions/s-1/bookmark":
+                    return self._send(200, {"id": "b-1", "t": body.get("t"), "text": body.get("text")})
+                if p == "/api/session-audio" and self.command == "POST":
+                    hub.uploads.append(body["_multipart"])
+                    return self._send(hub.upload_code, {"id": "ta-1"})
                 return self._send(404, {"detail": "Not Found"})
 
             do_GET = do_POST = _go
@@ -1408,7 +1435,7 @@ def test_watch_together():
         fake.push({"type": "members", "members": {"Moe": {"t": 3.0, "connected": True}}})
         assert wait_for(lambda: b.watch.state["members"].get("Moe", {}).get("t") == 3.0)
         assert call(srv, "/api/watch/report", {"t": 14.25, "buffering": True})[1] == {"ok": True}
-        assert wait_for(lambda: fake.reports == [("Blakey", {"type": "report", "t": 14.25, "buffering": True})])
+        assert wait_for(lambda: fake.reports == [("Blakey", {"type": "report", "t": 14.25, "buffering": True, "browsing": False})])
         # the window's long poll returns at once on a change, else after the wait
         t0 = time.time()
         s2 = call(srv, f"/api/watch/poll?seq={b.watch.seq}&wait=0.5")[1]
@@ -1446,9 +1473,18 @@ def test_watch_page_files():
     js = (web / "session.js").read_text(encoding="utf-8")
     assert "https://www.youtube.com/iframe_api" in js
     assert [u for u in __import__("re").findall(r"https?://[^\s'\"`)]+", js) if "youtube.com" not in u] == []
-    for text in ("No video for", "Start session", "Join", "End session", "Leave", "Sound on"):
+    for text in ("No video for", "Start session", "Join", "End session", "Leave", "Sound on", "Paused by you",
+                 "Back to coach", "Look at this", "Bookmark", "Record talk", "agreement to record comms", "1 frame",
+                 "browsing", "FADE_MS = 300", "FRAME_S = 1 / 60"):
         assert text in js, text
-    assert "drawShapes(" in (web / "app.js").read_text(encoding="utf-8")
+    app = (web / "app.js").read_text(encoding="utf-8")
+    assert "drawShapes(" in app and "reviewExtras(d, v)" in app
+    # the review player's part: own file, after app.js, no outside address, talk read from the app only
+    assert html.index("app.js") < html.index("review-extras.js")
+    rx = (web / "review-extras.js").read_text(encoding="utf-8")
+    assert __import__("re").findall(r"https?://", rx) == [] and "/talk/" in rx
+    for text in ("Session bookmarks", "Review talk"):
+        assert text in rx, text
 
 
 def test_audio_track_never_blocks_the_review():
@@ -1593,6 +1629,233 @@ def run_all(tests):
     for name in failed:
         print("  failed:", name, flush=True)
     return 1 if failed else 0
+
+
+def test_watch_extras_through_the_app():
+    """Pointer, "Look at this", bookmarks, a player browsing, and afterwards the review player's session bookmarks
+    and review talk: all through the app, key only in the header."""
+    hub = _fresh_hub()
+    fake = SessionHub()
+    folder = TMP / "extras"
+    folder.mkdir(exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    rec.write_bytes(b"x" * 100)
+    auto = _Auto(str(TMP / "extrasrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    srv = pcs_server.Server(b)
+    srv.start()
+
+    def wait_for(cond, s=5):
+        end = time.time() + s
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    try:
+        assert call(srv, f"/api/library/{vid}/extras")[1] == {"available": False, "games": []}      # no key yet
+        hub.set_key(GOOD_KEY)
+        call(srv, "/api/watch/start", {"gameKey": "g-1"})
+        assert wait_for(lambda: b.watch.connected)
+        # the coach's pointer: sent, pushed back, in what the window reads (with when it came)
+        assert call(srv, "/api/watch/pointer", {"x": 0.25, "y": 0.5, "junk": 1})[0] == 200
+        assert fake.calls[-1][1:3] == ("/api/sessions/s-1/pointer", {"x": 0.25, "y": 0.5})
+        assert wait_for(lambda: (b.watch.pointer_at or {}).get("x") == 0.25)
+        snap = call(srv, "/api/watch/poll?seq=-1&wait=0")[1]
+        assert snap["pointer"]["y"] == 0.5 and snap["pointer"]["at"] > 0
+        call(srv, "/api/watch/pointer", {"hide": True})
+        assert wait_for(lambda: (b.watch.pointer_at or {}).get("hide") is True)
+        # a bookmark with its note and moment
+        r = call(srv, "/api/watch/bookmark", {"text": "Rotate here", "t": 75.5})[1]
+        assert r["id"] == "b-1" and fake.calls[-1][2] == {"text": "Rotate here", "t": 75.5}
+        # a player: "Look at this" at their own moment, and browsing in their report
+        hub.set_key(PLAYER_KEY)
+        call(srv, "/api/watch/join", {"id": "s-1"})
+        assert wait_for(lambda: b.watch.connected)
+        r = call(srv, "/api/watch/flag", {"t": 101.25})[1]
+        assert r["player"] == "Moe" and fake.calls[-1][2] == {"t": 101.25}
+        call(srv, "/api/watch/report", {"t": 30, "buffering": False, "browsing": True})
+        assert wait_for(lambda: any(m.get("browsing") for _, m in fake.reports))
+        assert call(srv, "/api/watch/bookmark", {"text": "x"})[0] == 500               # the hub: coach only
+        # afterwards, in the review player: bookmarks and the review talk of this recording's games
+        r = call(srv, f"/api/library/{vid}/extras")[1]
+        assert r["available"] and r["games"][0]["bookmarks"][0]["text"] == "Rotate here"
+        assert ("GET", "/api/review-extras?recording=Apex+Legends_2026.11.07-21.42", {}, "Bearer " + PLAYER_KEY) in fake.calls
+        code, data, h = call(srv, "/talk/ta-0123456789ab", raw=True, headers={"Range": "bytes=0-7"})
+        assert code == 206 and data == b"TALKTALK" and h["Content-Type"] == "audio/mp4"
+        assert call(srv, "/talk/ta-0123456789ab", raw=True)[1] == b"TALK" * 1000
+        assert fake.audio_gets == ["/api/session-audio/ta-0123456789ab"]                    # downloaded once
+        assert call(srv, "/talk/ta-0123456789ab", raw=True, token=False)[0] == 403
+        assert call(srv, "/talk/..%2f..%2fhub_key.dat", raw=True)[0] == 500
+        assert all(GOOD_KEY not in c[1] and PLAYER_KEY not in c[1] for c in fake.calls)
+    finally:
+        srv.stop()
+        fake.stop()
+        b.watch.leave()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+
+
+def test_review_talk_lined_up_with_game_time():
+    """Talk recorded in clock time, a session paused and seeked: segments say which audio goes with which game time."""
+    from pcs_recorder.talk import segments
+    tl = [{"w": 100.0, "playing": False, "t": 10.0, "at": 90.0, "speed": 1, "gameKey": "g"},
+          {"w": 103.0, "playing": False, "t": 10.0, "at": 91.0, "speed": 1, "gameKey": "g"},     # same moment: merged
+          {"w": 105.0, "playing": True, "t": 10.0, "at": 107.0, "speed": 1, "gameKey": "g"},     # hub clock = PC + 2
+          {"w": 115.0, "playing": False, "t": 50.0, "at": 117.0, "speed": 1, "gameKey": "g"},    # seek, paused
+          {"w": 118.0, "playing": True, "t": 50.0, "at": 120.0, "speed": 0.5, "gameKey": "g"},   # half speed
+          {"w": 118.1, "playing": True, "t": 50.05, "at": 120.1, "speed": 0.5, "gameKey": "g"}]  # too short: dropped
+    assert segments(tl, 100.0, 124.0, 2.0) == [
+        {"a0": 0.0, "a1": 5.0, "g0": 10.0, "g1": 10.0, "speed": 1, "gameKey": "g"},
+        {"a0": 5.0, "a1": 15.0, "g0": 10.0, "g1": 20.0, "speed": 1, "gameKey": "g"},
+        {"a0": 15.0, "a1": 18.0, "g0": 50.0, "g1": 50.0, "speed": 1, "gameKey": "g"},
+        {"a0": 18.1, "a1": 24.0, "g0": 50.05, "g1": 53.0, "speed": 0.5, "gameKey": "g"}]
+    # the recording started after the session's last change: from its own start
+    assert segments(tl[:1], 102.0, 104.0, 0) == [{"a0": 0.0, "a1": 2.0, "g0": 10.0, "g1": 10.0, "speed": 1, "gameKey": "g"}]
+
+
+def test_review_talk_recording():
+    """Review talk: only with comms consent, never while Apex runs or records; OBS records into its own folder and is
+    set back for game recording; the two sound tracks are copied out, the temporary video deleted, then sent to the
+    hub (coach only) and kept here until the hub took them."""
+    import threading
+    from pcs_recorder import core as reccore, settings as st, talk as talkmod
+    hub = _fresh_hub()
+    fake = SessionHub()
+    folder = TMP / "talkrecs"
+    s = st.Settings(folder=str(folder), comms_consent=False, discord_audio=True, mic_audio=True, hub_url=fake.url)
+
+    class Status:
+        def __init__(self, active):
+            self.output_active = active
+
+    class Client:
+        def __init__(self):
+            self.active, self.calls = False, []
+
+        def get_record_status(self):
+            return Status(self.active)
+
+        def set_record_directory(self, d):
+            self.calls.append(("dir", d))
+
+        def set_profile_parameter(self, *a):
+            self.calls.append(("param",) + a)
+
+        def start_record(self):
+            self.active = True
+            self.calls.append(("start",))
+
+        def stop_record(self):
+            self.active = False
+            f = talkmod.TALK_DIR / "PCS talk 2026.11.17-20.00.00.mkv"
+            f.write_bytes(b"v" * 500)
+            self.calls.append(("stop",))
+
+            class R:
+                output_path = str(f)
+            return R()
+
+    class Obs:
+        def __init__(self):
+            self.obs, self.ready, self.readied = type("I", (), {})(), True, 0
+            self.obs.c = Client()
+
+        def ensure_ready(self):
+            self.readied += 1
+
+    class Rec:
+        current, lock = None, threading.RLock()
+        apex = False
+
+        def is_apex_running(self):
+            return self.apex
+    r = Rec()
+    r.s, r.obs = s, Obs()
+    clock = [1000.0]
+    t = talkmod.Talk(r, clock=lambda: clock[0])
+    copied = []
+
+    def fake_extract(video, index, out):
+        copied.append((Path(video).name, index, Path(out).name))
+        Path(out).write_bytes(b"a" * (100 + index))
+        return Path(out)
+    real_extract = reccore.extract_track
+    reccore.extract_track = fake_extract
+    try:
+        assert "agreement" in t.why_not()
+        try:
+            t.start("s-1", None)
+            raise AssertionError("started without consent")
+        except RuntimeError:
+            pass
+        s.comms_consent = True
+        r.apex = True
+        assert "Close Apex" in t.why_not() and not r.obs.obs.c.calls
+        r.apex, r.current = False, "k"                                          # Apex being recorded
+        assert "Close Apex" in t.why_not()
+        r.current = None
+        assert t.state()["tracks"] == ["voice", "mic"] and t.why_not() == ""
+        st0 = {"id": "s-1", "playing": False, "t": 10.0, "at": 999.0, "speed": 1, "gameKey": "g-1"}
+        assert t.start("s-1", st0)["active"] and r.obs.readied == 1
+        c = r.obs.obs.c
+        assert c.calls[:3] == [("dir", str(talkmod.TALK_DIR)), ("param", "Output", "FilenameFormatting", talkmod.TALK_FILENAME), ("start",)]
+        clock[0] = 1004.0
+        t.event(dict(st0, playing=True, at=1004.0))
+        clock[0] = 1010.0
+        made = t.stop(0.0)
+        # OBS set back for game recording; tracks copied out (track order game, discord, mic); video deleted
+        from pcs_recorder.obs import FILENAME
+        assert c.calls[-2:] == [("dir", str(s.folder_path)), ("param", "Output", "FilenameFormatting", FILENAME)]
+        assert copied == [("PCS talk 2026.11.17-20.00.00.mkv", 1, "s-1-voice.m4a"), ("PCS talk 2026.11.17-20.00.00.mkv", 2, "s-1-mic.m4a")]
+        assert not list(talkmod.TALK_DIR.glob("*.mkv"))
+        assert [m["track"] for m in made] == ["voice", "mic"] and made[0]["segments"] == [
+            {"a0": 0.0, "a1": 4.0, "g0": 10.0, "g1": 10.0, "speed": 1.0, "gameKey": "g-1"},
+            {"a0": 4.0, "a1": 10.0, "g0": 10.0, "g1": 16.0, "speed": 1.0, "gameKey": "g-1"}]
+        assert talkmod.pending_count() == 2 and not t.active and t.stop() == []
+        # to the hub: coach key in the header, multipart with the segments; files gone once taken
+        assert talkmod.send_pending(fake.url) == 0                              # no key: nothing
+        hub.set_key(GOOD_KEY)
+        fake.upload_code = 500
+        assert talkmod.send_pending(fake.url) == 0 and talkmod.pending_count() == 2
+        fake.upload_code = 200
+        assert talkmod.send_pending(fake.url) == 2 and talkmod.pending_count() == 0
+        assert b'name="track"' in fake.uploads[-1] and b"s-1" in fake.uploads[-1] and b'"g1": 16.0' in fake.uploads[-1]
+        assert fake.calls[-1][3] == "Bearer " + GOOD_KEY and not list(talkmod.TALK_DIR.glob("*.m4a"))
+        # refused by the hub (e.g. a player's key): kept here, not sent again and again
+        t.start("s-1", st0)
+        clock[0] = 1020.0
+        t.stop(0.0)
+        fake.upload_code = 403
+        n = len(fake.uploads)
+        talkmod.send_pending(fake.url)
+        talkmod.send_pending(fake.url)
+        assert len(fake.uploads) == n + 2 and talkmod.pending_count() == 0 and len(talkmod.load_pending()) == 2
+        # Apex starts while talk records: the recorder stops it first (keeps what was said)
+        stops = []
+
+        class FakeTalk:
+            active = True
+
+            def stop(self, offset=None, why=""):
+                stops.append(why)
+        rr = reccore.Recorder.__new__(reccore.Recorder)
+        rr.lock, rr.talk, rr.current = threading.RLock(), FakeTalk(), None
+        rr.is_apex_running = lambda: True
+        started = []
+        rr._start = lambda: started.append(stops[:])
+        rr._manage_scan = rr._next_in_queue = lambda *a: None
+        rr.scan_proc, rr.night = None, None
+        rr.tick()
+        assert started == [["Apex started"]]
+    finally:
+        reccore.extract_track = real_extract
+        fake.stop()
+        _fresh_hub()
+        talkmod.save_pending([])
 
 
 if __name__ == "__main__":

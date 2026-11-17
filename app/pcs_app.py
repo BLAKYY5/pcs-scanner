@@ -27,7 +27,7 @@ def selftest(out):
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
-        import pcs_recorder.watch, websocket   # noqa: F401
+        import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
