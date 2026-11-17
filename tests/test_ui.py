@@ -1695,7 +1695,7 @@ def test_review_kill_feed_our_squad():
 
 
 class MinimapHub:
-    """A hub 0.5.1 with the `minimaps` collection: the list and the pictures need a key (any role). `docs` and `blobs`
+    """A hub 0.5.2 with the `minimaps` collection: the list and the pictures need a key (any role). `docs` and `blobs`
     can be changed by the test; `blob_calls` counts picture downloads."""
     JPEG = b"\xff\xd8\xff\xe0" + bytes(range(256)) * 8
     PNG = b"\x89PNG\r\n\x1a\n" + b"p" * 50

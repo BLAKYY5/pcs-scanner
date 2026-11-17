@@ -1,4 +1,4 @@
-"""The game's minimap pictures for the review player's Map panel, from the team hub (hub 0.5.1: collection `minimaps`).
+"""The game's minimap pictures for the review player's Map panel, from the team hub (hub 0.5.2: collection `minimaps`).
 
 - The pictures are EA's files: they are never in this repo or the install folder. The coach puts them on the hub once
   (the hub's `tools/upload_minimaps.py`); each player's app downloads one with the player's key the first time a game
