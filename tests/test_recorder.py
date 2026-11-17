@@ -2192,7 +2192,7 @@ def test_crash_reports_from_the_recorder():
         s.folder = str(TMP / f"vids-{time.time_ns()}")
         s.folder_path.mkdir(parents=True, exist_ok=True)
         apex = {"on": False}
-        clock = {"t": 1000.0}
+        clock = {"t": time.time()}
         obs = FakeOBS(s.folder_path)
 
         def bad_start():
@@ -2232,6 +2232,25 @@ def test_crash_reports_from_the_recorder():
         assert rep["context"]["exit_code"] == 2
     finally:
         _crash_teardown()
+
+
+def test_failed_recording_never_deletes_other_files():
+    """A recording without a file (path "") is older than the keep limit: retention removes the entry only, never the
+    files of the folder the app runs in (Path("") is the working folder; its glob matched every file there)."""
+    work = TMP / f"workdir-{time.time_ns()}"
+    work.mkdir()
+    keep = [make_file(work, n, 10) for n in ("PCS-Scanner.exe", "notes.txt", ".gitignore")]
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        idx = {"f": retention.Entry(path="", started=time.time() - 30 * 86400, status="failed"),
+               "g": retention.Entry(path="relative.mp4", started=time.time() - 30 * 86400, status="failed")}
+        assert retention.files_of(idx["f"]) == [] and retention.files_of(idx["g"]) == []
+        removed = retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert all(p.exists() for p in keep), [p.name for p in work.iterdir()]
+        assert removed == [] and idx == {}                                  # entries forgotten, nothing deleted
+    finally:
+        os.chdir(old_cwd)
 
 
 def test_crash_obs_crash_files():

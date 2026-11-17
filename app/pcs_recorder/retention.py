@@ -86,9 +86,14 @@ def save_sent(sent: dict[str, dict], idx: dict[str, Entry]) -> None:
 
 
 def files_of(entry: Entry) -> list[Path]:
-    """The video plus anything the scanner wrote next to it (same name, other extension)."""
+    """The video plus anything the scanner wrote next to it (same name, other extension).
+    A recording without a file (OBS gave none: path "") has no files. Path("") is the working folder and its stem
+    is "", so the glob below would match every file there: retention then deleted the whole folder the app was
+    started from (the exe's folder) once that failed recording was older than the keep limit."""
+    if not entry.path or not entry.path.strip():
+        return []
     p = Path(entry.path)
-    if not p.parent.exists():
+    if not p.stem or not p.is_absolute() or not p.parent.exists():
         return []
     return [f for f in p.parent.glob(p.stem + "*") if f.is_file()]
 
