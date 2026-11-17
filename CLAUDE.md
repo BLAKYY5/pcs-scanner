@@ -182,6 +182,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   each app downloads them with the key into the data folder (`minimaps/`), never in this repo. No hub / no key: "Minimap
   needs the team hub"; no picture (Olympus) or map `?`: "No minimap for this map yet". Drawn on changes only (time,
   view, size), never in an animation loop. Key M = map (mute moved to U).
+- **Hub backup copy** (`pcs_recorder/hubbackup.py`, coach's hub key only, hub 0.5.4 `GET`/`HEAD /api/backup/latest`):
+  a second copy of the hub's nightly zip (`pcs-hub-<yyyymmdd>.zip`) on the coach's main PC (coach's decision, 17 Nov
+  2026: "Yes, also on E:"). Settings → Team hub shows "Hub backup copy" only when `/api/me` says coach (asked at most
+  every 6 h, or by Test). Folder default `E:\PCS Hub backups` when an E: drive exists, else off; never the Windows
+  drive (refused). Once a day from 04:00 (or the next app start after), only while Apex is closed and nothing records,
+  scans or records review talk (not even a request then): HEAD, skip if that date is there, download at background
+  priority to `.partial`, check size + zip, rename; Apex starting meanwhile stops it (not a failure). Keeps the newest
+  N (14) files named exactly `pcs-hub-<8 digits>.zip`, nothing else touched. No pop-up: one Activity line
+  "Hub backup copy failed: <reason>" after failures on 3 days in a row. State in `hub-backup.json` (never the key).
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for
