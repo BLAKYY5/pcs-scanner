@@ -539,16 +539,24 @@ class Uploader:
                             "tags": tags_for(self.s, desc, kind)},
                 "status": {"privacyStatus": privacy or self.s.yt_privacy, "selfDeclaredMadeForKids": False}}
         media = MediaFileUpload(str(path), mimetype="video/mp4", chunksize=16 * 1024 * 1024, resumable=True)
-        req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
-        resp = None
-        while resp is None:
-            while self.is_apex_running():                     # never share the connection with a game
-                self.status = "YouTube upload paused while Apex runs"
-                time.sleep(10)
-            status, resp = req.next_chunk(num_retries=5)
-            if status:
-                self.status = f"Uploading to YouTube: {int(status.progress() * 100)}%"
-        return resp["id"]
+        try:
+            req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
+            resp = None
+            while resp is None:
+                while self.is_apex_running():                     # never share the connection with a game
+                    self.status = "YouTube upload paused while Apex runs"
+                    time.sleep(10)
+                status, resp = req.next_chunk(num_retries=5)
+                if status:
+                    self.status = f"Uploading to YouTube: {int(status.progress() * 100)}%"
+            return resp["id"]
+        finally:
+            # MediaFileUpload keeps the file open until it is garbage-collected: close it now, or Windows refuses
+            # to delete the joined video afterwards (several GB left in the recordings folder)
+            try:
+                media.stream().close()
+            except Exception:
+                pass
 
     def request(self, key: str) -> list[str] | None:
         """Upload the block this recording belongs to (by hand: also older or non-scrim blocks)."""
