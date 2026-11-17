@@ -375,8 +375,93 @@ class Uploader:
         out.sort(key=lambda ks: self.state.get(ks[0], {}).get("status") != "requested")
         return out
 
+    # ---------------------------------------------------------- the video's place on the team hub (Watch together)
+    HUB_BACKOFF = (60, 120, 240, 480, 900)        # same as the scan results: 1, 2, 4, 8 min, then every 15 min
+
+    def video_mapping(self, bid: str) -> dict | None:
+        """What the hub needs to play this block's video for each game: the video, and which recordings it holds
+        at what offsets (with each game's jump time from the scans, for reference). None = can't be told."""
+        st = self.state.get(bid, {})
+        keys, vid = st.get("keys") or [], st.get("video")
+        idx = self.rec.idx
+        if st.get("status") != "done" or not vid or not keys or any(k not in idx or not idx[k].path for k in keys):
+            return None
+        offs, durs = st.get("offsets"), st.get("durations")
+        if not offs or len(offs) != len(keys) or not durs or len(durs) != len(keys):
+            try:                                   # uploaded by an older version: the recordings tell
+                durs = [duration(idx[k].path) for k in keys]
+            except Exception:
+                return None
+            offs = [sum(durs[:i]) for i in range(len(keys))]
+        recs, games = [], []
+        for k, off, d in zip(keys, offs, durs):
+            name = Path(idx[k].path).stem
+            recs.append({"file": name, "offset": round(off, 3), "duration": round(d, 3)})
+            for g in scan_of(idx[k]).get("games", []):
+                ld = g.get("landing") or {}
+                jump = ld.get("exitAtExact") or ld.get("exitAt")
+                if jump is not None:
+                    games.append({"file": name, "jumpAt": round(jump, 3), "videoAt": round(off + jump, 3)})
+        return {"video": vid, "privacy": st.get("privacy_used") or st.get("privacy") or self.s.yt_privacy,
+                "title": st.get("title") or "", "duration": round(sum(durs), 3), "recordings": recs, "games": games}
+
+    def send_to_hub(self) -> int:
+        """Blocks on YouTube whose video the hub doesn't know yet: told to the hub. No hub (or no key): nothing,
+        silently. Refused key: waits for a new key or address; 429: Retry-After; network or hub errors: backoff.
+        A hub from before 0.5 (404): asked again after 6 h. Returns how many were sent."""
+        from . import hub
+        url = self.s.hub_url
+        if not url or not hub.get_key():
+            return 0
+        now = self.clock()
+        if url != getattr(self, "hub_url_tried", url):
+            self.hub_next, self.hub_fails = 0.0, 0
+        if now < getattr(self, "hub_next", 0.0):
+            return 0
+        sent = 0
+        for bid, st in sorted(self.state.items(), key=lambda x: x[1].get("at") or 0):
+            if st.get("status") != "done" or not st.get("video") or st.get("hub_video") in ("sent", "gone", "refused") \
+                    or st.get("hub_video_next", 0) > now:
+                continue
+            m = self.video_mapping(bid)
+            if m is None:
+                st["hub_video"] = "gone"           # recordings deleted: nothing to tell
+                save_state(self.state)
+                continue
+            try:
+                r = hub.request(url, "POST", "/api/videos", json=m, timeout=10)
+                if r.status_code == 404:          # an older hub: ask again later
+                    st["hub_video_next"] = now + 6 * 3600
+                    save_state(self.state)
+                    continue
+                hub._check(r)
+            except hub.HubError as e:
+                self.hub_url_tried = url
+                if e.kind == "http" and 400 <= e.status < 500:
+                    st["hub_video"] = "refused"   # the hub said no to this one: not asked again
+                    save_state(self.state)
+                    log.info("hub refused the video of block %s: %s", bid, e)
+                    continue
+                if e.kind in ("network", "http"):
+                    self.hub_fails = getattr(self, "hub_fails", 0) + 1
+                    self.hub_next = now + self.HUB_BACKOFF[min(self.hub_fails, len(self.HUB_BACKOFF)) - 1]
+                log.info("video not sent to the hub yet: %s", e)
+                return sent
+            st["hub_video"] = "sent"
+            st.pop("hub_video_next", None)
+            save_state(self.state)
+            self.hub_fails, self.hub_next = 0, 0.0
+            sent += 1
+        return sent
+
     def tick(self) -> None:
-        if not self.s.yt_enabled or (self.thread and self.thread.is_alive()) or self.is_apex_running():
+        if self.is_apex_running():
+            return
+        try:
+            self.send_to_hub()
+        except Exception:
+            log.exception("sending videos to the hub failed")
+        if not self.s.yt_enabled or (self.thread and self.thread.is_alive()):
             return
         ready = self.ready_blocks()
         if not ready:
@@ -411,10 +496,11 @@ class Uploader:
             tracks = [events_of(idx[k]).get("tracks") or ["game"] for k in keys]
             audio = self.s.yt_audio if self.s.comms_consent else "game"
             self.status = "Preparing the YouTube video"
-            offsets, t = [], 0.0
+            offsets, durations, t = [], [], 0.0
             for p in paths:
                 offsets.append(t)
-                t += duration(p)
+                durations.append(duration(p))
+                t += durations[-1]
             kind, _ = block_label(idx, keys)
             title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio,
                                             results=st.get("eec_res"), kind=kind)
@@ -423,7 +509,9 @@ class Uploader:
             st.update(status="uploading", title=title)
             save_state(self.state)
             vid = self._send(out, title, desc, privacy=st.get("privacy"), kind=kind)
-            st.update(status="done", video=vid, url=f"https://youtu.be/{vid}", at=self.clock())
+            st.update(status="done", video=vid, url=f"https://youtu.be/{vid}", at=self.clock(),
+                      offsets=offsets, durations=durations, privacy_used=st.get("privacy") or self.s.yt_privacy,
+                      hub_video="pending")
             save_state(self.state)
             self.ui.notify("Scrim block on YouTube", f"{title}\nhttps://youtu.be/{vid}")
         except Exception as e:

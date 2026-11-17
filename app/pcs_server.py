@@ -747,6 +747,99 @@ class Backend:
             raise ValueError("unknown action")
         return self.notes(item_id, player)
 
+    # ------------------------------------------------------------- watch together (team hub sessions)
+    @property
+    def watch(self):
+        """pcs_recorder.watch.Watch: shared review sessions through the hub (the key stays in this process)."""
+        if getattr(self, "_watch", None) is None:
+            from pcs_recorder import watch
+            self._watch = watch.Watch(lambda: self.auto.s.hub_url if self.auto else "")
+            self._watch.on_state = self._talk_event
+        return self._watch
+
+    @property
+    def talk(self):
+        """pcs_recorder.talk.Talk of the auto-recorder (review talk, coach's app), or None."""
+        return getattr(getattr(self.auto, "rec", None), "talk", None) if self.auto else None
+
+    def _talk_event(self, st: dict, offset: float) -> None:
+        t = self.talk
+        if t is not None and t.active and st.get("id") == t.sid:
+            t.offset = offset
+            t.event(st)
+
+    def talk_state(self) -> dict:
+        from pcs_recorder import talk as talkmod
+        t = self.talk
+        if t is None:
+            return {"available": False, "active": False, "why": "Review talk needs auto-record (Settings → Recording)",
+                    "pending": 0}
+        return {"available": True, **t.state(), "pending": talkmod.pending_count()}
+
+    def talk_stop(self, why: str = "") -> None:
+        """Stop the review talk (if any) and send it to the hub in the background."""
+        from pcs_recorder import talk as talkmod
+        t = self.talk
+        if t is None or not t.active:
+            return
+        t.stop(self.watch.offset, why)
+        url = self.auto.s.hub_url if self.auto else ""
+        threading.Thread(target=talkmod.send_pending, args=(url,), daemon=True, name="talk-upload").start()
+
+    def talk_retry(self, every_s: float = 300) -> None:
+        """Review talk the hub didn't take yet (hub down, app closed): tried again, at most every 5 min."""
+        from pcs_recorder import talk as talkmod
+        if self.talk is None or self.talk.active or time.time() - getattr(self, "_talk_tried", 0) < every_s:
+            return
+        self._talk_tried = time.time()
+        if talkmod.pending_count():
+            threading.Thread(target=talkmod.send_pending, args=(self.auto.s.hub_url,), daemon=True).start()
+
+    def review_extras(self, item_id: str, player: str | None = None) -> dict:
+        it = self.find(item_id)
+        if not it:
+            raise RuntimeError("Recording not found")
+        return self.watch.extras(it["path"], player)
+
+    def watch_post(self, action: str, body: dict) -> dict:
+        w = self.watch
+        if action == "talk":
+            if body.get("on"):
+                if not w.sid or w.ended or (w.me or {}).get("role") != "coach":
+                    raise RuntimeError("Only the coach records review talk, in a running session")
+                if self.talk is None:
+                    raise RuntimeError("Review talk needs auto-record (Settings → Recording)")
+                self.talk.start(w.sid, w.state)
+            else:
+                self.talk_stop("by the coach")
+            return self.talk_state()
+        if action == "pointer":
+            return w.pointer(body)
+        if action == "flag":
+            return w.flag(body.get("t"))
+        if action == "bookmark":
+            return w.bookmark(body.get("text") or "", body.get("t"))
+        if action == "start":
+            return w.start(body.get("gameKey") or "")
+        if action == "join":
+            return w.join(body.get("id") or "")
+        if action == "control":
+            return w.control(body)
+        if action == "draw":
+            return w.draw(body)
+        if action == "report":
+            w.report(body.get("t"), bool(body.get("buffering")), bool(body.get("browsing")))
+            return {"ok": True}
+        if action == "leave":
+            self.talk_stop("left the session")
+            w.leave()
+            return w.snapshot()
+        if action == "end":
+            self.talk_stop("session ended")
+            w.end()
+            return w.snapshot()
+        raise ValueError("unknown action")
+
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
         """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
@@ -959,10 +1052,11 @@ class Server:
                 return self._video(item_id, str(p))
 
             def _video(self, item_id, p=None):
-                it = b.find(item_id)
-                if not it:
-                    return self._json({"error": "not found"}, 404)
-                p = p or it["path"]
+                if p is None:                               # a recording; else a file the caller already checked
+                    it = b.find(item_id)
+                    if not it:
+                        return self._json({"error": "not found"}, 404)
+                    p = it["path"]
                 try:
                     size = os.path.getsize(p)
                 except FileNotFoundError:
@@ -1018,13 +1112,15 @@ class Server:
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
                 path = unquote(u.path)
-                if not path.startswith(("/api/", "/video/", "/audio/")):
+                if not path.startswith(("/api/", "/video/", "/audio/", "/talk/")):
                     if not self._ok_origin():
                         return self._json({"error": "forbidden"}, 403)
                     return self._static(path)
                 if not self._authed(q):
                     return self._json({"error": "forbidden"}, 403)
                 try:
+                    if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
+                        return self._video(None, str(b.watch.audio(path.split("/")[2])))
                     if path.startswith("/audio/"):
                         parts = path.split("/")
                         return self._audio(parts[2], parts[3])
@@ -1040,6 +1136,18 @@ class Server:
                         return self._json(b.mics())
                     if path == "/api/voiceapps":
                         return self._json(b.voice_apps())
+                    if path == "/api/watch/list":
+                        b.talk_retry()
+                        return self._json(b.watch.listing(fresh=bool((q.get("fresh") or [""])[0])))
+                    if path == "/api/watch/poll":
+                        snap = b.watch.poll(int((q.get("seq") or ["-1"])[0]), float((q.get("wait") or ["15"])[0]))
+                        if snap.get("ended"):
+                            b.talk_stop("session ended")        # ended by the hub (idle, replaced): talk too
+                        return self._json(snap)
+                    if path == "/api/watch/talk":
+                        return self._json(b.talk_state())
+                    if path.startswith("/api/library/") and path.endswith("/extras"):
+                        return self._json(b.review_extras(path.split("/")[3], (q.get("player") or [""])[0] or None))
                     if path.startswith("/api/library/") and path.endswith("/notes"):
                         return self._json(b.notes(path.split("/")[3], (q.get("player") or [""])[0] or None))
                     if path.startswith("/api/library/") and path.endswith("/levels"):
@@ -1085,6 +1193,8 @@ class Server:
                                                      body.get("title"), body.get("privacy")))
                     if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen"):
                         return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
+                    if path.startswith("/api/watch/"):
+                        return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
                     if path == "/api/label":
                         return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
                     if path == "/api/signin":

@@ -682,6 +682,8 @@ class AutoRecorder:
             self.ui.actions["signin"] = ("Sign in with Google", signin)
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
+        from .talk import Talk
+        self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
         self.thread = None
         self.hotkeys = Hotkeys(self.s, self.rec)
         if youtube_service:
