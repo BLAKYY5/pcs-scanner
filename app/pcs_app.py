@@ -6,7 +6,7 @@ in their own thread, so they work while the main window is hidden. The app lives
 hides it; "Quit" in the tray menu ends it.
 
 Command line:  PCS-Scanner.exe                 the window (+ tray)
-               PCS-Scanner.exe --background    tray only (used at Windows start-up)
+               PCS-Scanner.exe --background    tray only (used at Windows start-up, and after an update with --updated)
                PCS-Scanner.exe --scan FILE... [--out DIR]   scan without a window (used for every scan)
                PCS-Scanner.exe --selftest OUT  used by the build to check the .exe
 
@@ -81,6 +81,7 @@ class Window:
 
     def __init__(self, url, hidden):
         self.url, self.hidden = url, hidden
+        self.visible = not hidden                          # the player can see the window (not tray, not minimized)
         self.w = None
         self.quitting = False
         self.done = threading.Event()
@@ -91,6 +92,7 @@ class Window:
             try:
                 self.w.show()
                 self.w.restore()
+                self._seen(True)
                 if page:
                     self.w.evaluate_js(f"location.hash = '#{page}'")
                 return
@@ -112,6 +114,9 @@ class Window:
                                            min_size=(980, 640), hidden=self.hidden, background_color='#121211')
             self.w.events.closing += self._closing
             self.w.events.loaded += self._hook_drop
+            self.w.events.minimized += lambda: self._seen(False)
+            self.w.events.restored += lambda: self._seen(True)
+            self.w.events.maximized += lambda: self._seen(True)
             webview.start(private_mode=False, storage_path=os.path.join(core.DATA, 'webview'))
             return
         except Exception:
@@ -153,8 +158,63 @@ class Window:
     def _closing(self):
         if self.quitting:
             return True
-        threading.Thread(target=self.w.hide, daemon=True).start()   # closing = back to the tray
+        threading.Thread(target=self.hide, daemon=True).start()     # closing = back to the tray
         return False
+
+    # WebView2 doesn't notice by itself that its window went to the tray: a hidden window kept drawing at the
+    # screen's refresh rate (measured 17 Nov 2026: 360 frames a second on a 360 Hz screen, a third of a CPU core,
+    # for hours, next to the game). So the app tells it: hidden or minimized = the web view is set invisible (the
+    # page stops drawing, document.hidden is true and its timers stop), then suspended (no work at all); shown
+    # again = visible, which also resumes it at once.
+    def _native(self):
+        form = getattr(self.w, 'native', None) if self.w is not None else None
+        return form, getattr(getattr(form, 'browser', None), 'webview', None)
+
+    def _on_gui(self, fn):
+        form, _ = self._native()
+        if form is None:
+            return False
+        from System import Func, Type
+        form.Invoke(Func[Type](fn))
+        return True
+
+    def _seen(self, seen, hide_form=False):
+        """seen=False: invisible + suspended (hide_form: and the window goes to the tray). seen=True: visible."""
+        self.visible = seen
+        form, ctl = self._native()
+        if ctl is None:
+            if hide_form and self.w is not None:
+                self.w.hide()
+            return
+
+        def go():
+            ctl.Visible = seen                         # passed on to WebView2 (CoreWebView2Controller.IsVisible)
+            if hide_form:
+                form.Hide()
+        try:
+            self._on_gui(go)
+        except Exception:
+            logging.exception('web view visibility')
+            if hide_form:
+                self.w.hide()
+        if not seen:
+            threading.Timer(1.0, self._suspend).start()   # a moment for the page to see it is hidden
+
+    def _suspend(self):
+        _, ctl = self._native()
+        if ctl is None or getattr(self, 'visible', True):
+            return
+
+        def go():
+            if not ctl.Visible and ctl.CoreWebView2 is not None:
+                ctl.CoreWebView2.TrySuspendAsync()     # refused (no harm) e.g. while the page plays sound
+        try:
+            self._on_gui(go)
+        except Exception:
+            logging.exception('web view suspend')
+
+    def hide(self):
+        self._seen(False, hide_form=True)
 
     def _hook_drop(self):
         """Dropped files: the page doesn't get their location, pywebview does."""
@@ -269,6 +329,7 @@ def show_running_instance():
 
 def main():
     background = '--background' in sys.argv
+    updated = '--updated' in sys.argv                      # restarted by the updater, in the tray (core.relaunch_args)
     if not first_instance():
         if not background:
             show_running_instance()                        # the running one shows its window instead
@@ -298,16 +359,24 @@ def main():
             b.auto.s.player = SETTINGS.get('player', '')
         b.auto.ui.actions["eeclink"] = ("Paste the link", lambda: win.show('recordings'))
 
-        def update_now():
-            win.show()
+        def update_now():                                  # the corner message's button: the app stays in the tray
             def go():
-                why = b.install_update()
+                why = b.install_update(show=bool(getattr(win, 'visible', False)))
                 if why:
                     b.say(why)
+                    b.auto.ui.notify('Update not installed', why)
             threading.Thread(target=go, daemon=True).start()
         b.auto.ui.actions["update"] = ("Update", update_now)
         autorec.hold_guard(lambda: win.show())
         b.auto.tray(lambda: win.show(), lambda: b.quit(), open_settings=lambda: win.show('settings'))
+        if updated:                                        # tell the player: the window doesn't open after an update
+            v = BUILD.get('version', '')
+            try:
+                b.auto.ui.icon.title = f'{APP} {v}: updated'
+            except Exception:
+                pass
+            b.auto.ui.notify('PCS Scanner updated', f'Version {v} is installed and running in the tray. '
+                             'Click the tray icon to open it.')
         if b.auto.s.enabled:
             b.auto.run_loop()
     tk_thread = TkThread(setup)
@@ -374,7 +443,7 @@ def main():
             time.sleep(60)
     threading.Thread(target=background_checks, daemon=True).start()
 
-    if background and not (b.auto and (b.auto.s.enabled or b.auto.s.start_with_windows)):
+    if background and not updated and not (b.auto and (b.auto.s.enabled or b.auto.s.start_with_windows)):
         quit_app(); return                                 # start-up shortcut left over: nothing to do
     win.run()
     quit_app()
@@ -388,5 +457,5 @@ if __name__ == '__main__':
         sys.exit(headless_scan(sys.argv[sys.argv.index('--scan') + 1:]))
     if '--finish-update' in sys.argv:
         i = sys.argv.index('--finish-update')
-        core.finish_update(sys.argv[i + 1], sys.argv[i + 2]); sys.exit(0)
+        core.finish_update(sys.argv[i + 1], sys.argv[i + 2], show='--show' in sys.argv); sys.exit(0)
     main()

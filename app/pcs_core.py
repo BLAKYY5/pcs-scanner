@@ -32,7 +32,61 @@ SETTINGS_F = os.path.join(DATA, 'settings.json')
 SETTINGS = load_json(SETTINGS_F, {'player': '', 'role': '', 'uploaded': [], 'library': []})
 SETTINGS.setdefault('library', [])   # videos added by hand (the Recordings page lists them)
 def save_settings(): json.dump(SETTINGS, open(SETTINGS_F, 'w', encoding='utf-8'), indent=1)
-logging.basicConfig(filename=os.path.join(DATA, 'app.log'), level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+
+# ---------------- log (never a password in it) ----------------
+# The OBS remote-control library logs its connection settings, password included, at INFO ("Connecting with
+# parameters: ... password='...'"). Up to 1.10.10 that went to app.log. Now: that library logs warnings only, every
+# line is passed through redact() on its way to the file, and lines already written are cleaned at start.
+LOG_F = os.path.join(DATA, 'app.log')
+import re as _re
+_SECRET = _re.compile(r"""(password\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;)'"]+)""", _re.IGNORECASE)
+
+def redact(text):
+    """password=... / password: ... values replaced by ***."""
+    return _SECRET.sub(r'\1***', text)
+
+class RedactFilter(logging.Filter):
+    def filter(self, record):
+        try: msg = record.getMessage()
+        except Exception: return True
+        clean = redact(msg)
+        if clean != msg: record.msg, record.args = clean, None
+        return True
+
+def scrub_log(path=None):
+    """Clean password values out of a log written by an older version. The file is rewritten next to itself and
+    swapped in one step; if another program holds it open (Windows refuses the swap), it is left as it is and
+    tried again at the next start. -> number of lines cleaned."""
+    path = path or LOG_F
+    tmp = path + '.scrub'
+    try:
+        with open(path, 'rb') as f: data = f.read()
+    except OSError:
+        return 0
+    if b'password' not in data.lower(): return 0
+    lines, n = data.decode('utf-8', errors='surrogateescape').splitlines(keepends=True), 0
+    for i, ln in enumerate(lines):
+        if 'password' in ln.lower():
+            clean = redact(ln)
+            if clean != ln: lines[i], n = clean, n + 1
+    if not n: return 0
+    try:
+        with open(tmp, 'wb') as f: f.write(''.join(lines).encode('utf-8', errors='surrogateescape'))
+        os.replace(tmp, path)
+    except OSError:
+        try: os.remove(tmp)
+        except OSError: pass
+        return 0
+    return n
+
+def setup_logging():
+    if not any(a in sys.argv for a in ('--scan', '--finish-update', '--selftest')):
+        scrub_log()                                            # before the log is opened by this process
+    logging.basicConfig(filename=LOG_F, level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+    for h in logging.getLogger().handlers:
+        if not any(isinstance(f, RedactFilter) for f in h.filters): h.addFilter(RedactFilter())
+    logging.getLogger('obsws_python').setLevel(logging.WARNING)
+setup_logging()
 
 SCOPES = ['https://www.googleapis.com/auth/drive.file']
 TOKEN_F = os.path.join(DATA, 'google_token.json')
@@ -207,9 +261,10 @@ def staged_path(cur=None):
     cur = cur or sys.executable
     return os.path.join(os.path.dirname(cur), 'PCS-Scanner.update.exe')
 
-def install_update(url, log, size=None):
+def install_update(url, log, size=None, show=False):
     """Download the new exe next to the current one and start it with --finish-update: once this app has
-    closed, the new exe copies itself over the old one and starts it (log in update.log)."""
+    closed, the new exe copies itself over the old one and starts it (log in update.log). show = the player pressed
+    Update in the open window: the new version opens its window; otherwise it starts in the tray."""
     if not getattr(sys, 'frozen', False): return False
     cur = sys.executable
     new = staged_path(cur)
@@ -225,7 +280,7 @@ def install_update(url, log, size=None):
         raise RuntimeError('The download was incomplete. Try Update again.')
     os.replace(tmp, new)
     ulog(f'downloaded {got} bytes; starting the finisher')
-    spawn_detached([new, '--finish-update', cur, str(os.getpid())])
+    spawn_detached([new, '--finish-update', cur, str(os.getpid())] + (['--show'] if show else []))
     log('Update downloaded: PCS Scanner restarts in a few seconds.')
     return True
 
@@ -238,9 +293,17 @@ def spawn_detached(cmd):
     except OSError:
         return subprocess.Popen(cmd, creationflags=DETACHED | NEW_GROUP, close_fds=True)
 
-def finish_update(cur, old_pid):
+def relaunch_args(cur, ok, show):
+    """How the finisher starts the app again. Updated: in the tray (--background) with --updated (the new version
+    says so in a corner message and never closes itself), or with its window when the player pressed Update in the
+    open window. Copy failed: the old version, with its window, as before (it doesn't know --updated)."""
+    if not ok or show: return [cur]
+    return [cur, '--background', '--updated']
+
+def finish_update(cur, old_pid, show=False):
     """Runs in the new exe: wait for the old app to close, copy over it, start it. Never leaves the player
-    without an app: if the copy fails, the old version is started again."""
+    without an app: if the copy fails, the old version is started again. Started by an older version, there is
+    no --show: the new version starts in the tray (the corner message tells the player)."""
     import shutil
     ulog(f'finisher started (waiting for {old_pid})')
     try:
@@ -258,8 +321,10 @@ def finish_update(cur, old_pid):
         except OSError as e:
             if i == 0 or i % 10 == 9: ulog(f'copy attempt {i + 1}: {e}')
             time.sleep(1)
-    ulog('copied, starting the new version' if ok else 'copy failed: starting the old version again')
-    spawn_detached([cur])
+    args = relaunch_args(cur, ok, show)
+    ulog(('copied, starting the new version' if ok else 'copy failed: starting the old version again')
+         + (' (window)' if len(args) == 1 else ' (tray)'))
+    spawn_detached(args)
 
 def cleanup_staged():
     """Remove the downloaded installer once the new version runs from its usual place."""

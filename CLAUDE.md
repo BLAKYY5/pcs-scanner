@@ -103,7 +103,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
-  Dev builds are offered releases ≥ their `base`.
+  Dev builds are offered releases ≥ their `base`. The restart is in the tray (`--background --updated`: a corner
+  message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).
+- **Quiet window** (a slower Apex session, 17 Nov 2026): WebView2 does not stop drawing when its window goes to the
+  tray. A hidden window with the old pulsing dots drew 358 frames/s on a 360 Hz screen (~70 % of a CPU core plus GPU)
+  for whole sessions. Now: no endless CSS animation (a test checks `app.css`), the web view is set invisible and
+  suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
+  every 10 s while Apex runs unless the player uses the window, never while hidden.
+- **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
+  through `pcs_core.redact`. `scrub_log` cleans old lines at start; the obs-websocket password is renewed once
+  (`obs.renew_password`, only while our OBS is closed).
 - **Results to hub and Drive**: a recording is "uploaded" once the hub OR Drive took its results; where they went is
   kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not

@@ -219,13 +219,14 @@ class Backend:
             self.say(text)
         return status
 
-    def install_update(self) -> str | None:
-        """Download and restart into the new version; returns why not, if it can't now."""
+    def install_update(self, show: bool = False) -> str | None:
+        """Download and restart into the new version; returns why not, if it can't now. show: pressed in the open
+        window, so the new version opens its window too (otherwise it starts in the tray)."""
         why = self.update_blocked()
         if why:
             return why
         if self.update and self.update[1] and core.install_update(
-                self.update[1], self.say, self.update[3] if len(self.update) > 3 else None):
+                self.update[1], self.say, self.update[3] if len(self.update) > 3 else None, show=show):
             threading.Timer(1.0, self.quit).start()
         return None
 
@@ -657,6 +658,20 @@ class Backend:
                 self._worker_running = False
 
     # ------------------------------------------------------------- state for the Home page
+    def apex_now(self) -> bool:
+        """Apex running: what the recorder saw at its last look (every 3 s), else a look at most every 10 s."""
+        a = self.auto
+        if a and a.s.enabled and getattr(a, "thread", None):
+            return bool(getattr(a.rec, "apex", False))
+        if time.time() - getattr(self, "_apex_at", 0) > 10:
+            self._apex_at = time.time()
+            try:
+                from pcs_recorder.core import apex_running
+                self._apex = apex_running()
+            except Exception:
+                self._apex = False
+        return bool(getattr(self, "_apex", False))
+
     def state(self) -> dict:
         a = self.auto
         rec = None
@@ -672,6 +687,7 @@ class Backend:
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
+                "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
                 "teamLink": core.SETTINGS.get("team_link", ""),
@@ -1223,7 +1239,7 @@ class Server:
                         b.signin()
                         return self._json({"ok": True})
                     if path == "/api/update":
-                        why = b.install_update()
+                        why = b.install_update(show=True)          # the window's button: the window comes back
                         return self._json({"error": why}, 409) if why else self._json({"ok": True})
                     if path == "/api/update/check":
                         threading.Thread(target=b.check_update, args=(UPDATE_ON_OPEN_S,), daemon=True).start()

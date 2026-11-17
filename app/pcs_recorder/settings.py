@@ -76,6 +76,7 @@ class Settings:
     capture: str = "window"                            # window | game | display
     obs_port: int = 4466
     obs_password: str = field(default_factory=lambda: secrets.token_urlsafe(16))
+    obs_password_new: bool = False                     # replaced once after versions <= 1.10.10 logged it (obs.py)
     encoder: str = ""                                  # found by the first-run encoder test
 
     def clamp(self) -> "Settings":
