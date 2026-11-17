@@ -54,6 +54,7 @@ class Recorder:
         self.next_upload = 0.0
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
+        self.apex = False                        # Apex running at the last tick()
         self.lock = threading.RLock()
         self.youtube = None                      # youtube.Uploader, attached by the app
         self.talk = None                         # talk.Talk (review talk of a Watch together session), by the app
@@ -81,6 +82,7 @@ class Recorder:
     def tick(self) -> None:
         with self.lock:
             apex = self.is_apex_running()
+            self.apex = apex                     # read by the window (it polls less often during games)
             if apex and self.talk is not None and self.talk.active:
                 try:                                 # the game recording comes first: keep what was said, stop
                     self.talk.stop(why="Apex started")

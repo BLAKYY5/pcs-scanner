@@ -82,9 +82,11 @@ async function joinSession(id, btn) {
 
 /* ------------------------------------------------------------------ "Join" bar on the other pages */
 async function checkSessions() {
-  clearTimeout(WT.listTimer);
+  clearTimeout(WT.listTimer); WT.listTimer = null;
+  if (document.hidden) return;                       // hidden (tray, minimized): nothing until shown (visibilitychange)
   WT.listTimer = setTimeout(checkSessions, 15000);
-  if (document.hidden || !S || !S.hub || !S.hub.url || !S.hub.key || S.hub.refused) return showBar(null);
+  // while Apex runs nobody reviews: the hub isn't asked (quiet window, see app.js)
+  if ((S && S.apex) || !S || !S.hub || !S.hub.url || !S.hub.key || S.hub.refused) return showBar(null);
   try { WT.list = await api('/api/watch/list'); } catch (e) { return; }
   const mine = inSession() ? (WT.list.sessions || []).find(s => s.id === WT.snap.sid) : null;
   const other = (WT.list.sessions || []).find(s => s.canJoin && s.id !== WT.barDismissed && (!inSession() || s.id === WT.snap.sid));
@@ -155,6 +157,10 @@ async function pollLoop() {
   if (WT.polling) return;
   WT.polling = true;
   while (page === 'watch' && inSession()) {
+    if (document.hidden) {                           // hidden: wait until shown (the app keeps the session with the hub)
+      await new Promise(r => document.addEventListener('visibilitychange', r, {once: true}));
+      continue;
+    }
     try { applySnap(await api(`/api/watch/poll?seq=${WT.seq}&wait=15`)); }
     catch (e) { await new Promise(r => setTimeout(r, 1500)); }
   }
@@ -409,7 +415,7 @@ function drawLists(st) {
 
 /* ------------------------------------------------------------------ keeping the YouTube players on the moment */
 function syncTick() {
-  const st = WT.snap && WT.snap.state; if (!st || page !== 'watch') return;
+  const st = WT.snap && WT.snap.state; if (!st || page !== 'watch' || document.hidden) return;   // hidden: idle
   const T = viewTime(st), playing = viewPlaying(st), now = performance.now() / 1000;
   updateTime();
   for (const [name, x] of Object.entries(WT.yt)) {

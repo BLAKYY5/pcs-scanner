@@ -109,6 +109,7 @@ class ObsAdapter:
         if not obsmod.is_running():
             self.ready = False
             w, h = screen_size()
+            obsmod.renew_password(self.s)                 # once (closed OBS only), before OBS reads its config
             obsmod.write_config(self.s, self.s.encoder or "av1_texture_amf", w, h)
             obsmod.launch()
             self.sig = sig
@@ -660,6 +661,7 @@ def first_time_setup(s: st.Settings, say) -> None:
     if not obsmod.installed():
         obsmod.install(say)
     w, h = screen_size()
+    obsmod.renew_password(s)                               # once, while our OBS is closed (obs.renew_password)
     if not s.encoder:
         say("Testing your graphics card's encoders (a few seconds)…")
         s.encoder = obsmod.pick_encoder(s, w, h, say)       # leaves OBS running with that encoder

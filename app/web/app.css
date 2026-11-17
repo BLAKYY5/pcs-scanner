@@ -34,9 +34,12 @@ nav a.on{color:#fff;background:var(--brand)}
 .live.on i{background:var(--good)}
 .live.on{color:var(--good)}
 .live.rec{color:#fff;border-color:var(--brand);background:var(--accent-soft)}
-.live.rec i{background:var(--accent);animation:pulse 1.4s infinite}
+.live.rec i{background:var(--accent);box-shadow:0 0 0 3px rgba(229,57,45,.3)}
 .live.warn{color:var(--warn)}.live.warn i{background:var(--warn)}
-@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(229,57,45,.6)}70%{box-shadow:0 0 0 8px rgba(229,57,45,0)}100%{box-shadow:0 0 0 0 rgba(229,57,45,0)}}
+/* Recording dots don't pulse: an endless animation made the window draw a new frame at the screen's refresh rate
+   for the whole recording, next to the game (measured: 358 frames/s on a 360 Hz screen). While Apex runs, any other
+   animation (the scanning spinner of a paused scan) stands still too. */
+.quiet *{animation-play-state:paused!important}
 
 /* blocks */
 h1,h2,h3{font-family:var(--display);text-transform:uppercase;letter-spacing:.02em;margin:0;line-height:1.05}
@@ -72,7 +75,7 @@ h1{font-size:34px}h2{font-size:22px}h3{font-size:15px;color:var(--muted);letter-
 .hero .dot i{width:20px;height:20px;border-radius:50%;background:var(--faint)}
 .hero.on .dot i{background:var(--good);box-shadow:0 0 0 6px rgba(95,208,143,.15)}
 .hero.rec .dot{border-color:var(--brand);background:var(--accent-soft)}
-.hero.rec .dot i{background:var(--accent);animation:pulse 1.4s infinite}
+.hero.rec .dot i{background:var(--accent);box-shadow:0 0 0 6px rgba(229,57,45,.2)}
 .hero.busy .dot i{background:var(--info);animation:spin 1s linear infinite;border-radius:3px}
 @keyframes spin{to{transform:rotate(360deg)}}
 .hero h1{font-size:30px}
@@ -222,8 +225,7 @@ kbd{font:11px var(--mono);background:#26251f;border:1px solid #3a3833;border-bot
 .pois div{display:flex;justify-content:space-between;gap:8px;padding:3px 4px;border-bottom:1px solid #22211e}
 .pois .ours{color:var(--accent);font-weight:600}
 
-#updateBtn{animation:glow 2s ease-in-out infinite}
-@keyframes glow{50%{box-shadow:0 0 0 4px rgba(229,57,45,.25)}}
+#updateBtn{box-shadow:0 0 0 3px rgba(229,57,45,.3)}   /* stands out without an endless animation */
 .toast{position:fixed;bottom:22px;left:50%;transform:translateX(-50%);background:#000;border:1px solid var(--line);border-left:3px solid var(--good);padding:10px 16px;border-radius:6px;z-index:50;box-shadow:0 10px 30px rgba(0,0,0,.5)}
 .toast.bad{border-left-color:var(--accent)}
 
