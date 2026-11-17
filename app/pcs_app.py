@@ -219,8 +219,9 @@ class Window:
 
     def _loaded(self):
         """Started in the tray (start with Windows, after an update): pywebview shows and hides the form once, which
-        leaves the web view thinking it is seen, so the page polled and drew all day until the window was opened
-        and closed once. The page is told it is hidden as soon as it has loaded."""
+        leaves the web view thinking it is seen: it kept working all day until the window was opened and closed once
+        (measured 17 Nov 2026: about 2 % of a CPU core, a few hundred wake-ups a second in WebView2's browser and
+        GPU processes; 0.2 % with this). The web view is told it is hidden as soon as the page has loaded."""
         if not self.visible:
             self._seen(False)
 

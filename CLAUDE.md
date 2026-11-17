@@ -117,7 +117,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   stays in Settings. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
-  (`Window._loaded`; pywebview's hidden start left it "seen", so the page polled every 2 s). Hotkey thread: 20 looks a
+  (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
+  all day, 0.2 % for the whole app after). Hotkey thread: 20 looks a
   second only while hotkeys are registered, else 1 (`Hotkeys.delay`); Tk message pump 5 a second for 10 s after a
   message, else 1 (`UI._pump_ms`).
 - **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
