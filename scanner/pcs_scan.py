@@ -559,7 +559,7 @@ def game_ends(games, samples, squads=None, own=None):
         t0 = g['tStart']; hi = games[gi + 1]['tStart'] if gi + 1 < len(games) else float('inf')
         inside = lambda t_: t0 <= t_ < hi
         reads = [s[0] for s in samples if s[2] is not None and inside(s[0])] +[t_ for t_, _ in (squads or []) if inside(t_)] + \
-                [t_ for t_, _ in (own or []) if inside(t_)] + ([g['tEnd']] if inside(g['tEnd']) else [])
+                [t_ for t_, _ in (own or []) if inside(t_)] + ([g['tEnd']] if g.get('tEnd') is not None and inside(g['tEnd']) else [])
         end = max(reads, default=t0)
         g['tEndGame'] = round(float(end), 2)
         if g.get('ring') is not None:
