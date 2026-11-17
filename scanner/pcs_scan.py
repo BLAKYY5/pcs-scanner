@@ -19,7 +19,7 @@ from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
 
-VERSION = '1.10.9'
+VERSION = '1.10.10'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 
 def build_stamp(here=HERE):
