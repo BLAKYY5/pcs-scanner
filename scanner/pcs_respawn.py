@@ -41,26 +41,30 @@ def masks(a):
     return white, lime
 
 
+def _left(m):
+    return np.where(m.any(1), m.argmax(1), 999)
+
+
 def read_cards(a):
-    """Teammate cards on one frame: [{'y': name row, 'state': 'alive' | 'dead' | 'other', 'hue': frame hue}] top to
-    bottom (y in screen px). Empty when no card stack is visible (menus, inventory, death screens)."""
+    """Teammate cards on one frame: [{'y': card row, 'state': 'alive' | 'dead', 'hue': frame hue}] top to bottom.
+    A card is found by what sits under the player's name (names can be one letter long): the health bar (white, solid,
+    starting at the name column x 183..192) = alive, or the lime status line starting there = dead. 'y' = that line's
+    top row - 30 (about the name's top row). Empty when no card shows (menus, inventory, death screens)."""
     white, lime = masks(a)
-    wn = white[:, :NAME_X1 - NAME_X0]
-    cnt = wn.sum(1); tr = _trans(wn)
-    left = np.where(wn.any(1), wn.argmax(1), 999)
-    rows = (cnt >= 6) & (tr >= 4) & (left <= 22)        # text starting near the name column
     cards = []
-    for y0, y1 in _runs(rows, 8):
-        if y1 - y0 > 26: continue
-        # names start at x 183..192; text running in from the left (the own card's 'MAX LEVEL' / 'NEXT LVL') at 180
-        if not 3 <= np.median(left[y0:y1]) <= 12: continue
-        # under the name: a lime status line (dead) or a bar (alive: white health, solid from the name column)
-        lo, hi = y1 + 2, min(y1 + 40, white.shape[0])
-        lm = lime[lo:hi]; lrow = (lm.sum(1) >= 20) & (_trans(lm) >= 6)
-        wb = white[lo:hi, :120]; brow = (wb[:, 5:15].sum(1) >= 8) & (_trans(wb) <= 3) & (wb.sum(1) >= 8)
-        state = 'dead' if lrow.sum() >= 8 else ('alive' if brow.sum() >= 4 else 'other')
-        cards.append({'y': int(Y0 + y0), 'state': state, 'hue': frame_hue(a, Y0 + y0)})
-    return cards
+    # dead: lime text rows starting near the name column
+    ll = _left(lime)
+    lrow = (lime.sum(1) >= 20) & (_trans(lime) >= 6) & (ll <= 22)
+    for y0, y1 in _runs(lrow, 8):
+        if y1 - y0 <= 26: cards.append((y0 - 27, 'dead'))
+    # alive: a solid white bar from the name column (a knocked player's bar is red, a low one may be too short)
+    wl = _left(white)
+    run = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
+                    if wl[y] < 999 else 0 for y in range(white.shape[0])])
+    brow = (wl >= 3) & (wl <= 12) & (run >= 8) & (_trans(white) <= 3)
+    for y0, y1 in _runs(brow, 4):
+        if y1 - y0 <= 14 and not any(abs((y0 - 33) - y) < 14 for y, _ in cards): cards.append((y0 - 33, 'alive'))
+    return [{'y': int(Y0 + y), 'state': s, 'hue': frame_hue(a, Y0 + y)} for y, s in sorted(cards)]
 
 
 def frame_hue(a, y):
@@ -88,10 +92,11 @@ def teammate_respawns(reads, t0, t1, hold=3):
     Slots are the cards' order top to bottom on frames that show the usual number of teammate cards."""
     R = [(t, c) for t, c in reads if t0 <= t < t1 and c]
     if not R: return []
+    rows = slot_rows([x['y'] for _, c in R for x in c])
     out = []
-    for k in range(SLOTS):
+    for k in range(len(rows)):
         seq = [(t, x['state'], x['hue']) for t, c in R for x in c
-               if slot_of(x['y']) == k and x['state'] in ('alive', 'dead')]
+               if slot_of(x['y'], rows) == k and x['state'] in ('alive', 'dead')]
         dead = []; i = 0
         while i < len(seq):
             t, st, _ = seq[i]
@@ -99,7 +104,7 @@ def teammate_respawns(reads, t0, t1, hold=3):
             j = i
             while j < len(seq) and seq[j][1] == 'alive': j += 1
             if j - i < hold: i = j; continue                 # a short run of 'alive' reads: not trusted, keep waiting
-            if len(dead) >= hold:
+            if len(dead) >= hold and t - dead[-1] <= MAX_GAP:
                 hues = [h for _, s, h in seq[i:j] if h is not None]
                 h = int(np.median(hues)) if hues else None
                 out.append({'t': round(float(t), 2), 'who': 'teammate', 'slot': k + 1, 'hue': h, 'color': hue_name(h),
@@ -108,14 +113,26 @@ def teammate_respawns(reads, t0, t1, hold=3):
     return sorted(out, key=lambda e: e['t'])
 
 
+MAX_GAP = 60.0            # s from the last 'dead' read to the first 'alive' one (more: cards unseen, maybe another game)
 SLOTS = 2                 # trios: two teammate cards (a third small card, the player's own, shows in some layouts)
-SLOT_Y, SLOT_DY = 1058, 88
+SLOT_TOL = 12             # px: one card's rows across frames (map view, bar vs status line)
 
 
-def slot_of(y):
-    """Teammate card index from its name row (own view; the map view puts them at the same rows), or None."""
-    k = (y - SLOT_Y) / SLOT_DY
-    return int(round(k)) if abs(k - round(k)) < 0.2 and 0 <= round(k) < SLOTS else None
+def slot_rows(ys):
+    """The rows of the teammate cards in a game: the SLOTS rows read most often (ranked / pubs: about 1058 and 1146;
+    Wildcard: 1035 and 1149), top to bottom."""
+    cl = []
+    for y in sorted(ys):
+        if cl and y - cl[-1][-1] <= SLOT_TOL: cl[-1].append(y)
+        else: cl.append([y])
+    top = sorted(cl, key=len, reverse=True)[:SLOTS]
+    return sorted(float(np.median(c)) for c in top if len(c) >= 3)
+
+
+def slot_of(y, rows):
+    """Index of the card row y belongs to, or None."""
+    d = [abs(y - r) for r in rows]
+    return int(np.argmin(d)) if d and min(d) <= SLOT_TOL else None
 
 
 def own_deaths(samples, t0, t1, min_spec=3, min_back=3):
@@ -141,19 +158,26 @@ def own_deaths(samples, t0, t1, min_spec=3, min_back=3):
     return deaths, resp
 
 
-def own_view(card_reads, samples, near=4.0):
+def spectating(samples, gap=20.0, pad=3.0):
+    """Spectating intervals [(t0, t1)]: runs of spectator-layout ring reads (gaps under `gap` s joined), padded."""
+    out = []
+    for t in sorted(s[0] for s in samples if s[2] is not None and s[3]):
+        if out and t - out[-1][1] <= gap: out[-1][1] = t
+        else: out.append([t, t])
+    return [(a - pad, b + pad) for a, b in out]
+
+
+def own_view(card_reads, samples):
     """The card reads taken in the player's own view: [(t, cards)]. A frame's view comes from its own ring-clock read
-    (spec = spectator layout) or else the nearest one within `near` s; frames with neither are left out."""
+    (spec = spectator layout); a frame without one is own view unless it lies in a spectating interval (Wildcard
+    shows no ring clock most of the time)."""
     import bisect
-    R = sorted((s[0], bool(s[3])) for s in samples if s[2] is not None)
-    ts = [t for t, _ in R]
+    iv = spectating(samples); starts = [a for a, _ in iv]
     out = []
     for t, cards, spec in card_reads:
         if spec is None:
-            i = bisect.bisect_left(ts, t)
-            nb = [R[j] for j in (i - 1, i) if 0 <= j < len(R) and abs(R[j][0] - t) <= near]
-            if not nb: continue
-            spec = min(nb, key=lambda x: abs(x[0] - t))[1]
+            i = bisect.bisect_right(starts, t) - 1
+            spec = i >= 0 and t <= iv[i][1]
         if not spec: out.append((t, cards))
     return out
 

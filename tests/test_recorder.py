@@ -1595,21 +1595,21 @@ def test_ring_ends_and_speed():
 
 
 def _card_frame(cards, dy=0):
-    """Bottom-left squad cards (synthetic): per card a white name at x 184, then a white health bar (alive) or a lime
-    status line (dead). cards: list of (name row, 'alive' | 'dead', frame RGB)."""
+    """Bottom-left squad cards (synthetic, rows as measured at 1440p): per card a white name at x 184, then a white
+    health bar (alive) or a lime status line (dead). cards: list of (name row, 'alive' | 'dead', frame RGB, letters)."""
     import numpy as np
     a = np.full((1440, 2560, 3), 40, np.uint8)
-    for y, state, col in cards:
+    for y, state, col, n in cards:
         y += dy
         a[y - 12:y + 50, 70:110] = col                         # coloured frame next to the portrait
-        for k in range(10):                                    # name: letters 3 px wide, 6 px apart
+        for k in range(n):                                     # name: letters 3 px wide, 6 px apart
             a[y:y + 18, 184 + 9 * k:187 + 9 * k] = 235
         if state == 'alive':
-            a[y + 22:y + 27, 186:330] = (150, 60, 230)         # shield
-            a[y + 29:y + 39, 185:300] = 240                    # health
+            a[y + 27:y + 31, 186:330] = (150, 60, 230)         # shield
+            a[y + 33:y + 43, 185:300] = 240                    # health
         elif state == 'dead':
             for k in range(22):
-                a[y + 24:y + 42, 186 + 9 * k:190 + 9 * k] = (160, 196, 64)
+                a[y + 27:y + 44, 186 + 9 * k:190 + 9 * k] = (160, 196, 64)
     return a
 
 
@@ -1619,12 +1619,14 @@ def test_respawn_cards_and_events():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
     import pcs_respawn as P
     teal, orange = (40, 200, 200), (240, 150, 30)
-    cs = P.read_cards(_card_frame([(1058, 'alive', teal), (1146, 'dead', orange)]))
-    assert [(c['y'], c['state']) for c in cs] == [(1058, 'alive'), (1146, 'dead')], cs
-    assert P.hue_name(cs[0]['hue']) == 'teal' and P.slot_of(1146) == 1 and P.slot_of(1100) is None
+    cs = P.read_cards(_card_frame([(1058, 'alive', teal, 1), (1146, 'dead', orange, 10)]))    # a one-letter name too
+    assert [c['state'] for c in cs] == ['alive', 'dead'] and abs(cs[0]['y'] - 1058) <= 3 and abs(cs[1]['y'] - 1146) <= 3, cs
+    assert P.hue_name(cs[0]['hue']) == 'teal'
+    rows = P.slot_rows([1058, 1059, 1146, 1147, 1146, 1058, 1240])          # the two rows read most (Wildcard: 1035 / 1149)
+    assert rows == [1058.0, 1146.0] and P.slot_of(1150, rows) == 1 and P.slot_of(1100, rows) is None, rows
     assert P.read_cards(_card_frame([])) == []
     # the spectator layout puts the cards 85 px higher: read too, but such frames are dropped by own_view
-    assert [c['state'] for c in P.read_cards(_card_frame([(1058, 'dead', teal)], dy=-85))] == ['dead']
+    assert [c['state'] for c in P.read_cards(_card_frame([(1058, 'dead', teal, 4)], dy=-85))] == ['dead']
     A = lambda: {'y': 1146, 'state': 'alive', 'hue': 35}
     D = lambda: {'y': 1146, 'state': 'dead', 'hue': 80}
     T0 = {'y': 1058, 'state': 'alive', 'hue': 180}

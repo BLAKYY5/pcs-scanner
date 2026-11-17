@@ -263,6 +263,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   totals right in 15 of 15 games (5 rest on a single read). A misread units or tens digit that comes out higher
   would still pass the single-read rule: it relies on the digit test (no misread seen in ~9,000 reads).
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
+- **Ring circles** (`pcs_ring.py`): on the unzoomed full map the area outside the current ring is red-tinted with a
+  dark line on the ring; the next ring is a see-through white disc (everything under it moved towards white by one
+  fraction, 0.14..0.26 measured, alike in R, G, B). Edges that fit each look vote for a centre then a radius (Hough),
+  a local search sits on the edge, and a circle counts only when most of its visible arc shows the contrast. Refused:
+  a current ring whose outside is not red-tinted all around (cyan / purple discs of other map features, blue water
+  beside purple land), a next ring of another colour, circles under 2.9 % of the map (round icons; the last small rings
+  are not read). One read per 3 s of map (`RING_EVERY`, ~2 s a read); the next ring found just before is tried as a
+  start. Per game: `ringCircles` (per ring stage and phase: current circle cx, cy, r in map % + `mapX/mapY/mapR` for
+  the review map, `next`, `conf`), `ringEnds` (end circle of ring k: the next ring shown in round k and/or the current
+  circle in round k + 1's wait; `rUnits` from the map scale in `CAL`), `ringSpeed` (`closing`: radius change per
+  second while the player watches it close; `ends`: radius drop / closing time). Stage = the ring phase running at
+  that moment (`games[].ring`), so rounds must be numbered for stages (None otherwise).
+- **Respawns** (`pcs_respawn.py`): teammate cards bottom left (names at x 184, rows 1058 / 1146 at 1440p in own
+  view and on the full map; 85 px higher while spectating). Dead = a lime status line under the name (DEATHBOX
+  RECOVERY, RECOVER BANNER, CRAFT BANNER, DELIVER TO BEACON, AWAITING RESPAWN, RESPAWNING); alive = the health bar.
+  A slot read dead >= 3 times then alive >= 3 times = respawn (`who: teammate`, slot, card colour). Cards are used
+  only from own-view frames (while spectating they are the spectated squad's). The player's own death = a run of
+  spectator-layout ring reads (`ownDeaths`); own view again later in the same game = respawned (`who: self`,
+  `how: dropship` when a free fall follows). The card can't tell a beacon from a mobile beacon or a mode's own
+  respawn (`how: card`). 16:9 only. `games[].respawns` is always present (empty list = none seen).
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
 
