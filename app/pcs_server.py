@@ -777,7 +777,14 @@ class Backend:
             from pcs_recorder import watch
             self._watch = watch.Watch(lambda: self.auto.s.hub_url if self.auto else "")
             self._watch.on_state = self._talk_event
+            self._watch.is_apex_running = self._apex_running
+            self._watch.on_apex_left = lambda: self.talk_stop("Apex started")
         return self._watch
+
+    @staticmethod
+    def _apex_running() -> bool:
+        from pcs_recorder.core import apex_running
+        return apex_running()
 
     @property
     def talk(self):
@@ -841,6 +848,8 @@ class Backend:
             return w.flag(body.get("t"))
         if action == "bookmark":
             return w.bookmark(body.get("text") or "", body.get("t"))
+        if action in ("start", "join") and self._apex_running():
+            raise RuntimeError("Close Apex to watch together")    # a review never shares the PC with a game
         if action == "start":
             return w.start(body.get("gameKey") or "")
         if action == "join":

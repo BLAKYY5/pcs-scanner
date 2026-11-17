@@ -1550,6 +1550,61 @@ def test_watch_together():
         _fresh_hub()
 
 
+def test_watch_together_never_during_a_game():
+    """While Apex runs a session can't be started or joined (nothing asked of the hub). When Apex starts during a
+    session, this app leaves it (the hub session goes on for the others, it is not ended), the window hears it at
+    once and the session page stops its players."""
+    from pcs_recorder import core as rcore
+    from pcs_recorder import watch as watchmod
+    hub = _fresh_hub()
+    fake = SessionHub()
+    auto = _Auto(str(TMP / "watchrecs-apex"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    srv = pcs_server.Server(b)
+    srv.start()
+    apex, after = [True], []
+    real_running, real_every = rcore.apex_running, watchmod.APEX_CHECK_S
+    rcore.apex_running, watchmod.APEX_CHECK_S = (lambda: apex[0]), 0.2
+
+    def wait_for(cond, s=5):
+        end = time.time() + s
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    try:
+        hub.set_key(GOOD_KEY)
+        for path, body in (("/api/watch/start", {"gameKey": "g-1"}), ("/api/watch/join", {"id": "s-1"})):
+            code, r, _ = call(srv, path, body)
+            assert code == 500 and r["error"] == "Close Apex to watch together", r
+        assert not [c for c in fake.calls if c[1].startswith("/api/sessions")], fake.calls
+        apex[0] = False
+        code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "g-1"})
+        assert code == 200 and snap["sid"] == "s-1"
+        b.watch.on_apex_left = lambda: after.append("talk stopped")
+        assert wait_for(lambda: b.watch.connected)
+        time.sleep(0.5)
+        assert b.watch.ended is None                       # no game: the session stays
+        apex[0] = True                                     # the player starts Apex
+        assert wait_for(lambda: b.watch.ended == "apex", 3)
+        snap = call(srv, "/api/watch/poll?seq=-1&wait=0")[1]  # what the window's long poll hears
+        assert snap["ended"] == "apex" and not snap["connected"], snap
+        assert wait_for(lambda: fake.calls[-1][1] == "/api/sessions/s-1/leave")
+        assert not any(c[1].endswith("/end") for c in fake.calls)              # left, not ended for the others
+        assert after == ["talk stopped"]
+    finally:
+        rcore.apex_running, watchmod.APEX_CHECK_S = real_running, real_every
+        srv.stop()
+        fake.stop()
+        b.watch.leave()
+        _fresh_hub()
+    js = (Path(pcs_server.WEB) / "session.js").read_text(encoding="utf-8")
+    assert "apex: 'Apex started, so you left the session. The others keep watching.'" in js
+    assert "stopPlayers();" in js
+
+
 def test_watch_page_files():
     """The session page is its own files, loaded by the window's page; YouTube's player API is the only outside
     script, and app.js only routes to it."""
@@ -1927,7 +1982,7 @@ def test_window_polls_only_when_seen():
     assert "if (document.hidden) return;" in wt                                   # Join bar: not while hidden…
     assert "(S && S.apex) ||" in wt                                               # …nor asks the hub while Apex runs
     assert "page !== 'watch' || document.hidden) return;" in wt                   # session sync idles while hidden
-    assert "await new Promise(r => document.addEventListener('visibilitychange', r, {once: true}))" in wt
+    assert "wait=${document.hidden ? 25 : 15}" in wt         # hidden: a long poll on this PC only (hears an end at once)
     b = pcs_server.Backend()
     calls, apex = [], [False]
     real = b.state

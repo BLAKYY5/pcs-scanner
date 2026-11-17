@@ -28,6 +28,7 @@ from .settings import APP_DIR
 log = logging.getLogger("watch")
 AUDIO_CACHE = APP_DIR / "talk-cache"
 PING_EVERY = 5.0
+APEX_CHECK_S = 3.0                                 # in a session: is Apex running? (then this app leaves it)
 LIST_CACHE_S = 8.0
 
 
@@ -50,6 +51,11 @@ class Watch:
         self._list: tuple[float, dict] | None = None
         self.pointer_at: dict | None = None        # the coach's pointer: {x, y, at} or {hide, at}
         self.on_state = None                       # called with each new state (review talk timeline)
+        # Apex started while a session is open: this app leaves it (the hub session goes on for the others), so a
+        # review never shares the PC with a game. Set by the app: () -> bool; on_apex_left: () -> None.
+        self.is_apex_running = None
+        self.on_apex_left = None
+        self._apex_at = 0.0
 
     # ------------------------------------------------------------ hub requests
     def _url(self) -> str:
@@ -110,9 +116,31 @@ class Watch:
         finally:
             self._detach("ended")
 
-    def leave(self) -> None:
+    def check_apex(self) -> bool:
+        """In a session and Apex runs: leave it (why "apex"). Looked at most every APEX_CHECK_S. -> True if left."""
+        if not self.sid or self.ended or self.is_apex_running is None:
+            return False
+        now = self.clock()
+        if now - self._apex_at < APEX_CHECK_S:
+            return False
+        self._apex_at = now
+        try:
+            if not self.is_apex_running():
+                return False
+        except Exception:
+            return False
+        log.info("Apex started: leaving the session")
+        if self.on_apex_left:                      # first, like a leave by hand (review talk stops, then leave)
+            try:
+                self.on_apex_left()
+            except Exception:
+                log.exception("before leaving for Apex")
+        self.leave("apex")
+        return True
+
+    def leave(self, why: str = "left") -> None:
         sid = self.sid
-        self._detach("left")
+        self._detach(why)
         if sid:
             try:
                 self._call("POST", f"/api/sessions/{sid}/leave", timeout=4)
@@ -255,6 +283,8 @@ class Watch:
                 self._bump()
                 wait, pings, next_ping = 1.0, 0, 0.0
                 while gen == self.gen:
+                    if self.check_apex():
+                        return
                     now = self.clock()
                     if now >= next_ping:                     # 5 quick pings, then one every PING_EVERY s
                         ws.send(json.dumps({"type": "ping", "c": now}))
@@ -287,7 +317,7 @@ class Watch:
                 if ws is not None:
                     _close(ws)
             self._bump()
-            if self.ended or gen != self.gen:
+            if self.ended or gen != self.gen or self.check_apex():
                 return
             time.sleep(wait)
             wait = min(wait * 2, 10)
