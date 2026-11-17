@@ -194,6 +194,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
   which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
   region caches (0 differences) and the check set table.
+- **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
+  → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
+  minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
+  game transform checked on 12 own-arrow / POS pairs (rms < 0.8 %), ED the game transform since 16 Nov 2026 (coach's
+  decision: 13 pairs, rms 0.33 / 0.49 % against 0.74 / 0.69 % for the Oct fit; none of the 16 known ED landings changed
+  place; Oct values kept in a comment), KC the game transform unchecked
+  (`mapCalibrated: false`), OL none yet. Each `games[].calib` entry (own arrow on the full map) paired with `POS`
+  just before and after it is a calibration pair; the arrow blob is sometimes wrong (reject outliers). BM and KC
+  have POI centres only: a landing more than `POI_NEAR` (12 %) from every centre gets no name (Broken Moon's middle
+  has POIs since PR #41: Quarantine Zone and others).
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
