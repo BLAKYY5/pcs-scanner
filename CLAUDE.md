@@ -58,13 +58,23 @@ python scanner/pcs_scan.py "<recording>" --out <dir> [--cpu] [--snaps]     # sca
 python app/pcs_app.py                        # run the app from source (Windows)
 ```
 
-The tests are plain scripts: each `test_*` function runs from `__main__`, prints `ok <name>`, exits non-zero on
-failure. Add a test with every behaviour change; CI runs both files on Windows.
+The tests are plain scripts: each `test_*` function runs from `__main__` (`run_all`), prints `ok <name>`; a failure
+doesn't stop the others: all failures are listed at the end and the script exits non-zero. A test that can't run
+on this PC raises `Skipped` (test_ui.py: `test_single_instance` while another PCS Scanner runs). Add a test with every behaviour change; CI runs both files on Windows.
 
 Build = `build.yml`. `gh workflow run build.yml --ref <branch>` gives a `dev-N` test exe as a run artifact.
 A push to `main` builds too, and publishes release `v<VERSION>` if that tag doesn't exist yet. New modules need
 a `--hidden-import` (or `--collect-submodules`) in `build.yml` and a line in the selftest import in `pcs_app.py`,
 or the exe breaks while the tests pass.
+
+**ffmpeg** (bundled in the exe) is pinned in `build.yml` (`FFMPEG_TAG`, `FFMPEG_ZIP`, `FFMPEG_SHA256`): a BtbN
+FFmpeg-Builds master `win64-gpl` build, checked by SHA-256, so releases don't change ffmpeg by accident (the scanner
+parses its `pts_time` output and relies on its GPU decoding). Pin a month-end build (`autobuild-YYYY-MM-<last day>-…`):
+BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
+`gh release list --repo BtbN/FFmpeg-Builds`, then
+`gh api repos/BtbN/FFmpeg-Builds/releases/tags/<tag> --jq '.assets[] | select(.name|endswith("win64-gpl.zip")) | [.name, .digest]'`
+gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
+build and compare it with a scan from the previous build (same games and values).
 
 Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.9 is released).
 

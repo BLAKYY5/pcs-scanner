@@ -524,12 +524,30 @@ def test_update_finisher():
     assert "copied, starting the new version" in Path(core.UPDATE_LOG).read_text()
 
 
+class Skipped(Exception):
+    """A test that cannot run here: the runner reports it as skipped, not failed."""
+
+
+def _app_already_running():
+    """True when another PCS Scanner holds the single-instance mutex (e.g. the installed app on the coach's PC)."""
+    import ctypes
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.OpenMutexW.restype = ctypes.c_void_p
+    h = k32.OpenMutexW(0x00100000, False, "Local\\PCS-Scanner-app")      # SYNCHRONIZE
+    if not h:
+        return False
+    k32.CloseHandle(ctypes.c_void_p(h))
+    return True
+
+
 def test_single_instance():
-    """Only one PCS Scanner per Windows session (a second start just shows the first one's window)."""
+    """Only one PCS Scanner per Windows session (a second start just shows the first one's window).
+    Skipped when a PCS Scanner already runs on this PC (it holds the mutex); CI has none, so it runs there."""
     import pcs_app
     if os.name != "nt":
-        print("  (not Windows: single-instance test skipped)")
-        return
+        raise Skipped("not Windows")
+    if _app_already_running():
+        raise Skipped("another PCS Scanner is running on this PC (close it to run this test)")
     assert pcs_app.first_instance() is True
     first = pcs_app._MUTEX
     assert pcs_app.first_instance() is False             # a second app in the same session is refused
@@ -1108,10 +1126,33 @@ def test_hub_key_never_in_logs_or_data_files():
     assert not hits, hits
 
 
+def run_all(tests):
+    """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
+    import traceback
+    failed, skipped = [], []
+    for name, fn in tests:
+        try:
+            fn()
+        except Skipped as e:
+            skipped.append(name)
+            print(f"skip {name}: {e}", flush=True)
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            failed.append(name)
+            print(f"FAIL {name}", flush=True)
+            traceback.print_exc()
+        else:
+            print("ok", name, flush=True)
+    print(f"\n{len(tests) - len(failed) - len(skipped)} passed, {len(failed)} failed, {len(skipped)} skipped", flush=True)
+    for name in failed:
+        print("  failed:", name, flush=True)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
     try:
-        for name, fn in list(globals().items()):
-            if name.startswith("test_"):
-                fn(); print("ok", name)
+        code = run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")])
     finally:
         shutil.rmtree(TMP, ignore_errors=True)
+    sys.exit(code)

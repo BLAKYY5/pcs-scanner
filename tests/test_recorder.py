@@ -1486,7 +1486,26 @@ def test_hub_answer_shown_on_recording():
     assert len(hub.uploads) == 1                                                       # never sent twice
 
 
+def run_all(tests):
+    """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
+    import traceback
+    failed = []
+    for name, fn in tests:
+        try:
+            fn()
+        except BaseException as e:
+            if isinstance(e, KeyboardInterrupt):
+                raise
+            failed.append(name)
+            print(f"FAIL {name}", flush=True)
+            traceback.print_exc()
+        else:
+            print("ok", name, flush=True)
+    print(f"\n{len(tests) - len(failed)} passed, {len(failed)} failed", flush=True)
+    for name in failed:
+        print("  failed:", name, flush=True)
+    return 1 if failed else 0
+
+
 if __name__ == "__main__":
-    for name, fn in list(globals().items()):
-        if name.startswith("test_"):
-            fn(); print("ok", name)
+    sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))
