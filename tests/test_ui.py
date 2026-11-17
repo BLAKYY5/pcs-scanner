@@ -843,6 +843,189 @@ def test_team_window_signed_in():
         _fresh_hub()
 
 
+PLAYER_KEY = "pcs_" + "C" * 43
+
+
+class NotesHub:
+    """A hub 0.4 with coach notes, on localhost: GOOD_KEY = the coach (Blakey), PLAYER_KEY = the player Moe, who
+    recorded and sent the scan of `REC`. Same answers and rules as the real hub (AGENT.md), kept small."""
+    REC = "Apex Legends_2026.11.07-21.42"
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from urllib.parse import parse_qs, urlsplit
+        import threading
+        self.notes, self.seen, self.calls = {}, {}, []
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if n else {}
+                u = urlsplit(self.path)
+                q = {k: v[0] for k, v in parse_qs(u.query).items()}
+                auth = self.headers.get("Authorization", "")
+                hub.calls.append((self.command, u.path, q, body, auth))
+                me = {"Bearer " + GOOD_KEY: ("Blakey", "coach"), "Bearer " + PLAYER_KEY: ("Moe", "player")}.get(auth)
+                if not me:
+                    return self._send(401, {"detail": "bad key", "error": "bad_key"})
+                coach, p = me[1] == "coach", u.path
+                if p == "/api/annotations" and self.command == "GET":
+                    want = q.get("player") or ("Moe" if coach else me[0])
+                    if not coach and want != me[0]:
+                        return self._send(403, {"detail": "no", "error": "forbidden"})
+                    known = q.get("recording") == hub.REC and want == "Moe"
+                    notes = [dict(x, seen=me[0] in hub.seen.get(x["id"], []), **({"seenBy": {s: "t" for s in hub.seen.get(x["id"], [])}} if coach else {}))
+                             for x in hub.notes.values() if known]
+                    return self._send(200, {"recording": q.get("recording"), "player": want, "known": known,
+                                            "players": ["Moe"] if coach and known else [],
+                                            "me": {"name": me[0], "role": me[1]}, "notes": notes})
+                if p.endswith("/seen"):
+                    hub.seen.setdefault(p.split("/")[3], []).append(me[0])
+                    return self._send(200, {"seen": True})
+                if not coach:
+                    return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
+                if p == "/api/annotations" and self.command == "POST":
+                    if body.get("recording") != hub.REC or body.get("player") != "Moe":
+                        return self._send(404, {"detail": "This recording isn't on the hub", "error": "unknown_recording"})
+                    nid = f"an-{len(hub.notes) + 1}"
+                    hub.notes[nid] = dict(body, id=nid, version=1, by="Blakey")
+                    return self._send(200, hub.notes[nid])
+                nid = p.split("/")[-1]
+                if nid not in hub.notes:
+                    return self._send(404, {"detail": "No such note.", "error": "not_found"})
+                if self.command == "PUT":
+                    if q.get("if_version") and int(q["if_version"]) != hub.notes[nid]["version"]:
+                        return self._send(409, {"detail": "The note was changed meanwhile: reload it.", "error": "version_conflict"})
+                    hub.notes[nid].update(body, version=hub.notes[nid]["version"] + 1)
+                    return self._send(200, hub.notes[nid])
+                if self.command == "DELETE":
+                    del hub.notes[nid]
+                    return self._send(200, {"deleted": True})
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = do_PUT = do_DELETE = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_coach_notes():
+    """Review player notes: the coach writes them through the app (hub key with the coach role), the player reads
+    them; offline the last ones fetched still show; no hub / no key / a hub without notes: nothing."""
+    hub = _fresh_hub()
+    fake, old = NotesHub(), FakeHub()
+    folder = TMP / "notes"
+    folder.mkdir(exist_ok=True)
+    rec = folder / (NotesHub.REC + ".mp4")
+    rec.write_bytes(b"x" * 100)
+    other = folder / "Someone else.mkv"
+    other.write_bytes(b"y" * 100)
+    auto = _Auto(str(TMP / "notesrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec), str(other)])
+    ids = {x["name"]: x["id"] for x in b.library()}
+    vid, vother = ids[rec.name], ids[other.name]
+    srv = pcs_server.Server(b)
+    srv.start()
+    pen = {"kind": "pen", "color": "#ff3b30", "pts": [[0.1, 0.2], [0.3, 0.4]]}
+    try:
+        # no key: nothing, and nothing asked of the hub
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r == {"available": False, "notes": []} and not fake.calls
+        # the coach: sees whose recording it is, writes a note
+        hub.set_key(GOOD_KEY)
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["available"] and not r["offline"] and r["me"]["role"] == "coach" and r["players"] == ["Moe"], r
+        assert fake.calls[-1][2] == {"recording": NotesHub.REC} and fake.calls[-1][4] == "Bearer " + GOOD_KEY
+        assert GOOD_KEY not in fake.calls[-1][1] and not any(GOOD_KEY in str(v) for v in fake.calls[-1][2].values())
+        code, r, _ = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {
+            "t": 61.5, "dur": 5, "text": "Rotate earlier", "scope": "squad", "drawings": [pen], "junk": 1}})
+        assert code == 200 and [n["text"] for n in r["notes"]] == ["Rotate earlier"], r
+        sent = fake.calls[-2]
+        assert sent[0] == "POST" and sent[3] == {"recording": NotesHub.REC, "player": "Moe", "t": 61.5, "dur": 5,
+                                                 "text": "Rotate earlier", "scope": "squad", "drawings": [pen]}, sent
+        n = r["notes"][0]
+        r = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "Rotate now"}})[1]
+        assert r["notes"][0]["text"] == "Rotate now" and r["notes"][0]["version"] == 2
+        assert fake.calls[-2][0] == "PUT" and fake.calls[-2][2] == {"if_version": "1"}
+        code, r, _ = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "stale"}})
+        assert code == 500 and "409" in r["error"] and "reload" in r["error"], r                # someone changed it
+        # a recording the hub doesn't know: said so, and saving is refused with the hub's words
+        r = call(srv, f"/api/library/{vother}/notes")[1]
+        assert r["available"] and r["known"] is False and fake.calls[-1][2] == {"recording": "Someone else"}
+        code, r, _ = call(srv, "/api/notes/save", {"id": vother, "player": "Moe", "note": {"t": 1, "text": "x"}})
+        assert code == 500 and "isn't on the hub" in r["error"]
+        # the player: reads the note (with the drawing), can't write, marks it seen
+        hub.set_key(PLAYER_KEY)
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["me"]["role"] == "player" and r["notes"][0]["drawings"] == [pen] and r["notes"][0]["seen"] is False
+        code, r, _ = call(srv, "/api/notes/save", {"id": vid, "note": {"t": 1, "text": "mine"}})
+        assert code == 500 and "403" in r["error"] and len(fake.notes) == 1
+        assert call(srv, "/api/notes/seen", {"id": vid, "note_ids": [n["id"], "../../evil"]})[0] == 500   # bad id refused
+        assert fake.seen == {n["id"]: ["Moe"]}
+        # offline: the last answer for this recording, saved in the data folder
+        fake.stop()
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["available"] and r["offline"] and r["notes"][0]["text"] == "Rotate now", r
+        assert list((Path(os.environ["PCS_DATA_DIR"]) / "notes-cache").glob("*.json"))
+        # a hub from before notes (0.3: no /api/annotations): nothing changes in the review
+        auto.s.hub_url = old.url
+        hub.set_key(GOOD_KEY)
+        assert call(srv, f"/api/library/{vid}/notes")[1] == {"available": False, "notes": []}
+        # no hub address: nothing
+        auto.s.hub_url = ""
+        assert call(srv, f"/api/library/{vid}/notes")[1]["available"] is False
+        assert call(srv, "/api/notes/save", {"id": vid, "note": {}})[0] == 500
+        assert call(srv, "/api/library/000000000000/notes")[0] == 500
+    finally:
+        srv.stop()
+        old.stop()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if not p.startswith(str(folder))]
+
+
+def test_coach_notes_delete():
+    hub = _fresh_hub()
+    fake = NotesHub()
+    rec = TMP / "notes2" / (NotesHub.REC + ".mp4")
+    rec.parent.mkdir(exist_ok=True)
+    rec.write_bytes(b"x")
+    auto = _Auto(str(TMP / "notesrecs2"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    try:
+        hub.set_key(GOOD_KEY)
+        r = b.note_change(vid, "save", {"player": "Moe", "note": {"t": 3, "text": "a"}})
+        assert len(r["notes"]) == 1
+        r = b.note_change(vid, "delete", {"player": "Moe", "note_id": r["notes"][0]["id"]})
+        assert r["notes"] == [] and fake.calls[-2][0] == "DELETE"
+    finally:
+        fake.stop()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+
+
 def test_hub_key_never_in_logs_or_data_files():
     """After everything above: the key's text is in no file of the data folder (app.log, recorder.json…)."""
     import logging

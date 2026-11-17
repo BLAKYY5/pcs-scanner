@@ -236,3 +236,24 @@ input:disabled{opacity:.5}
 .lane.sound{height:40px}
 .fight{position:absolute;top:0;bottom:0;background:rgba(230,173,69,.18);border-left:1px solid rgba(230,173,69,.8);border-right:1px solid rgba(230,173,69,.8);cursor:pointer}
 .mk.call{background:#6aa0ff;width:14px;height:14px;font-size:9px;top:30%}
+/* coach notes: drawing layer over the picture, note caption, editor bar, list */
+.ink{position:absolute;pointer-events:none;z-index:2}
+.player.drawing .ink{pointer-events:auto;cursor:crosshair;touch-action:none;outline:2px dashed rgba(255,214,10,.55);outline-offset:-2px}
+.cnote{position:absolute;top:10px;right:10px;max-width:42%;display:flex;flex-direction:column;gap:6px;z-index:3;pointer-events:none}
+.cnote span{background:rgba(10,10,9,.82);border:1px solid rgba(255,255,255,.12);border-left:3px solid #ffd60a;border-radius:6px;padding:7px 11px;font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}
+.cnote b{display:block;font:600 12px var(--display);letter-spacing:.08em;text-transform:uppercase;color:#ffd60a}
+.player:fullscreen{display:grid;place-items:center;border:0;border-radius:0}
+.player:fullscreen video{max-height:100vh;height:100vh}
+.coachbar{margin-top:12px;display:flex;flex-direction:column;gap:10px;border-color:#5c4b12}
+.coachbar .edtitle{font:600 15px var(--display);letter-spacing:.06em;text-transform:uppercase;color:#ffd60a}
+.coachbar textarea{background:#0f0f0e;border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:8px 10px;font:14px var(--body);width:100%;resize:vertical;box-sizing:border-box}
+.coachbar textarea:focus{outline:none;border-color:var(--info)}
+.swatches{display:inline-flex;gap:6px}
+.swatches button{width:24px;height:24px;border-radius:50%;border:2px solid var(--bg);box-shadow:0 0 0 1px var(--line);cursor:pointer;padding:0}
+.swatches button.on{box-shadow:0 0 0 2px var(--ink)}
+.tabs{flex-wrap:wrap}
+.nhead{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;padding:0 6px 8px}
+.ev.note b{white-space:pre-wrap;overflow-wrap:anywhere}
+.ev.note.editing{outline:1px solid #ffd60a}
+.ev.note .nacts{margin-top:6px;gap:6px}
+.mk.note{background:#ffd60a}

@@ -351,6 +351,7 @@ async function renderReview(id) {
   try { d = await api('/api/library/' + id); } catch (e) { $('#main').innerHTML = `<div class="empty"><strong>Not found</strong>${esc(e.message)}<br><br><a class="btn" href="#recordings">Back</a></div>`; return; }
   if (page !== 'review' || pageArg !== id) return;
   const ev = buildEvents(d), spans = gameSpans(d);
+  if (RV && RV.ro) RV.ro.disconnect();
   RV = {d, ev, spans, tab: d.games ? 'events' : 'events', dur: 0};
   $('#main').innerHTML = `
     <div class="pagehead"><div><h1>${esc(fmtDate(d.mtime))}</h1><p class="row" style="gap:8px">${gameChips(d)} ${statusPill(d.status)} <span class="faint mono" title="${esc(d.path)}">${esc(d.name)}</span></p></div>
@@ -359,9 +360,11 @@ async function renderReview(id) {
         <button class="btn" id="rvOpen">Open file</button></div></div>
     <div class="review">
       <div>
-        <div class="player"><video id="vid" controls preload="metadata" src="/video/${d.id}?t=${encodeURIComponent(TOKEN)}"></video>
+        <div class="player" id="player"><video id="vid" controls controlslist="nofullscreen" preload="metadata" src="/video/${d.id}?t=${encodeURIComponent(TOKEN)}"></video>
+          <canvas class="ink" id="ink" hidden></canvas><div class="cnote" id="cnote" hidden></div>
           <div class="seen" id="seen" ${d.scan ? '' : 'hidden'}></div>
           <div class="err" id="vidErr" hidden><div><h2>This recording can't play here</h2><p class="muted">Its video format isn't supported by the built-in player (usually HEVC/H.265).<br>Open it in your usual video player instead.</p><button class="btn brand" id="vidOpen">Open file</button></div></div></div>
+        <div class="card coachbar" id="coachBar" hidden></div>
         <div class="card" style="margin-top:12px;padding:12px 16px 14px">
           <div class="tl" id="tl"><div class="lanes">
             <div class="lane games" id="laneG"><span class="lane-label">Games</span></div>
@@ -369,17 +372,19 @@ async function renderReview(id) {
             <div class="lane" id="laneF"><span class="lane-label">Kill feed</span></div>
             <div class="lane sound" id="laneS"><span class="lane-label">Sound · <span id="soundState">analysing…</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
+            <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
             <div class="legend"><span><i style="background:#e6ad45"></i>Drop map</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>Kill feed</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
-            <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select></div>
+            <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
+              <button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
           <div id="mixer"></div>
           <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>F</kbd> full screen · <kbd>M</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
         </div>
       </div>
       <aside class="card side">
-        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button></div>
+        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button><button data-t="notes" id="tabNotes" hidden>Coach notes</button></div>
         <div class="scroll" id="rvBody"></div>
       </aside>
     </div>`;
@@ -400,6 +405,13 @@ async function renderReview(id) {
   tl.addEventListener('click', e => { const t = e.target.dataset && e.target.dataset.t; seek(t != null ? +t : tAt(e)); });
   drawTimeline(); drawSide();
   loadLevels(d.id);
+  $('#rvFull').onclick = fullScreen;
+  setupInk(v);
+  loadNotes(d.id);
+}
+function fullScreen() {           /* the player box, not the bare video: the coach's drawings stay on top */
+  const p = $('#player'); if (!p) return;
+  document.fullscreenElement ? document.exitFullscreen() : p.requestFullscreen().catch(() => {});
 }
 function dur() {
   if (RV.dur) return RV.dur;
@@ -407,7 +419,7 @@ function dur() {
   return last ? last * 1.05 : 600;
 }
 function seek(t) {
-  const v = $('#vid'); if (!v) return;
+  const v = $('#vid'); if (!v || RV.ed) return;          // drawing a note: stay on its frame
   v.currentTime = Math.max(0, t - (seek.lead || 0)); onTime();
 }
 function drawTimeline() {
@@ -429,10 +441,17 @@ function drawTimeline() {
   }
   $('#laneF').innerHTML = '<span class="lane-label">Kill feed</span>' + RV.ev.filter(e => e.k === 'feed').map(e =>
     `<div class="tick" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · kill feed${e.sub ? ' (' + e.sub + ')' : ''}"></div>`).join('');
+  const ln = $('#laneN'), notes = (RV.notes && RV.notes.notes) || [];
+  if (ln) {
+    ln.hidden = !notes.length;
+    ln.innerHTML = '<span class="lane-label">Coach notes</span>' + notes.map(n =>
+      `<button class="mk note" data-t="${n.t}" style="left:${pct(n.t)}" title="${fmtT(n.t)} · ${esc(noteTitle(n))}">C</button>`).join('');
+  }
 }
 function drawSide() {
   const body = $('#rvBody'); if (!body) return;
   const d = RV.d;
+  if (RV.tab === 'notes') { drawNotes(body); onTime(true); return; }
   if (!d.scan) { body.innerHTML = '<div class="empty"><strong>Not scanned yet</strong>Scan this recording to see its drop, landing, rings and kill feed.</div>'; return; }
   if (RV.tab === 'events') {
     let html = '', g = -1;
@@ -472,6 +491,7 @@ function onTime(force) {
   const t = v.currentTime;
   $('#playhead').style.left = (t / dur() * 100) + '%';
   drawSeen(t);
+  showNotesAt(t);
   const body = $('#rvBody'); if (!body) return;
   let best = null;
   $$('[data-t]', body).forEach(el => { if (+el.dataset.t <= t + 0.25) best = el; });
@@ -485,6 +505,7 @@ document.addEventListener('keydown', e => {
   if (page !== 'review') return;
   if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
   const v = $('#vid'); if (!v) return;
+  if (RV.ed) { if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) { inkUndo(); e.preventDefault(); } return; }   // drawing a note: the video stays paused
   const k = e.key, step = d => { v.currentTime = Math.max(0, Math.min(v.duration || 1e9, v.currentTime + d)); };
   const times = RV.ev.filter(x => x.k !== 'feed').map(x => x.t);
   if (k === ' ' || k === 'k' || k === 'K') { v.paused ? v.play() : v.pause(); }
@@ -493,7 +514,7 @@ document.addEventListener('keydown', e => {
   else if (k === ',') { v.pause(); step(-1 / 60); } else if (k === '.') { v.pause(); step(1 / 60); }
   else if (k === ']') { const n = times.find(t => t > v.currentTime + 0.3); if (n != null) seek(n); }
   else if (k === '[') { const p = times.filter(t => t < v.currentTime - 1).pop(); seek(p != null ? p : 0); }
-  else if (k === 'f' || k === 'F') { document.fullscreenElement ? document.exitFullscreen() : v.requestFullscreen(); }
+  else if (k === 'f' || k === 'F') fullScreen();
   else if (k === 'v' || k === 'V') { const o = $('#seen'); if (o && RV.d.scan) { o.hidden = !o.hidden; try { localStorage.setItem('pcs-seen', o.hidden ? '0' : '1'); } catch (x) {} } }
   else if (k === 'm' || k === 'M') { if (RV.aud) { const all = RV.aud.every(x => x.mute); RV.aud.forEach(x => x.mute = !all); applyMix(); drawMixer(); } else v.muted = !v.muted; }
   else return;
@@ -534,6 +555,216 @@ function drawSeen(t) {
   const f = (RV.d.feed || []).filter(l => l.t <= t && t - l.t < 4).slice(-3);
   if (f.length) rows.push('<span class="feedimgs">' + f.map(l => `<img alt="Kill feed line" src="data:image/jpeg;base64,${l.jpg}">`).join('') + '</span>');
   o.innerHTML = rows.join('');
+}
+
+/* ------------------------------------------------------------------ coach notes and drawings (team hub) */
+const INK = ['#ff3b30', '#ffd60a', '#30d158', '#0a84ff', '#ffffff'];
+const TOOLS = [['pen', 'Pen'], ['arrow', 'Arrow'], ['circle', 'Circle'], ['rect', 'Box']];
+const isCoachKey = () => !!(RV && RV.notes && RV.notes.me && RV.notes.me.role === 'coach');
+const noteTitle = n => n.text ? n.text.split('\n')[0].slice(0, 80) : 'Drawing';
+
+async function loadNotes(id, player) {
+  clearTimeout(loadNotes.h);
+  let r;
+  try { r = await api(`/api/library/${id}/notes` + (player ? '?player=' + encodeURIComponent(player) : '')); }
+  catch (e) { r = {available: false, notes: []}; }
+  if (!RV || RV.d.id !== id || page !== 'review') return;
+  setNotes(r);
+  if (r.offline) loadNotes.h = setTimeout(() => { if (!RV.ed) loadNotes(id, player); }, 60000);   // hub back: refresh
+}
+function setNotes(r) {
+  const first = !RV.notes;
+  RV.notes = r; RV.inkKey = null;
+  const tab = $('#tabNotes'), n = (r.notes || []).length;
+  if (tab) { tab.hidden = !(r.available && (n || isCoachKey())); tab.textContent = `Coach notes (${n})`; }
+  if (first && n && tab && !tab.hidden) { RV.tab = 'notes'; $$('#rvTabs button').forEach(x => x.classList.toggle('on', x === tab)); }
+  if (RV.tab === 'notes' && tab && tab.hidden) { RV.tab = 'events'; $$('#rvTabs button').forEach(x => x.classList.toggle('on', x.dataset.t === 'events')); }
+  drawTimeline(); drawSide(); fitInk();
+}
+function drawNotes(body) {
+  const r = RV.notes || {notes: []}, coach = isCoachKey(), notes = r.notes || [];
+  let html = '';
+  if (r.offline) html += `<div class="notice" style="margin:4px 0 10px">Hub not reachable: notes saved earlier.</div>`;
+  if (coach) {
+    const pl = r.players || [];
+    html += '<div class="nhead">' + (pl.length > 1 ? `<label class="row" style="gap:6px">Player <select id="nPlayer" style="width:auto;padding:4px 8px">${pl.map(p => `<option ${p === r.player ? 'selected' : ''}>${esc(p)}</option>`).join('')}</select></label>` :
+      (r.known ? `<span class="muted">${esc(r.player)}'s recording</span>` : '')) +
+      (r.known && !r.offline ? `<button class="btn small brand" id="nNew" ${RV.ed ? 'disabled' : ''}>New note</button>` : '') + '</div>';
+    if (!r.known && !r.offline) html += `<div class="notice" style="margin:4px 0 10px">This recording isn't on the hub yet. Its scan must be sent to the hub first, from the app of the player who recorded it (same file name).</div>`;
+  }
+  html += notes.map(n => {
+    const mine = !n.from, seen = n.seenBy ? Object.keys(n.seenBy) : null;
+    const sub = [n.from ? `From ${esc(n.from.player)}'s recording` : (n.scope === 'squad' ? 'Squad' : (coach ? 'This recording' : '')),
+      n.drawings && n.drawings.length ? 'drawing' : '', `${Math.round(n.dur)} s`,
+      coach && seen ? (seen.length ? 'Seen by ' + esc(seen.join(', ')) : 'Not seen yet') : ''].filter(Boolean).join(' · ');
+    return `<div class="ev note ${RV.ed && RV.ed.id === n.id ? 'editing' : ''}" data-t="${n.t}" data-id="${esc(n.id)}"><time>${fmtT(n.t)}</time><i style="background:${(n.drawings && n.drawings[0] && n.drawings[0].color) || '#ffd60a'}"></i>
+      <span><b>${esc(n.text || 'Drawing')}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">Edit</button><button class="btn small danger" data-a="del">Delete</button></span>` : ''}</span></div>`;
+  }).join('') || `<div class="empty">${coach ? 'No notes yet. Pause where you want one and press New note.' : 'No coach notes on this recording.'}</div>`;
+  body.innerHTML = html;
+  $$('.ev.note', body).forEach(el => el.onclick = e => {
+    const n = notes.find(x => x.id === el.dataset.id), a = e.target.dataset && e.target.dataset.a;
+    if (a === 'edit') return openEditor(n);
+    if (a === 'del') return deleteNote(n);
+    if (!RV.ed) seek(n.t);
+    markSeen([n]);
+  });
+  const nn = $('#nNew', body); if (nn) nn.onclick = () => openEditor(null);
+  const np = $('#nPlayer', body); if (np) np.onchange = () => { closeEditor(); loadNotes(RV.d.id, np.value); };
+}
+
+/* the drawing layer: a canvas exactly over the picture (the video keeps its shape inside its box) */
+function setupInk(v) {
+  const c = $('#ink');
+  if (window.ResizeObserver) { RV.ro = new ResizeObserver(() => fitInk()); RV.ro.observe(v); }
+  v.addEventListener('loadedmetadata', fitInk);
+  c.addEventListener('pointerdown', e => {
+    if (!RV.ed) return;
+    c.setPointerCapture(e.pointerId);
+    const p = inkPoint(e); RV.ed.cur = {kind: RV.ed.tool, color: RV.ed.color, pts: [p, p]};
+    if (RV.ed.tool === 'pen') RV.ed.cur.pts = [p];
+    paintInk();
+  });
+  c.addEventListener('pointermove', e => {
+    const s = RV.ed && RV.ed.cur; if (!s) return;
+    const p = inkPoint(e);
+    if (s.kind === 'pen') { const q = s.pts[s.pts.length - 1]; if (Math.hypot(p[0] - q[0], p[1] - q[1]) > 0.002 && s.pts.length < 2000) s.pts.push(p); }
+    else s.pts[1] = p;
+    paintInk();
+  });
+  const end = () => {
+    const s = RV.ed && RV.ed.cur; if (!s) return;
+    RV.ed.cur = null;
+    const [a, b] = [s.pts[0], s.pts[s.pts.length - 1]];
+    if (s.pts.length > 1 && (s.kind === 'pen' || Math.hypot(b[0] - a[0], b[1] - a[1]) > 0.01) && RV.ed.drawings.length < 40) RV.ed.drawings.push(s);
+    paintInk();
+  };
+  c.addEventListener('pointerup', end); c.addEventListener('pointercancel', end);
+}
+function inkPoint(e) {
+  const r = $('#ink').getBoundingClientRect();
+  const f = x => Math.round(Math.max(0, Math.min(1, x)) * 10000) / 10000;
+  return [f((e.clientX - r.left) / r.width), f((e.clientY - r.top) / r.height)];
+}
+function fitInk() {
+  const v = $('#vid'), c = $('#ink'); if (!v || !c || !RV) return;
+  const vw = v.videoWidth, vh = v.videoHeight, bw = v.clientWidth, bh = v.clientHeight;
+  const any = RV.ed || ((RV.notes && RV.notes.notes) || []).some(n => n.drawings && n.drawings.length);
+  if (!vw || !vh || !bw || !bh || !any) { c.hidden = true; return; }
+  const k = Math.min(bw / vw, bh / vh), w = vw * k, h = vh * k, dpr = window.devicePixelRatio || 1;
+  Object.assign(c.style, {left: (v.offsetLeft + (bw - w) / 2) + 'px', top: (v.offsetTop + (bh - h) / 2) + 'px', width: w + 'px', height: h + 'px'});
+  c.width = Math.round(w * dpr); c.height = Math.round(h * dpr);
+  c.hidden = false; RV.inkKey = null;
+  paintInk();
+}
+function activeNotes(t) {
+  return ((RV.notes && RV.notes.notes) || []).filter(n => t >= n.t - 0.05 && t < n.t + n.dur);
+}
+function showNotesAt(t) {          /* on each timeupdate: repaints only when the set of notes on screen changes */
+  if (!RV || RV.ed) return;
+  const act = activeNotes(t), key = act.map(n => n.id + ':' + n.version).join(',');
+  if (key === RV.inkKey) return;
+  RV.inkKey = key;
+  paintInk(act);
+  const box = $('#cnote'), txt = act.filter(n => n.text);
+  if (box) { box.hidden = !txt.length; box.innerHTML = txt.map(n => `<span><b>Coach</b>${esc(n.text)}</span>`).join(''); }
+  if (act.length && !$('#vid').paused) markSeen(act);
+}
+function paintInk(act) {
+  const c = $('#ink'); if (!c || c.hidden) return;
+  const g = c.getContext('2d'), W = c.width, H = c.height;
+  g.clearRect(0, 0, W, H);
+  const shapes = RV.ed ? RV.ed.drawings.concat(RV.ed.cur ? [RV.ed.cur] : []) :
+    (act || activeNotes($('#vid').currentTime)).flatMap(n => n.drawings || []);
+  const lw = Math.max(2, W * 0.0035);
+  g.lineWidth = lw; g.lineCap = g.lineJoin = 'round'; g.shadowColor = 'rgba(0,0,0,.7)'; g.shadowBlur = lw;
+  shapes.forEach(s => {
+    const P = s.pts.map(([x, y]) => [x * W, y * H]);
+    g.strokeStyle = s.color; g.beginPath();
+    if (s.kind === 'pen') { P.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); if (P.length === 1) g.lineTo(P[0][0] + .1, P[0][1]); }
+    else {
+      const [[x1, y1], [x2, y2]] = [P[0], P[P.length - 1]];
+      if (s.kind === 'rect') g.rect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+      else if (s.kind === 'circle') g.ellipse((x1 + x2) / 2, (y1 + y2) / 2, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 2, 0, 0, Math.PI * 2);
+      else {
+        const a = Math.atan2(y2 - y1, x2 - x1), hl = Math.max(lw * 4, Math.min(W * 0.03, Math.hypot(x2 - x1, y2 - y1) / 2));
+        g.moveTo(x1, y1); g.lineTo(x2, y2);
+        g.moveTo(x2 - hl * Math.cos(a - 0.45), y2 - hl * Math.sin(a - 0.45)); g.lineTo(x2, y2); g.lineTo(x2 - hl * Math.cos(a + 0.45), y2 - hl * Math.sin(a + 0.45));
+      }
+    }
+    g.stroke();
+  });
+}
+function markSeen(list) {
+  if (isCoachKey() || !RV.notes || RV.notes.offline) return;
+  RV.seenSent = RV.seenSent || new Set();
+  const ids = list.filter(n => !n.seen && !RV.seenSent.has(n.id)).map(n => n.id);
+  if (!ids.length) return;
+  ids.forEach(i => RV.seenSent.add(i));
+  api('/api/notes/seen', {id: RV.d.id, note_ids: ids}).catch(() => ids.forEach(i => RV.seenSent.delete(i)));
+}
+
+/* the coach's editor: pause, draw, write, save */
+function openEditor(n) {
+  const v = $('#vid'); if (!v) return;
+  v.pause();
+  if (n) v.currentTime = n.t;
+  let last = {tool: 'pen', color: INK[0]};
+  try { last = JSON.parse(localStorage.getItem('pcs-ink') || 'null') || last; } catch (x) {}
+  RV.ed = {id: n ? n.id : null, version: n ? n.version : null, t: n ? n.t : Math.round(v.currentTime * 100) / 100,
+           dur: n ? n.dur : 5, text: n ? n.text : '', scope: n ? n.scope : 'recording',
+           drawings: n ? JSON.parse(JSON.stringify(n.drawings || [])) : [], tool: last.tool, color: last.color, cur: null};
+  $('#player').classList.add('drawing');
+  $('#cnote').hidden = true;
+  drawEditor(); fitInk(); drawSide();
+}
+function closeEditor() {
+  if (!RV || !RV.ed) return;
+  RV.ed = null; RV.inkKey = null;
+  const p = $('#player'); if (p) p.classList.remove('drawing');
+  const bar = $('#coachBar'); if (bar) { bar.hidden = true; bar.innerHTML = ''; }
+  fitInk(); drawSide(); onTime(true);
+}
+function inkUndo() { if (RV.ed) { RV.ed.drawings.pop(); paintInk(); } }
+function drawEditor() {
+  const bar = $('#coachBar'), e = RV.ed; if (!bar || !e) return;
+  bar.hidden = false;
+  bar.innerHTML = `<div class="row" style="gap:10px">
+      <b class="edtitle">${e.id ? 'Edit note' : 'New note'} at ${fmtT(e.t)}</b>
+      <div class="seg" id="edTool">${TOOLS.map(([k, l]) => `<button data-k="${k}" class="${e.tool === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+      <div class="swatches" id="edColor">${INK.map(c => `<button data-c="${c}" class="${e.color === c ? 'on' : ''}" style="background:${c}" aria-label="Colour ${c}"></button>`).join('')}</div>
+      <button class="btn small" id="edUndo">Undo</button><button class="btn small" id="edClear">Clear</button></div>
+    <textarea id="edText" rows="2" maxlength="2000" placeholder="Note for the player (optional with a drawing)">${esc(e.text)}</textarea>
+    <div class="row" style="gap:10px">
+      <div class="seg" id="edScope"><button data-s="recording" class="${e.scope === 'recording' ? 'on' : ''}">This recording</button><button data-s="squad" class="${e.scope === 'squad' ? 'on' : ''}">Squad</button></div>
+      <label class="row" style="gap:6px">Shows for <input type="number" id="edDur" min="1" max="120" step="1" value="${Math.round(e.dur)}" style="width:70px;padding:5px 8px"> s</label>
+      <span style="flex:1"></span>
+      <button class="btn small ghost" id="edCancel">Cancel</button><button class="btn small brand" id="edSave">Save</button></div>
+    <small class="faint">Draw on the picture. ${e.scope === 'squad' ? 'Squad: the text also shows on your players\' recordings of this game, at the same moment. Drawings stay on this recording.' : 'Only on this recording.'}</small>`;
+  const remember = () => { try { localStorage.setItem('pcs-ink', JSON.stringify({tool: e.tool, color: e.color})); } catch (x) {} };
+  $$('#edTool button', bar).forEach(b => b.onclick = () => { e.tool = b.dataset.k; remember(); drawEditor(); });
+  $$('#edColor button', bar).forEach(b => b.onclick = () => { e.color = b.dataset.c; remember(); drawEditor(); });
+  $$('#edScope button', bar).forEach(b => b.onclick = () => { e.scope = b.dataset.s; drawEditor(); });
+  $('#edText', bar).oninput = x => e.text = x.target.value;
+  $('#edDur', bar).oninput = x => e.dur = Math.max(1, Math.min(120, +x.target.value || 5));
+  $('#edUndo', bar).onclick = inkUndo;
+  $('#edClear', bar).onclick = () => { e.drawings = []; paintInk(); };
+  $('#edCancel', bar).onclick = closeEditor;
+  $('#edSave', bar).onclick = saveNote;
+}
+async function saveNote() {
+  const e = RV.ed; if (!e) return;
+  if (!e.text.trim() && !e.drawings.length) return toast('Write a note or draw something first.', true);
+  const btn = $('#edSave'); btn.disabled = true;
+  try {
+    const r = await api('/api/notes/save', {id: RV.d.id, player: RV.notes.player,
+      note: {id: e.id, version: e.version, t: e.t, dur: e.dur, text: e.text.trim(), scope: e.scope, drawings: e.drawings.map(({kind, color, pts}) => ({kind, color, pts}))}});
+    closeEditor(); setNotes(r); toast('Note saved. Your players see it in their review.');
+  } catch (x) { btn.disabled = false; toast(x.message, true); }
+}
+async function deleteNote(n) {
+  if (!confirmBox('Delete this note? Players stop seeing it.')) return;
+  try { setNotes(await api('/api/notes/delete', {id: RV.d.id, player: RV.notes.player, note_id: n.id})); toast('Note deleted.'); }
+  catch (x) { toast(x.message, true); }
 }
 
 /* ------------------------------------------------------------------ sound analysis (loudness per track) */

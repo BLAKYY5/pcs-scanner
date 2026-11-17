@@ -654,6 +654,38 @@ class Backend:
         webbrowser.open(url + path)
         return {"window": False}
 
+    # ------------------------------------------------------------- coach notes on recordings (team hub)
+    def _notes_target(self, item_id: str) -> tuple[str, dict]:
+        it = self.find(item_id)
+        if not it:
+            raise RuntimeError("Recording not found")
+        return (self.auto.s.hub_url if self.auto else ""), it
+
+    def notes(self, item_id: str, player: str | None = None) -> dict:
+        """The coach's notes for a recording (see pcs_recorder.notes): from the hub, or saved here when offline."""
+        from pcs_recorder import notes
+        url, it = self._notes_target(item_id)
+        return notes.fetch(url, it["path"], item_id, player)
+
+    def note_change(self, item_id: str, action: str, body: dict) -> dict:
+        """Coach: save / delete a note; anyone: mark notes as seen. Returns the recording's notes afterwards."""
+        from pcs_recorder import notes
+        url, it = self._notes_target(item_id)
+        if not url:
+            raise RuntimeError("No team hub address set (Settings → Team hub)")
+        player = str(body.get("player") or "").strip() or None
+        if action == "save":
+            notes.save(url, it["path"], player or "", body.get("note") or {})
+        elif action == "delete":
+            notes.delete(url, body.get("note_id"))
+        elif action == "seen":
+            for nid in (body.get("note_ids") or [])[:50]:
+                notes.seen(url, nid)
+            return {"ok": True}
+        else:
+            raise ValueError("unknown action")
+        return self.notes(item_id, player)
+
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
         """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
@@ -935,6 +967,8 @@ class Server:
                         return self._json(b.mics())
                     if path == "/api/voiceapps":
                         return self._json(b.voice_apps())
+                    if path.startswith("/api/library/") and path.endswith("/notes"):
+                        return self._json(b.notes(path.split("/")[3], (q.get("player") or [""])[0] or None))
                     if path.startswith("/api/library/") and path.endswith("/levels"):
                         d = b.levels(path.split("/")[3])
                         return self._json(d) if d else self._json({"error": "not found"}, 404)
@@ -976,6 +1010,8 @@ class Server:
                     if path == "/api/youtube/block":
                         return self._json(b.yt_block(body.get("id", ""), body.get("action", ""),
                                                      body.get("title"), body.get("privacy")))
+                    if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen"):
+                        return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
                     if path == "/api/label":
                         return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
                     if path == "/api/signin":

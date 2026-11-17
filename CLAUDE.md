@@ -99,6 +99,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.8 is
   others may be used alone (controller players).
 - **Coach role**: unlocked when the signed-in Google account matches the build's coach address (a CI variable,
   never in the repo). Coach-only: importing recordings by hand.
+- **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
+  drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
+  the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file
+  imported by hand with its original name (or his own recording of the game). The hub key's role (`me.role` in the
+  answer), not the app's Coach role, decides who may write. Drawings are 0..1 coordinates of the video frame, drawn
+  on a canvas fitted to the picture (`fitInk`), repainted only when the set of notes on screen changes. "Squad"
+  notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
+  never. Last answer cached in `notes-cache/` for offline. Full screen is the player box (F / button), the video's
+  own full-screen button is hidden, or the drawings would not show.
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
