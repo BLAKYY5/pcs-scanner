@@ -29,7 +29,7 @@ def selftest(out):
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
-        import pcs_recorder.minimaps   # noqa: F401
+        import pcs_recorder.minimaps, pcs_recorder.weaponicons   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
@@ -442,7 +442,7 @@ def main():
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)
-            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the team link, same rhythm
+            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the hub or team link, same rhythm
             except Exception: logging.exception('team link')
             # tell the player once per new version with a corner message (not during a game: it waits)
             if b.update and told != b.update[0] and b.auto and not b.update_blocked():

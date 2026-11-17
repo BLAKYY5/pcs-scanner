@@ -969,6 +969,271 @@ def test_hub_join_from_setup():
         _fresh_hub()
 
 
+INVITE = "pcsi_" + "Q" * 20 + "-_" + "Z" * 21                   # obviously fake invite code (43 chars after pcsi_)
+
+
+def _icons_file(n):
+    import io
+    import numpy as np
+    b = io.BytesIO()
+    np.savez_compressed(b, **{f"gun{i}": np.full((20, 50), 10 * i, np.uint8) for i in range(n)})
+    return b.getvalue()
+
+
+class InviteHub:
+    """A hub with invites and weapon icons (hub PR #12), on localhost. `redeem` = what /api/invites/redeem answers:
+    "ok" (GOOD_KEY for Tester), "invalid", "taken", "limit". `icons` = None (404) or (asset, bytes). Every request is
+    kept (method, path, Authorization, body)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.redeem, self.icons, self.seen, self.blob_calls = "ok", None, [], 0
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj, headers=None, ctype="application/json"):
+                data = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                auth = self.headers.get("Authorization", "")
+                hub.seen.append((self.command, self.path, auth, body, self.headers.get("Cookie", "")))
+                p = self.path
+                if p == "/api/ping":
+                    return self._send(200, {"version": "0.6.0"})
+                if p == "/api/invites/redeem" and self.command == "POST":
+                    if auth:
+                        return self._send(400, {"detail": "no key here", "error": "bad_request"})
+                    try:
+                        code = json.loads(body).get("code")
+                    except ValueError:
+                        code = None
+                    if hub.redeem == "limit":
+                        return self._send(429, {"detail": "Too many", "error": "too_many_attempts"}, {"Retry-After": "600"})
+                    if hub.redeem == "invalid" or code != INVITE:
+                        return self._send(400, {"detail": "This invite link is not valid (used, expired or revoked).",
+                                                "error": "invalid_code"})
+                    if hub.redeem == "taken":
+                        return self._send(409, {"detail": "A key named Tester exists already: ask your coach.",
+                                                "error": "name_taken"})
+                    return self._send(200, {"key": GOOD_KEY, "name": "Tester", "role": "player", "hub": "http://elsewhere:8420"},
+                                      {"Cache-Control": "no-store"})
+                if auth != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if p == "/api/me":
+                    return self._send(200, {"name": "Tester", "role": "player", "via": "header",
+                                            "can_edit_lootbook": True, "coach_only_collections": []})
+                if p == "/api/db/weaponicons/current":
+                    if not hub.icons:
+                        return self._send(404, {"detail": "Not Found", "error": "not_found"})
+                    asset, data = hub.icons
+                    return self._send(200, {"id": "current", "version": 1, "data": {
+                        "asset": asset, "bytes": len(data or b""), "sha256": "x", "count": 3, "source": "test"}})
+                if p.startswith("/_blob/"):
+                    hub.blob_calls += 1
+                    if hub.icons and p[7:] == hub.icons[0] and hub.icons[1] is not None:
+                        return self._send(200, hub.icons[1], ctype="application/octet-stream")
+                    return self._send(200, b"<svg/>", ctype="image/svg+xml")
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_hub_invite_link_parsing():
+    from pcs_recorder import hub
+    assert hub.parse_invite(f"http://100.64.1.2:8420/join#code={INVITE}") == (INVITE, "http://100.64.1.2:8420")
+    assert hub.parse_invite(f"  https://hub.example.ts.net/join#code={INVITE}&x=1\n") == (INVITE, "https://hub.example.ts.net")
+    assert hub.parse_invite(f"http://pcs-hub:8420/join#code={INVITE.replace('_', '%5F')}")[0] == INVITE
+    for bad in ("", INVITE, f"http://h/join?code={INVITE}", f"ftp://h/join#code={INVITE}",    # code in the query: no
+                f"http://user@h/join#code={INVITE}", f"http://h/join#code={INVITE}X", f"http://h/login#key={GOOD_KEY}"):
+        assert hub.parse_invite(bad) == (None, None), bad
+    assert hub.parse_key(f"http://h:8420/join#code={INVITE}") == (None, None)       # not mistaken for a key
+    assert INVITE not in core.redact(f"x {INVITE} y") and GOOD_KEY not in core.redact(GOOD_KEY)
+
+
+def test_hub_join_with_invite():
+    """Home → Join the team hub with a single-use invite link: the code goes to the hub only in the request body (no
+    key, no cookie), the key it gives is saved (encrypted) with the link's address, then tested. A used / wrong code,
+    a taken name and too many tries say so; the link and code never appear in an answer, an address or app.log.
+    Settings → Key takes the invite link too."""
+    import logging
+    from pcs_recorder import settings as st
+    hub = _fresh_hub()
+    fake = InviteHub()
+    b = pcs_server.Backend(_Auto(str(TMP / "invrecs")))
+    b.auto.s.hub_url = "http://old-hub:8420"
+    st_save = st.save
+    st.save = lambda s: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    link = f"{fake.url}/join#code={INVITE}"
+    answers = []
+    urllib3_level = logging.getLogger("urllib3").level
+    logging.getLogger("urllib3").setLevel(logging.DEBUG)          # even the HTTP library's own lines: no code
+    try:
+        # used (or opened in a browser first): the hub's words + what to do; nothing saved
+        fake.redeem = "invalid"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert code == 200 and not r["ok"] and "not valid" in r["text"] and hub.INVITE_USED in r["text"], r
+        assert hub.get_key() is None and b.auto.s.hub_url == "http://old-hub:8420" and "tailscale" not in r
+        # a key with that name exists
+        fake.redeem = "taken"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert not r["ok"] and r["text"] == "A key named Tester exists already: ask your coach." and hub.get_key() is None, r
+        # too many tries
+        fake.redeem = "limit"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert not r["ok"] and r["text"] == "Too many tries, try again later." and hub.get_key() is None, r
+        # works: key saved encrypted, the link's address (not the hub's "hub" field) replaces the old one, tested
+        fake.redeem = "ok"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert code == 200 and r["ok"] and r["text"] == "Connected as Tester (player)", r
+        assert hub.get_key() == GOOD_KEY and b.auto.s.hub_url == fake.url and r["hub"]["key"] == "pcs_…AAAA"
+        assert GOOD_KEY.encode() not in hub.KEY_FILE.read_bytes()
+        redeems = [s for s in fake.seen if s[1] == "/api/invites/redeem"]
+        assert len(redeems) == 4 and all(m == "POST" and a == "" and c == "" for m, _, a, _, c in redeems)
+        assert all(json.loads(body) == {"code": INVITE} for *_, body, _ in redeems)
+        assert not any(INVITE in p or INVITE in a or (INVITE.encode() in body and p != "/api/invites/redeem")
+                       for _, p, a, body, _ in fake.seen)
+        # Settings → Key: an invite link pasted there (with the Test button's address field) is redeemed the same way
+        hub.set_key(None)
+        b.auto.s.hub_url = ""
+        fake.redeem = "invalid"
+        code, raw, _ = call(srv, "/api/settings", {"hub_url": "", "hub_key": link}, raw=True)
+        answers.append(raw)
+        assert code == 500 and hub.INVITE_USED in json.loads(raw)["error"] and hub.get_key() is None
+        fake.redeem = "ok"
+        code, raw, _ = call(srv, "/api/settings", {"hub_url": "http://typed:1", "hub_key": link}, raw=True)
+        answers.append(raw)
+        assert code == 200 and hub.get_key() == GOOD_KEY and b.auto.s.hub_url == fake.url
+        assert json.loads(raw)["hub"]["key"] == "pcs_…AAAA"
+        answers.append(call(srv, "/api/state", raw=True)[1])
+        # a hub that can't be reached: no key, Tailscale advice as for sign-in links
+        hub.set_key(None)
+        code, r, _ = call(srv, "/api/hub/join", {"link": f"http://127.0.0.1:9/join#code={INVITE}"})
+        assert not r["ok"] and r["text"] == "Hub not reachable" and r["tailscale"] == "" and hub.get_key() is None, r
+        for a in answers:
+            assert INVITE.encode() not in a and GOOD_KEY.encode() not in a and b"/join#" not in a, a
+        for h in logging.getLogger().handlers:
+            h.flush()
+        log = Path(core.LOG_F).read_text(encoding="utf-8", errors="replace")
+        assert "invite used" in log and INVITE not in log and "#code=" not in log and GOOD_KEY not in log
+    finally:
+        logging.getLogger("urllib3").setLevel(urllib3_level)
+        t = getattr(b, "_icons_thread", None)
+        if t:
+            t.join(15)                                               # the icons check started by the join
+        srv.stop()
+        fake.stop()
+        st.save = st_save
+        _fresh_hub()
+
+
+def test_weapon_icons_from_hub():
+    """The weapon icons come from the hub when it has them: downloaded once per asset id with the key, checked with
+    the app's own icons check (a bad file is refused, kept off this PC and not downloaded again), the team link not
+    needed then. No icons on the hub (404): the team link still works as before."""
+    from pcs_recorder import weaponicons
+    hub = _fresh_hub()
+    fake = InviteHub()
+    auto = _Auto(str(TMP / "iconrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    real_get = core.http_get
+    drive = {"data": _icons_file(2), "calls": 0}
+
+    def fake_drive(url, limit):
+        drive["calls"] += 1
+        return drive["data"]
+    core.http_get = fake_drive
+    Path(core.ICONS_F).unlink(missing_ok=True)
+    weaponicons.STATE_F.unlink(missing_ok=True)
+    fid = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    try:
+        # no key: the hub isn't asked; no team link either: nothing
+        assert b.sync_icons() == "none" and not fake.seen
+        hub.set_key(GOOD_KEY)
+        # none on the hub yet (404): the team link is used as before
+        core.SETTINGS["team_link"] = f"https://drive.google.com/file/d/{fid}/view"
+        assert b.sync_icons() == "updated" and drive["calls"] == 1 and not b.icons_from_hub()
+        assert Path(core.ICONS_F).read_bytes() == drive["data"] and fake.blob_calls == 0
+        # the coach uploads the icons to the hub: downloaded once, the team link isn't asked any more
+        one = _icons_file(3)
+        fake.icons = ("a" * 32, one)
+        n = len(b.messages)
+        assert b.sync_icons() == "hub:updated" and Path(core.ICONS_F).read_bytes() == one and fake.blob_calls == 1
+        assert any("from the team hub" in m["text"] for m in list(b.messages)[n:])
+        assert b.icons_from_hub() and b.state()["iconsFromHub"] is True and drive["calls"] == 1
+        blobs = [s for s in fake.seen if s[1].startswith("/_blob/")]
+        assert all(a == "Bearer " + GOOD_KEY for _, _, a, _, _ in blobs) and not any(GOOD_KEY in s[1] for s in fake.seen)
+        for _ in range(3):                                          # same asset id: never downloaded again
+            assert b.sync_icons() == "hub:same"
+        assert fake.blob_calls == 1 and drive["calls"] == 1
+        # a new upload (new asset id): downloaded again
+        two = _icons_file(5)
+        fake.icons = ("b" * 32, two)
+        assert b.sync_icons() == "hub:updated" and Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 2
+        # a bad file on the hub: refused, the good copy stays, said once, not downloaded again
+        fake.icons = ("c" * 32, b"PK\x03\x04 not icons")
+        n = len(b.messages)
+        b.sync_icons()
+        assert Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 3
+        assert sum("isn't usable" in m["text"] for m in list(b.messages)[n:]) == 1
+        b.sync_icons()
+        assert fake.blob_calls == 3 and sum("isn't usable" in m["text"] for m in list(b.messages)[n:]) == 1
+        assert not list(Path(core.ICONS_F).parent.glob("*.part"))
+        # the hub answers a placeholder drawing for a lost file: refused the same way
+        fake.icons = ("d" * 32, None)
+        b.sync_icons()
+        assert Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 4
+        # hub unreachable after icons came from it: the hub's copy stays (team link not used)
+        fake.icons = ("e" * 32, one)
+        assert b.sync_icons() == "hub:updated"
+        calls = drive["calls"]
+        fake.stop()
+        assert b.sync_icons() == "hub:error" and Path(core.ICONS_F).read_bytes() == one and drive["calls"] == calls
+        # page words: the team link becomes optional with the hub's icons
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        for text in ("iconsFromHub", "Team link${S.iconsFromHub ? ' (optional)'", "no team link needed",
+                     "Not needed: the team hub gives the weapon icons", "invite link"):
+            assert text in js, text
+    finally:
+        core.http_get = real_get
+        core.SETTINGS["team_link"] = ""
+        Path(core.ICONS_F).unlink(missing_ok=True)
+        weaponicons.STATE_F.unlink(missing_ok=True)
+        _fresh_hub()
+
+
 def test_tailscale_state():
     """Tailscale advice is looked up on this PC only: installed? connected (a 100.64.0.0/10 address)?"""
     import psutil
