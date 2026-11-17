@@ -48,6 +48,18 @@ class HubError(Exception):
         self.kind, self.status = kind, status
 
 
+def reason(e: Exception) -> str:
+    """Why the hub didn't take a recording's results, as the player reads it on the recording."""
+    kind = getattr(e, "kind", "network")
+    if kind == "refused":
+        return "Key refused"
+    if kind == "wait":
+        return "Hub asks to wait"
+    if kind == "http":
+        return f"Hub error {getattr(e, 'status', '')}".strip()
+    return "Hub not reachable"
+
+
 # ------------------------------------------------------------------ the key: parsing, storage
 
 def parse_key(text) -> tuple[str | None, str | None]:

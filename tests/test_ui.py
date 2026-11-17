@@ -1126,6 +1126,71 @@ def test_hub_key_never_in_logs_or_data_files():
     assert not hits, hits
 
 
+def test_hub_retry_with_real_hub_requests():
+    """Recorder + Sender + hub.py against a hub on localhost: Drive takes the results while the hub is not
+    reachable, then a refused key; the Recordings list says "Not on hub yet" and why; once the hub is reachable
+    and the key is fixed, the recording goes to the hub by itself, once."""
+    from pcs_recorder import retention, runtime, settings as st
+    from pcs_recorder.core import Recorder
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    folder = TMP / "hubretry"
+    folder.mkdir(exist_ok=True)
+    v = folder / "Apex Legends_retry.mp4"
+    v.write_bytes(DATA)
+    out = v.with_suffix(".scan")
+    out.mkdir(exist_ok=True)
+    (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}]}')
+    (out / (v.stem + ".feed.json")).write_text("{}")
+    retention.SENT_FILE.unlink(missing_ok=True)
+    s = st.Settings(folder=str(folder), player="Tester", hub_url="http://127.0.0.1:9")      # nothing listens there
+    notes = []
+
+    class UI:
+        def notify(self, t, m, sticky=False, action=None):
+            notes.append((t, m))
+    sender = runtime.Sender(s, lambda paths: True)                                      # Drive works
+    rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False)
+    rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
+
+    class Auto:
+        pass
+    auto = Auto()
+    auto.s, auto.rec, auto.sender = s, rec, sender
+    b = pcs_server.Backend(auto)
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        hub.set_key(BAD_KEY)
+        rec._retry_uploads()
+        assert rec.idx["k"].status == "uploaded" and rec.hub_state("k") == {"hub": "pending", "why": "Hub not reachable"}
+        it = next(x for x in call(srv, "/api/library")[1] if x["name"] == v.name)
+        assert it["hub"] == {"hub": "pending", "why": "Hub not reachable"}, it
+        rec._retry_hub()                                                               # still down
+        assert rec.hub_state("k")["why"] == "Hub not reachable" and rec.hub_next > time.time()
+        s.hub_url = fake.url                                                           # hub reachable (new address)
+        rec._retry_hub()
+        assert rec.hub_state("k") == {"hub": "pending", "why": "Key refused"}
+        n = len(fake.seen)
+        for _ in range(3):
+            rec._retry_hub()
+        assert len(fake.seen) == n                                                     # nothing asked with that key
+        hub.set_key(GOOD_KEY)                                                          # key fixed: goes out by itself
+        rec._retry_hub()
+        assert rec.hub_state("k") == {"hub": "sent", "why": ""}
+        ups = [a for m, p, a in fake.seen if p == "/api/scans" and a == "Bearer " + GOOD_KEY]
+        assert len(ups) == 1 and rec.idx["k"].note == "Sent to hub: 11 games"
+        assert ("Sent to hub", "1 game: Storm Point: now on the team hub.") in notes, notes
+        it = next(x for x in call(srv, "/api/library")[1] if x["name"] == v.name)
+        assert it["hub"]["hub"] == "sent" and it["note"] == "Sent to hub: 11 games"
+        rec._retry_hub(); rec._retry_uploads()
+        assert len([1 for m, p, a in fake.seen if p == "/api/scans"]) == 2             # 1 refused + 1 taken: no more
+    finally:
+        srv.stop()
+        fake.stop()
+        _fresh_hub()
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback
