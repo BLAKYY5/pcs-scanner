@@ -114,6 +114,7 @@ class Window:
                                            min_size=(980, 640), hidden=self.hidden, background_color='#121211')
             self.w.events.closing += self._closing
             self.w.events.loaded += self._hook_drop
+            self.w.events.loaded += self._loaded
             self.w.events.minimized += lambda: self._seen(False)
             self.w.events.restored += lambda: self._seen(True)
             self.w.events.maximized += lambda: self._seen(True)
@@ -215,6 +216,14 @@ class Window:
 
     def hide(self):
         self._seen(False, hide_form=True)
+
+    def _loaded(self):
+        """Started in the tray (start with Windows, after an update): pywebview shows and hides the form once, which
+        leaves the web view thinking it is seen: it kept working all day until the window was opened and closed once
+        (measured 17 Nov 2026: about 2 % of a CPU core, a few hundred wake-ups a second in WebView2's browser and
+        GPU processes; 0.2 % with this). The web view is told it is hidden as soon as the page has loaded."""
+        if not self.visible:
+            self._seen(False)
 
     def _hook_drop(self):
         """Dropped files: the page doesn't get their location, pywebview does."""

@@ -84,6 +84,41 @@ def audio_tracks(video: str) -> list[dict]:
              "label": label.get(names[i], names[i]) if i < len(names) else f"Audio {i + 1}"} for i in range(n)]
 
 
+def tailscale_state(url: str) -> str:
+    """Why a hub reached through Tailscale (100.64.0.0/10 or *.ts.net) may not answer, looked up on this PC only
+    (no request, nothing started): "missing" = Tailscale isn't installed, "off" = installed but this PC isn't
+    connected (no Tailscale address), "on" = connected (the hub itself is off, or not shared with this player).
+    "" = the hub isn't a Tailscale address, or it can't be told."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:
+        return ""
+    ts_net = ipaddress.ip_network("100.64.0.0/10")
+    try:
+        on_ts = ipaddress.ip_address(host) in ts_net
+    except ValueError:
+        on_ts = host.endswith(".ts.net")
+    if not on_ts:
+        return ""
+    roots = [os.environ.get(k, "") for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")]
+    if not any(r and os.path.exists(os.path.join(r, "Tailscale", "tailscale.exe")) for r in roots):
+        return "missing"
+    try:
+        import psutil
+        for addrs in psutil.net_if_addrs().values():
+            for ad in addrs:
+                try:
+                    if ipaddress.ip_address(ad.address.split("%")[0]) in ts_net:
+                        return "on"
+                except ValueError:
+                    pass
+    except Exception:
+        return ""
+    return "off"
+
+
 def vid(path: str) -> str:
     return hashlib.sha1(os.path.normcase(os.path.abspath(path)).encode()).hexdigest()[:12]
 
@@ -685,6 +720,7 @@ class Backend:
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
+                   "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
@@ -716,6 +752,25 @@ class Backend:
         res = hub.test(a.s.hub_url)
         if res.get("ok"):
             a.rec.next_upload = 0                          # results waiting for the hub: try now
+        return res
+
+    def hub_join(self, link: str) -> dict:
+        """First-run setup: the sign-in link from the coach (hub address + key in one paste) is saved and tested at
+        once. The link's address replaces the one set (the player pasted the coach's link on purpose). The link is
+        never logged nor repeated in an answer or an error."""
+        from pcs_recorder import hub
+        a = self.auto
+        if not a:
+            raise RuntimeError("Auto-record isn't available in this build")
+        key, url = hub.parse_key(link)
+        if not key:
+            raise ValueError("That isn't the link from your coach. Copy the whole link and paste it again.")
+        if not url and not a.s.hub_url:
+            raise ValueError("Paste the whole link from your coach: it has the hub address in it.")
+        self._save_settings({"hub_url": url or a.s.hub_url, "hub_key": link})
+        res = self.hub_test()
+        if not res.get("ok"):
+            res["tailscale"] = tailscale_state(a.s.hub_url)
         return res
 
     def open_hub(self, path: str = "/") -> dict:
@@ -1229,6 +1284,8 @@ class Server:
                         return self._json(b.state())
                     if path == "/api/hub/test":
                         return self._json(b.hub_test() | {"hub": b.hub_state()})
+                    if path == "/api/hub/join":
+                        return self._json(b.hub_join(str(body.get("link") or "")) | {"hub": b.hub_state()})
                     if path == "/api/hub/open":
                         return self._json(b.open_hub(body.get("path") or "/"))
                     if path == "/api/autorecord":

@@ -4,15 +4,35 @@ Scans Apex Legends recordings for Project Conquerors (PCS): drop spots, landing,
 ranked/scrim mode and the kill feed. Results upload to the team's Google Drive and are imported into the
 Conquerors Loot Book overnight.
 
-## For players
+## Install (players)
 
-> **Download the app here: [PCS-Scanner.exe](https://github.com/BLAKYY5/pcs-scanner/releases/latest/download/PCS-Scanner.exe)**
-> Do NOT use the green "Code → Download ZIP" button: that is the source code, not the app, and it will not work.
+> **1. Download: [PCS-Scanner.exe](https://github.com/BLAKYY5/pcs-scanner/releases/latest/download/PCS-Scanner.exe)**
+> (always the newest version). Not the green "Code" button: that is the source code, not the app.
 
-1. Download `PCS-Scanner.exe` with the link above (always the newest version; the app updates itself afterwards).
-2. Open it, type your EEC name (Home page), then **Settings → Sign in with Google** once.
-3. On **Home**, turn on **Auto-record**. That's it. **Start with Windows** is on by default, so the app is always
-   waiting in the tray (red dot, bottom right); closing the window keeps it there, **Quit** is in the tray menu.
+2. **Open it.** If your browser asks whether to keep the file, click **Keep**. Windows may say "Windows protected
+   your PC": click **More info**, then **Run anyway** (only the first time). Leave the file where it is or move it
+   to your Desktop first: the app updates this file by itself, so don't delete it.
+3. **Follow "Get set up" on the Home page.** Four steps, about two minutes:
+   1. **Your EEC name**: type it, **Save**.
+   2. **Record Apex by itself**: **Turn on**. The recorder is set up in the background (about a minute); go on.
+   3. **Join the team hub**: paste the link your coach sent you, **Join**. The hub is reached through
+      [Tailscale](https://tailscale.com/download/windows): if the app says so, install it, sign in with the invite
+      from your coach, and press **Join** again.
+   4. **Google Drive** (optional once you're on the hub): **Sign in with Google**. Google may say "Google hasn't
+      verified this app": click **Advanced**, then the **Go to …** link, then **Continue**.
+4. **Play Apex.** Recording starts and stops by itself. The app waits in the tray (bottom right) and starts with
+   Windows; closing the window keeps it there, **Quit** is in the tray menu.
+
+Voice comms and your mic are never recorded until you turn them on in Settings → Sound and comms, once your team
+agreed. Weapon names in the kill feed need the team link from your coach (Settings → Team link).
+
+### For the coach: invite a player
+On the team hub's **Keys** page, make a key for the player and press **Copy link**. Send that link to the player
+only (a private message). One link per player; if it gets out, revoke the key on the same page and send a new one.
+Open the Keys page through the address the players use (the Tailscale one): the link carries the address it was
+copied from.
+
+## What it does
 
 The window (1.9+) has four parts:
 - **Home**: is it recording, ready or scanning; the two switches; storage used; Google status; recent activity.
