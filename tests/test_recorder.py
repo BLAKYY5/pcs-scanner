@@ -1014,6 +1014,45 @@ def test_sound_ring_moving():
         assert [round(c["t"]) for c in r["cues"]["ring_moving"]] == [30, 80], r
 
 
+def test_sound_ring_cross_check():
+    """Screen and sound check each other: a weak alarm right after a countdown read on screen confirms it (only
+    there: the same weak alarm elsewhere is ignored), and an alarm while the screen shows the ring closing is not a
+    ring start (kept apart with the reason)."""
+    import json
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_audio as A
+    # the alarm level per 64 ms frame (what tone_level gives): loud alarms at 30 and 120 s, weak ones (8 dB, under
+    # the normal 9 dB bar) at 70 and 160 s, background 2 dB
+    T = np.arange(0, 200, A.HOP / A.SR)
+    level = np.full(len(T), 2.0)
+    for start, db in ((30.0, 25.0), (70.0, 8.0), (120.0, 25.0), (160.0, 8.0)):
+        for k in range(3):
+            level[(T >= start + 1.75 * k) & (T < start + 1.75 * k + 1.0)] = db
+    c = A.TONE_CUES["ring_moving"]
+    found = {"seconds": 200.0, "cues": {"ring_moving": A.runs(T, level, c["min_db"], c["min_len"], c["merge"])},
+             "_ring": (T, level)}
+    assert [round(c["t"]) for c in found["cues"]["ring_moving"]] == [30, 120], found["cues"]
+    games = [{"tStart": 0, "ring": [
+        {"kind": "wait", "firstSeen": 10, "endsAt": 29.6},
+        {"kind": "wait", "firstSeen": 50, "endsAt": 69.8},         # weak alarm at 70: confirmed by the screen
+        {"kind": "closing", "firstSeen": 100, "endsAt": 140},      # alarm at 120 while closing: not a ring start
+    ]}]
+    A.attach(games, found)
+    r = games[0]["ring"]
+    assert abs(r[0]["soundAt"] - 30) < 0.5 and "soundWeak" not in r[0], r
+    assert abs(r[1]["soundAt"] - 70) < 0.6 and r[1]["soundWeak"] is True and r[1]["soundDb"] > 7, r
+    assert "soundAt" not in r[2], r
+    assert games[0]["ringSound"] == [], games[0]
+    assert [(round(x["t"]), x["why"]) for x in games[0]["ringSoundOther"]] == [(120, "closing")], games[0]
+    assert found["ringWeak"] == 1 and "_ring" not in found
+    json.dumps(found)                                         # what the scan saves stays plain JSON
+    # a countdown still running far from its end also rejects an alarm; no countdown: the alarm is kept
+    assert A.screen_says_not_ring([{"kind": "wait", "firstSeen": 0, "endsAt": 100}], 50) == "countdown"
+    assert A.screen_says_not_ring([{"kind": "wait", "firstSeen": 0, "endsAt": 100}], 99) is None
+    assert A.screen_says_not_ring([], 50) is None
+
+
 def test_scanner_no_function_defined_twice():
     """A second function with the same name silently replaces the first one (the scanner's files are long): a new
     helper once took the name of the pre-ring clock's helper and every scan failed. Caught here instead."""
