@@ -924,6 +924,94 @@ def test_hub_settings_test_button_and_errors():
         _fresh_hub()
 
 
+def test_hub_join_from_setup():
+    """Home → Get set up → Join the team hub: one paste of the coach's link saves the address (replacing an old one)
+    and the key, and tests at once. Wrong pastes are refused without repeating them; the key is never answered back
+    nor written to the log; an unreachable Tailscale hub says what to do."""
+    from pcs_recorder import settings as st
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    b = pcs_server.Backend(_Auto(str(TMP / "joinrecs")))
+    b.auto.s.hub_url = "http://old-hub:8420"                       # an old address: the link's address wins
+    st_save = st.save
+    st.save = lambda s: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, r, _ = call(srv, "/api/hub/join", {"link": "pcs_12345 not a link"})
+        assert code == 500 and "12345" not in r["error"] and hub.get_key() is None, r
+        code, raw, _ = call(srv, "/api/hub/join", {"link": f"{fake.url}/login#key={GOOD_KEY}"}, raw=True)
+        assert code == 200 and GOOD_KEY.encode() not in raw, raw
+        r = json.loads(raw)
+        assert r["ok"] and r["text"] == "Connected as Tester (player)" and "tailscale" not in r, r
+        assert b.auto.s.hub_url == fake.url and hub.get_key() == GOOD_KEY
+        assert r["hub"]["key"] == "pcs_…AAAA" and r["hub"]["last"]["name"] == "Tester"
+        assert all(GOOD_KEY not in p for _, p, _ in fake.seen)                          # never in an address
+        # a key alone works once an address is set
+        code, r, _ = call(srv, "/api/hub/join", {"link": GOOD_KEY})
+        assert code == 200 and r["ok"], r
+        # a key alone with no address: asks for the whole link
+        b.auto.s.hub_url = ""
+        hub.set_key(None)
+        code, r, _ = call(srv, "/api/hub/join", {"link": GOOD_KEY})
+        assert code == 500 and "whole link" in r["error"] and GOOD_KEY not in r["error"] and hub.get_key() is None, r
+        # a Tailscale address that doesn't answer: the answer says why (Tailscale missing / off / on)
+        code, r, _ = call(srv, "/api/hub/join", {"link": f"http://100.127.255.254:9/login#key={GOOD_KEY}"})
+        assert code == 200 and not r["ok"] and r["tailscale"] in ("missing", "off", "on"), r
+        # a LAN address that doesn't answer: no Tailscale advice
+        code, r, _ = call(srv, "/api/hub/join", {"link": f"http://127.0.0.1:9/login#key={GOOD_KEY}"})
+        assert code == 200 and not r["ok"] and r["text"] == "Hub not reachable" and r["tailscale"] == "", r
+        assert GOOD_KEY not in Path(core.LOG_F).read_text(encoding="utf-8", errors="replace")
+    finally:
+        srv.stop()
+        fake.stop()
+        st.save = st_save
+        _fresh_hub()
+
+
+def test_tailscale_state():
+    """Tailscale advice is looked up on this PC only: installed? connected (a 100.64.0.0/10 address)?"""
+    import psutil
+    from types import SimpleNamespace as NS
+    pf = TMP / "pf"
+    old_env = {k: os.environ.get(k) for k in ("ProgramFiles", "ProgramFiles(x86)", "ProgramW6432")}
+    old_addrs = psutil.net_if_addrs
+    try:
+        for k in old_env:
+            os.environ[k] = str(pf)
+        assert pcs_server.tailscale_state("http://172.22.22.75:8420") == ""             # LAN: not Tailscale
+        assert pcs_server.tailscale_state("http://pcs-hub:8420") == ""
+        assert pcs_server.tailscale_state("http://100.74.165.47:8420") == "missing"
+        assert pcs_server.tailscale_state("https://hub.tail1234.ts.net") == "missing"
+        (pf / "Tailscale").mkdir(parents=True, exist_ok=True)
+        (pf / "Tailscale" / "tailscale.exe").write_bytes(b"")
+        psutil.net_if_addrs = lambda: {"Ethernet": [NS(address="192.168.1.20")], "lo": [NS(address="127.0.0.1")]}
+        assert pcs_server.tailscale_state("http://100.74.165.47:8420") == "off"
+        psutil.net_if_addrs = lambda: {"Ethernet": [NS(address="192.168.1.20")], "Tailscale": [NS(address="100.103.1.2")]}
+        assert pcs_server.tailscale_state("http://100.74.165.47:8420") == "on"
+    finally:
+        psutil.net_if_addrs = old_addrs
+        for k, v in old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def test_setup_card_page():
+    """Home's "Get set up" card: the four steps in order (auto-record second, so its setup runs while the player does
+    the rest), the join call, and the consent line: comms are never switched on from the card."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
+    order = [setup.index(t) for t in ("Your EEC name", "Record Apex by itself", "Join the team hub", "Google Drive")]
+    assert order == sorted(order), order
+    assert "/api/hub/join" in js and "comms_consent" not in setup and "not recorded until you turn them on" in setup
+    b = pcs_server.Backend(_Auto(str(TMP / "setuprecs")))
+    assert b.state()["recorder"]["settingUp"] is False
+    b.auto._setting_up = True
+    assert b.state()["recorder"]["settingUp"] is True
+
+
 def test_hub_uploads_refused_key_and_old_hub():
     """Scan + feed go in one request with the key; 401 stops hub uploads until the key changes; an old hub
     keeps working; the answer is summed up for the player."""

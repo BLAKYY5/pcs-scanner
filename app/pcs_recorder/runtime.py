@@ -176,7 +176,16 @@ class Hotkeys:
                 action = active.get(msg.wParam)
                 if action:
                     threading.Thread(target=self._fire, args=(action,), daemon=True).start()
-            time.sleep(0.05)
+            time.sleep(self.delay(bool(active)))
+
+    ACTIVE_S, IDLE_S = 0.05, 1.0
+
+    @classmethod
+    def delay(cls, active: bool) -> float:
+        """Key presses are looked for 20 times a second while hotkeys are registered (a recording runs); otherwise
+        the thread only checks once a second whether a recording started (it used to wake 20 times a second all
+        day for nothing)."""
+        return cls.ACTIVE_S if active else cls.IDLE_S
 
     def _fire(self, action: str) -> None:
         try:
@@ -313,15 +322,24 @@ class UI:
         self.icon = None
         self.log_line = log_line        # the app window's log, when it exists
         self.toast_win = None
-        root.after(200, self._pump)
+        self.busy_until = 0.0
+        root.after(self.PUMP_BUSY_MS, self._pump)
+
+    # Messages from other threads are picked up 5 times a second while something is happening (a message shown,
+    # a prompt), and once a second when nothing happened for a while: the app waits in the tray all day.
+    PUMP_BUSY_MS, PUMP_IDLE_MS, BUSY_S = 200, 1000, 10
+
+    def _pump_ms(self) -> int:
+        return self.PUMP_BUSY_MS if time.time() < self.busy_until else self.PUMP_IDLE_MS
 
     def _pump(self):
         while not self.calls.empty():
+            self.busy_until = time.time() + self.BUSY_S
             try:
                 self.calls.get()()
             except Exception:
                 log.exception("ui call failed")
-        self.root.after(200, self._pump)
+        self.root.after(self._pump_ms(), self._pump)
 
     def on_main(self, fn):
         self.calls.put(fn)

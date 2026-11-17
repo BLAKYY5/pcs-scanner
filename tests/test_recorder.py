@@ -772,6 +772,35 @@ def test_message_window_placement():
     root.destroy()
 
 
+def test_idle_threads_sleep_longer():
+    """Waiting in the tray all day: the hotkey thread looks for key presses 20 times a second only while hotkeys are
+    registered (a recording), else once a second; the message pump runs 5 times a second only for a while after
+    something was shown, else once a second."""
+    from pcs_recorder.runtime import Hotkeys, UI
+    assert Hotkeys.delay(True) == 0.05 and Hotkeys.delay(False) >= 1.0
+    try:
+        import tkinter as tk
+        root = tk.Tk()
+    except Exception:
+        print("  (no display: message pump test skipped)")
+        return
+    root.withdraw()
+    try:
+        ui = UI(root)
+        assert ui._pump_ms() == UI.PUMP_IDLE_MS                        # nothing happened yet
+        done = []
+        ui.on_main(lambda: done.append(1))
+        end = time.time() + 3
+        while not done and time.time() < end:
+            root.update()
+            time.sleep(0.02)
+        assert done and ui._pump_ms() == UI.PUMP_BUSY_MS              # something shown: quick for a while
+        ui.busy_until = time.time() - 1
+        assert ui._pump_ms() == UI.PUMP_IDLE_MS
+    finally:
+        root.destroy()
+
+
 def test_labels_and_youtube_queue():
     """Session labels (scrims / ranked / pubs / wildcard) decide what goes to YouTube; the queue page can upload
     now, skip, put back and set a title and privacy per block."""

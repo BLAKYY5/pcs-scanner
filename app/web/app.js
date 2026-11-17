@@ -144,7 +144,81 @@ function route() {
 window.addEventListener('hashchange', route);
 
 /* ------------------------------------------------------------------ home */
-function homeKey(s) { return JSON.stringify([s.recorder, s.google, s.player, s.messages.length, s.scans, s.update]); }
+function homeKey(s) { return JSON.stringify([s.recorder, s.google, s.player, s.messages.length, s.scans, s.update, s.hub]); }
+
+/* First-run setup: the steps a new player needs, in order, each one click (or one paste). Shown on Home until the
+   needed ones are done (name, auto-record, team hub or Google), or until hidden. Auto-record comes second: its
+   download and graphics card test run in the background while the player does the rest. */
+let setupMsg = '';
+function setupHidden() { try { return localStorage.getItem('pcs-setup-hidden') === '1'; } catch (e) { return false; } }
+function setupSteps() {
+  const r = S.recorder, h = S.hub || {}, last = h.last || {};
+  const hubOk = !!(h.url && h.key && !h.refused && last.ok !== false);
+  return {
+    name: !!S.player,
+    rec: !!(r && r.enabled && r.encoder && !r.settingUp), recBusy: !!(r && r.settingUp),
+    hub: hubOk, hubName: last.ok && last.name ? last.name : '',
+    google: S.google === 'ok',
+  };
+}
+function setupDone(st) { return st.name && st.rec && (st.hub || st.google); }
+function tailscaleHelp(ts) {
+  if (ts === 'missing') return 'The hub is reached through Tailscale. <a href="https://tailscale.com/download/windows" target="_blank" rel="noopener">Install Tailscale</a>, sign in with the invite from your coach, then press Join again.';
+  if (ts === 'off') return 'Tailscale is installed but not connected. Open Tailscale, sign in, then press Join again.';
+  if (ts === 'on') return 'Tailscale is on, but the hub doesn\'t answer. Ask your coach to share the hub with you in Tailscale.';
+  return '';
+}
+function setupHTML() {
+  const st = setupSteps(), r = S.recorder;
+  if (!r || setupHidden() || setupDone(st)) return '';
+  const n = [st.name, st.rec, st.hub, st.google].filter(Boolean).length;
+  const li = (done, busy, i, title, hint, act, msg) => `<li class="${done ? 'done' : busy ? 'busy' : ''}"><span class="num">${done ? '✓' : i}</span>
+    <div><b>${title}</b><small>${hint}</small></div><div class="act">${act}</div>${msg ? `<div class="msg">${msg}</div>` : ''}</li>`;
+  return `<section class="card setup" id="setup"><div class="row between"><h2>Get set up</h2>
+      <span class="row"><span class="faint" style="font-size:13px">${n} of 4 done</span><button class="btn small ghost" id="su-hide">Hide</button></span></div>
+    <ol class="steps">
+      ${li(st.name, false, 1, 'Your EEC name', 'Labels your scans for the coach.',
+        st.name ? `<span class="pill good">${esc(S.player)}</span>` : `<input id="su-name" type="text" placeholder="EEC name" maxlength="40" value="${esc(st.hubName)}"><button class="btn small brand" id="su-name-save">Save</button>`)}
+      ${li(st.rec, st.recBusy, 2, 'Record Apex by itself', st.recBusy ? 'Setting up the recorder: download and graphics card test, about a minute. Keep going below.' : 'Sets up a private recorder (your own OBS is never touched).',
+        st.rec ? '<span class="pill good">On</span>' : st.recBusy ? '<span class="pill info">Setting up…</span>' : '<button class="btn small brand" id="su-rec">Turn on</button>')}
+      ${li(st.hub, false, 3, 'Join the team hub', 'Paste the link your coach sent you.',
+        st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
+          : '<input id="su-link" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the link from your coach"><button class="btn small brand" id="su-join">Join</button>',
+        st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
+      ${li(st.google, false, 4, 'Google Drive', st.hub ? 'Optional: a backup copy of your results in your Drive.' : 'Your results go to your Drive, shared with the coach.',
+        st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>')}
+    </ol>
+    <p class="faint" style="margin:10px 0 0;font-size:12.5px">Voice comms and your mic are not recorded until you turn them on in <a href="#settings">Settings</a>, once your team agreed.</p></section>`;
+}
+function wireSetup() {
+  const hide = $('#su-hide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pcs-setup-hidden', '1'); } catch (e) {} renderHome(null, true); };
+  const ns = $('#su-name-save'); if (ns) ns.onclick = async () => {
+    const v = $('#su-name').value.trim(); if (!v) return $('#su-name').focus();
+    try { S = await api('/api/settings', {player: v}); } catch (e) { return toast(e.message, true); }
+    renderHome(null, true);
+  };
+  const nm = $('#su-name'); if (nm) nm.onkeydown = e => { if (e.key === 'Enter') ns.click(); };
+  const rec = $('#su-rec'); if (rec) rec.onclick = async () => {
+    rec.disabled = true;
+    try { S = await api('/api/autorecord', {enabled: true}); } catch (e) { toast(e.message, true); rec.disabled = false; return; }
+    renderTop(); renderHome(null, true);
+  };
+  const join = $('#su-join'), link = $('#su-link');
+  if (link) link.onkeydown = e => { if (e.key === 'Enter') join.click(); };
+  if (join) join.onclick = async () => {
+    const v = link.value.trim(); if (!v) return link.focus();
+    join.disabled = true; setupMsg = '<span class="hubmsg">Connecting…</span>';
+    const m = $('#setup .steps li:nth-child(3)'); if (m) { let d = m.querySelector('.msg'); if (!d) { d = document.createElement('div'); d.className = 'msg'; m.appendChild(d); } d.innerHTML = setupMsg; }
+    try {
+      const r = await api('/api/hub/join', {link: v});
+      S.hub = r.hub; link.value = '';
+      setupMsg = r.ok ? '' : `<span class="hubmsg bad">${esc(r.text)}</span>${tailscaleHelp(r.tailscale) ? '<br><span class="muted">' + tailscaleHelp(r.tailscale) + '</span>' : ''}`;
+      if (r.ok) toast(r.text);
+    } catch (e) { setupMsg = `<span class="hubmsg bad">${esc(e.message)}</span>`; }
+    join.disabled = false; link.blur(); renderTop(); renderHome(null, true);
+  };
+  const g = $('#su-google'); if (g) g.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
+}
 function renderHome(prev, force) {
   if (!S) { $('#main').innerHTML = '<div class="empty"><strong>Starting…</strong></div>'; return; }
   if (!force && prev && homeKey(prev) === homeKey(S)) return;
@@ -158,8 +232,9 @@ function renderHome(prev, force) {
   const used = r ? r.used : 0, max = r ? r.settings.max_gb * 1e9 : 1, pct = Math.min(100, used / max * 100);
   const g = {ok: ['Signed in', 'good'], expired: ['Sign-in expired', 'bad'], none: ['Not signed in', 'warn'], checking: ['Checking…', '']}[S.google] || ['?', ''];
   const recent = LIB.slice(0, 4);
-  $('#main').innerHTML = `
-    ${!S.player ? `<div class="notice row between"><span><b>Type your EEC name</b> so your scans are labelled for the coach.</span>
+  const setup = setupHTML();
+  $('#main').innerHTML = `${setup}
+    ${!S.player && !setup ? `<div class="notice row between"><span><b>Type your EEC name</b> so your scans are labelled for the coach.</span>
       <span class="row"><input id="pname" type="text" placeholder="EEC name" style="width:200px"><button class="btn brand small" id="psave">Save</button></span></div>` : ''}
     <section class="card hero ${state}">
       <div class="dot"><i></i></div>
@@ -199,6 +274,7 @@ function renderHome(prev, force) {
     try { S = await api('/api/settings', {start_with_windows: tb.checked}); toast(tb.checked ? 'PCS Scanner starts with Windows.' : 'PCS Scanner no longer starts with Windows.'); }
     catch (e) { toast(e.message, true); tb.checked = !tb.checked; }
   };
+  wireSetup();
   const si = $('#signin'); if (si) si.onclick = e => { e.preventDefault(); api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   const ps = $('#psave'); if (ps) ps.onclick = async () => {
     const v = $('#pname').value.trim(); if (!v) return;

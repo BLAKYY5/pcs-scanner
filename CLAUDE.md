@@ -110,6 +110,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   for whole sessions. Now: no endless CSS animation (a test checks `app.css`), the web view is set invisible and
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
+- **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, auto-record (second, so the OBS download and
+  encoder test run while the player does the rest), team hub (one paste of the coach's sign-in link →
+  `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one), Google (optional once
+  on the hub). Shown until name + auto-record + (hub or Google) are done, or hidden. Never switches comms on: consent
+  stays in Settings. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
+  off / on, looked up on this PC only (install folder, a 100.x address), never a request.
+- **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
+  (`Window._loaded`; pywebview's hidden start left it "seen", so the page polled every 2 s). Hotkey thread: 20 looks a
+  second only while hotkeys are registered, else 1 (`Hotkeys.delay`); Tk message pump 5 a second for 10 s after a
+  message, else 1 (`UI._pump_ms`).
 - **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
   through `pcs_core.redact`. `scrub_log` cleans old lines at start; the obs-websocket password is renewed once
   (`obs.renew_password`, only while our OBS is closed).
