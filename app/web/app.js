@@ -419,7 +419,7 @@ async function scan(ids) {
 }
 
 /* ------------------------------------------------------------------ review */
-const KIND = {select: ['S', 'Legend select'], drop: ['D', 'Drop map'], start: ['G', 'Game start'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
+const KIND = {select: ['S', 'Legend select'], drop: ['D', 'Drop map'], start: ['G', 'Game start'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], respawn: ['', 'Respawn'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call']};
 const TRACKN = {game: 'Game sound', discord: 'Voice app', mic: 'Microphone'};
 const VOICE_NAMES = {discord: 'Discord', teamspeak: 'TeamSpeak'};
 function voiceName(s) {          /* the voice app recorded on track 2, as the player calls it */
@@ -500,6 +500,8 @@ function buildEvents(d) {
     const gi = gameOf(l.t), e = feedEvent(l, games[gi]);
     if (e) ev.push(Object.assign(e, {t: l.t, k: 'feed'}, gi >= 0 ? {g: gi} : {}));
   });
+  // respawns (scanner PR #52): like kills, on the kill feed lane and in the events, in their own colour
+  games.forEach((g, gi) => (g.respawns || []).forEach(r => { if (r && typeof r.t === 'number') ev.push(respawnEvent(r, g, gi)); }));
   (d.marks || []).forEach(m => {
     if (m.kind === 'mark') ev.push({t: m.t, k: 'mark', title: 'Marked moment', sub: 'hotkey pressed in game'});
     else if (m.kind === 'mute') ev.push({t: m.t, k: 'mute', title: `${TRACKN[m.track] || m.track} ${m.muted ? 'muted' : 'back on'}`});
@@ -529,6 +531,15 @@ function feedEvent(l, g) {
   if (side === 'us') what = `${squadWho(l.killer, g) || 'We'} ${knock ? 'knocked' : 'killed'}`;
   else { const who = squadWho(l.victim, g) || 'We'; what = `${who} ${knock ? 'got knocked' : 'died'}`; }
   return {title: [what, l.weaponName, l.headshot ? 'headshot' : ''].filter(Boolean).join(' · '), lost: side === 'them'};
+}
+/* one respawn of the scan: the player himself ('You respawned') or a teammate, named by the card colour when it
+   matches a squad slot of the legend select screen ('Wraith respawned'), else 'Teammate respawned' */
+function respawnEvent(r, g, gi) {
+  let who = 'You';
+  if (r.who !== 'self') { who = squadWho({hue: r.hue}, g); if (!who || who === 'You') who = 'Teammate'; }
+  const away = typeof r.deadSince === 'number' && r.t > r.deadSince ? 'back after ' + fmtT(r.t - r.deadSince) : '';
+  return {t: r.t, k: 'respawn', g: gi, title: `${who} respawned`,
+          sub: [away, r.how === 'dropship' ? 'dropship' : ''].filter(Boolean).join(' · ')};
 }
 function gameSpans(d) {
   return (d.games || []).map(g => {
@@ -572,7 +583,7 @@ async function renderReview(id) {
             <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>We knocked / killed</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>We went down</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>We knocked / killed</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>We went down</span><span><i class="respawn"></i>Respawned</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
               <button class="btn small" id="rvTheatre" title="Video across the whole window (T)">Theatre</button><button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
@@ -657,7 +668,7 @@ function drawTimeline() {
     // small ticks under the games where the "squads left" count went down (tooltip: the count)
     (RV.d.games || []).map(g => (g.squadsLeft || []).map(([t, n]) =>
       `<i class="sqt" data-t="${t}" style="left:${pct(t)}" title="${fmtT(t)} · ${n} squad${n === 1 ? '' : 's'} left"></i>`).join('')).join('');
-  $('#laneE').innerHTML = '<span class="lane-label">Start · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
+  $('#laneE').innerHTML = '<span class="lane-label">Start · jump · landing · rings</span>' + RV.ev.filter(e => !['feed', 'respawn', 'mark', 'mute', 'fight', 'call'].includes(e.k)).map(e =>
     `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
@@ -668,8 +679,12 @@ function drawTimeline() {
       spans.map(([tr, a, b]) => `<div class="muted-span ${tr}" data-t="${a}" style="left:${pct(a)};width:${pct(b - a)}" title="${esc(TRACKN[tr] || tr)} muted ${fmtT(a)}–${fmtT(b)}"></div>`).join('') +
       marks.filter(m => m.kind === 'mark').map(m => `<button class="mk mark" data-t="${m.t}" style="left:${pct(m.t)}" title="${fmtT(m.t)} · marked moment">★</button>`).join('');
   }
-  $('#laneF').innerHTML = '<span class="lane-label">Kill feed · our squad</span>' + RV.ev.filter(e => e.k === 'feed').map(e =>
-    `<div class="tick${e.lost ? ' lost' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}"></div>`).join('');
+  const resp = RV.ev.some(e => e.k === 'respawn');
+  $('#laneF').innerHTML = `<span class="lane-label">Kill feed · our squad${resp ? ' · respawns' : ''}</span>` + RV.ev.filter(e => e.k === 'feed').map(e =>
+    `<div class="tick${e.lost ? ' lost' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}"></div>`).join('') +
+    // respawns on top of the kill ticks: a lime tick with a round head, clickable like them
+    RV.ev.filter(e => e.k === 'respawn').map(e =>
+    `<div class="tick respawn" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}"></div>`).join('');
   const ln = $('#laneN'), notes = (RV.notes && RV.notes.notes) || [];
   if (ln) {
     ln.hidden = !notes.length;
@@ -686,8 +701,8 @@ function drawSide() {
     let html = '', g = -1;
     RV.ev.forEach((e, i) => {
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
-      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
-      html += `<div class="ev" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
+      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff'}[e.k];
+      html += `<div class="ev${e.k === 'respawn' ? ' respawn' : ''}" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';
   } else if (RV.tab === 'feed') {

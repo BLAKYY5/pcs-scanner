@@ -2,7 +2,7 @@
 :root{
   --bg:#121211;--panel:#1b1a18;--panel-2:#23221f;--ink:#f1efea;--muted:#a39f96;--faint:#6d6a63;--line:#302e2a;
   --brand:#ba1c14;--accent:#e5392d;--accent-soft:#3a1512;
-  --good:#5fd08f;--good-soft:#173324;--warn:#e6ad45;--warn-soft:#3a2d12;--info:#6aa0ff;--info-soft:#16243d;
+  --good:#5fd08f;--good-soft:#173324;--warn:#e6ad45;--warn-soft:#3a2d12;--info:#6aa0ff;--info-soft:#16243d;--respawn:#b8e04a;
   --display:"Bahnschrift SemiCondensed","Bahnschrift","Barlow Condensed","Arial Narrow",sans-serif;
   --body:"Segoe UI Variable Text","Segoe UI",system-ui,sans-serif;
   --mono:"Cascadia Mono",Consolas,ui-monospace,monospace;
@@ -188,6 +188,12 @@ select.label:disabled{opacity:.5;cursor:default}
 .tick{position:absolute;top:4px;bottom:4px;width:3px;margin-left:-1px;border-radius:2px;background:var(--accent);opacity:.85;cursor:pointer}
 .tick:hover{opacity:1;box-shadow:0 0 0 2px rgba(229,57,45,.35)}
 .tick.lost{background:#8a877f}
+/* a respawn (scanner PR #52): lime like the game's respawn status line, a hollow round head over the kill ticks */
+.tick.respawn{background:var(--respawn);width:2px;margin-left:-1px;top:9px;bottom:3px;opacity:1;z-index:2}
+.tick.respawn::before{content:"";position:absolute;left:50%;top:-7px;width:10px;height:10px;margin-left:-5px;border-radius:50%;border:2px solid var(--respawn);background:var(--bg);box-sizing:border-box;pointer-events:none}
+.tick.respawn:hover{box-shadow:0 0 0 2px rgba(184,224,74,.35)}
+.tick.respawn:hover::before{background:var(--respawn)}
+.ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
 .mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */
 .wrap:has(> .review.theatre){max-width:none}
