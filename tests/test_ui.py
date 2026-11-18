@@ -1197,7 +1197,7 @@ def test_hub_settings_test_button_and_errors():
         assert code == 200 and GOOD_KEY.encode() not in raw
         state = json.loads(raw)
         assert b.auto.s.hub_url == fake.url and state["hub"] == {"url": fake.url, "key": "pcs_…AAAA", "refused": False,
-                                                                 "wait": 0, "last": {}}
+                                                                 "reach": {}, "wait": 0, "last": {}}
         assert hub.get_key() == GOOD_KEY
         # an empty key field = unchanged
         call(srv, "/api/settings", {"hub_key": "", "keep_days": 5})
@@ -1235,7 +1235,7 @@ def test_hub_settings_test_button_and_errors():
         hub.set_key(GOOD_KEY)                                                   # a new key clears the wait
         # hub not reachable
         b.auto.s.hub_url = "http://127.0.0.1:9"
-        assert call(srv, "/api/hub/test", {})[1]["text"] == "Hub not reachable"
+        assert call(srv, "/api/hub/test", {})[1]["text"].startswith("Hub down")
         # an old hub (no keys): works with or without a key
         old = FakeHub("old")
         try:
@@ -1289,7 +1289,7 @@ def test_hub_join_from_setup():
         assert code == 200 and not r["ok"] and r["tailscale"] in ("missing", "off", "on"), r
         # a LAN address that doesn't answer: no Tailscale advice
         code, r, _ = call(srv, "/api/hub/join", {"link": f"http://127.0.0.1:9/login#key={GOOD_KEY}"})
-        assert code == 200 and not r["ok"] and r["text"] == "Hub not reachable" and r["tailscale"] == "", r
+        assert code == 200 and not r["ok"] and r["text"].startswith("Hub down") and r["tailscale"] == "", r
         assert GOOD_KEY not in Path(core.LOG_F).read_text(encoding="utf-8", errors="replace")
     finally:
         srv.stop()
@@ -1469,7 +1469,7 @@ def test_hub_join_with_invite():
         # a hub that can't be reached: no key, Tailscale advice as for sign-in links
         hub.set_key(None)
         code, r, _ = call(srv, "/api/hub/join", {"link": f"http://127.0.0.1:9/join#code={INVITE}"})
-        assert not r["ok"] and r["text"] == "Hub not reachable" and r["tailscale"] == "" and hub.get_key() is None, r
+        assert not r["ok"] and r["text"].startswith("Hub down") and r["tailscale"] == "" and hub.get_key() is None, r
         for a in answers:
             assert INVITE.encode() not in a and GOOD_KEY.encode() not in a and b"/join#" not in a, a
         for h in logging.getLogger().handlers:
@@ -1981,7 +1981,7 @@ def test_hub_retry_with_real_hub_requests():
         it = next(x for x in call(srv, "/api/library")[1] if x["name"] == v.name)
         assert it["hub"] == {"hub": "pending", "why": "Hub not reachable"}, it
         rec._retry_hub()                                                               # still down
-        assert rec.hub_state("k")["why"] == "Hub not reachable" and rec.hub_next > time.time()
+        assert rec.hub_state("k")["why"] == "Hub down" and rec.hub_next > time.time()     # nothing listens there
         s.hub_url = fake.url                                                           # hub reachable (new address)
         rec._retry_hub()
         assert rec.hub_state("k") == {"hub": "pending", "why": "Key refused"}
@@ -3789,6 +3789,418 @@ def test_team_tracks_in_review_page():
     assert '"/teamtrack/"' in srv_py and 'it["teamAudio"]' in srv_py
     build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "pcs_recorder.teamtracks" in build
+
+
+# ------------------------------------------------------------------ public hub: uploads in parts, https, reachability
+class PartsHub:
+    """A hub on localhost speaking the 0.6 uploads contract (`mode` "new") or a 0.5 hub without it ("old": 404 to
+    /api/uploads, one-shot routes only). Stores what it got per file name. Knobs: `drop_puts` = PUTs whose
+    connection is cut before any answer; `force` = (status, body, headers) answered to everything; `part_max`."""
+
+    def __init__(self, mode="new", part_max=1024 * 1024):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import hashlib
+        import threading
+        from urllib.parse import parse_qs, urlsplit
+        self.mode, self.part_max, self.drop_puts, self.force = mode, part_max, 0, None
+        self.ups, self.got, self.oneshot, self.audio, self.seen = {}, {}, [], [], []
+        self.lock = threading.Lock()
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj, headers=None):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _view(self, u):
+                return {"id": u["id"], "kind": u["kind"], "name": u["name"], "size": u["size"],
+                        "received": len(u["data"]), "complete": len(u["data"]) == u["size"],
+                        "part_max": hub.part_max, "expires_at": time.time() + 86400}
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                u = urlsplit(self.path)
+                p, q = u.path, parse_qs(u.query)
+                with hub.lock:
+                    hub.seen.append((self.command, p, len(body)))
+                if hub.force:
+                    return self._send(*hub.force)
+                if self.headers.get("Authorization", "") != "Bearer " + GOOD_KEY and p != "/api/ping":
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if p == "/api/ping":
+                    return self._send(200, {"ok": True})
+                if p == "/api/me":
+                    return self._send(200, {"name": "Tester", "role": "coach"})
+                if p == "/api/scans" and self.command == "POST":
+                    names = re.findall(rb'filename="([^"]+)"', body)
+                    hub.oneshot.append(([x.decode() for x in names], len(body)))
+                    return self._send(200, {"scan_ids": [len(hub.oneshot)], "imports": [
+                        {"scan_id": len(hub.oneshot), "status": "imported", "games": 3}] if any(
+                            x.endswith(b".scan.json") for x in names) else []})
+                if p == "/api/session-audio" and self.command == "POST":
+                    hub.audio.append(("oneshot", len(body)))
+                    return self._send(200, {"id": "ta-1"})
+                if p.startswith("/api/uploads"):
+                    if hub.mode == "old":
+                        return self._send(404, {"detail": "Not Found"})
+                    parts = p.split("/")
+                    if p == "/api/uploads" and self.command == "POST":
+                        d = json.loads(body)
+                        if d["kind"] == "session-audio" and d.get("session") != "s-1":
+                            return self._send(404, {"detail": "No such session", "error": "not_found"})
+                        uid = "up-" + os.urandom(16).hex()
+                        hub.ups[uid] = {"id": uid, "kind": d["kind"], "name": d["name"], "size": d["size"],
+                                        "sha": d.get("sha256"), "data": b"", "fields": d}
+                        return self._send(200, self._view(hub.ups[uid]))
+                    up = hub.ups.get(parts[3]) if len(parts) > 3 else None
+                    if up is None:
+                        return self._send(404, {"detail": "No such upload", "error": "not_found"})
+                    if self.command == "GET":
+                        return self._send(200, self._view(up))
+                    if self.command == "PUT":
+                        off = int(q["offset"][0])
+                        if hub.drop_puts > 0:            # the part arrives, the answer is lost
+                            hub.drop_puts -= 1
+                            if off == len(up["data"]):
+                                up["data"] += body
+                            self.close_connection = True
+                            self.connection.shutdown(2)
+                            return
+                        if len(body) > hub.part_max:
+                            return self._send(413, {"detail": "part too big", "error": "too_large"})
+                        if off != len(up["data"]):
+                            return self._send(409, {"detail": "offset", "error": "offset_mismatch",
+                                                    "received": len(up["data"])})
+                        up["data"] += body
+                        return self._send(200, self._view(up))
+                    if self.command == "POST" and parts[-1] == "finish":
+                        if len(up["data"]) != up["size"]:
+                            return self._send(409, {"error": "incomplete", "received": len(up["data"]),
+                                                    "size": up["size"]})
+                        del hub.ups[up["id"]]
+                        if up["sha"] and hashlib.sha256(up["data"]).hexdigest() != up["sha"]:
+                            return self._send(400, {"detail": "checksum", "error": "bad_checksum"})
+                        hub.got[up["name"]] = up["data"]
+                        if up["kind"] == "session-audio":
+                            hub.audio.append(("parts", up["fields"]))
+                            return self._send(200, {"id": "ta-2"})
+                        return self._send(200, {"scan_ids": [99], "imports": []})
+                    if self.command == "DELETE":
+                        hub.ups.pop(up["id"], None)
+                        return self._send(200, {"deleted": True})
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = do_PUT = do_DELETE = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def puts(self):
+        return [s for s in self.seen if s[0] == "PUT"]
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _parts_files(folder: str, mic_mb: float):
+    d = TMP / folder
+    d.mkdir(exist_ok=True)
+    scan, feed, mic = d / "rec.scan.json", d / "rec.feed.json", d / "rec.mic.m4a"
+    scan.write_text('{"games": [{"map": "SP"}]}')
+    feed.write_text("{}")
+    mic.write_bytes(os.urandom(int(mic_mb * 1024 * 1024)))
+    return scan, feed, mic
+
+
+def _small_parts(hub):
+    """Test sizes: a file over 1 MB goes in parts of 1 MB; one request at most 1.5 MB."""
+    old = (hub.PART_FILE, hub.PART_MAX, hub.ONESHOT_MAX)
+    hub.PART_FILE, hub.PART_MAX, hub.ONESHOT_MAX = 1024 * 1024, 1024 * 1024, int(1.5 * 1024 * 1024)
+    return old
+
+
+def test_hub_uploads_in_parts():
+    """A mic track over the part size goes through /api/uploads in parts (the scan and feed stay one request); the
+    hub gets the same bytes; the answer is the two merged. A hub without /api/uploads gets everything one-shot."""
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    old = _small_parts(hub)
+    fake, older = PartsHub("new"), PartsHub("old")
+    try:
+        scan, feed, mic = _parts_files("parts1", 2.5)
+        answer = hub.upload(fake.url, [scan, feed, mic], "Tester")
+        assert fake.got["rec.mic.m4a"] == mic.read_bytes()
+        assert [names for names, _ in fake.oneshot] == [["rec.scan.json", "rec.feed.json"]], fake.oneshot
+        assert len(fake.puts()) == 3 and all(n <= 1024 * 1024 for _, _, n in fake.puts())     # 1 + 1 + 0.5 MB
+        assert sorted(answer["scan_ids"]) == [1, 99] and hub.summary(answer) == "Sent to hub: 3 games"
+        assert not hub._load_ups(), hub._load_ups()                     # nothing left to resume
+        # small files over one request's limit together: each goes in parts
+        a, b = TMP / "parts1" / "a.feed.json", TMP / "parts1" / "a.scan.json"
+        a.write_bytes(b"x" * 900_000); b.write_bytes(b"y" * 900_000)
+        hub.upload(fake.url, [a, b])
+        assert fake.got["a.feed.json"] == a.read_bytes() and fake.got["a.scan.json"] == b.read_bytes()
+        # hub before 0.6: one request, as before
+        hub.upload(older.url, [scan, feed, mic], "Tester")
+        assert len(older.oneshot) == 1 and sorted(older.oneshot[0][0]) == ["rec.feed.json", "rec.mic.m4a",
+                                                                         "rec.scan.json"]
+        assert not older.puts()
+        # hub 0.6, small files only: one request, /api/uploads never asked
+        n = len(fake.seen)
+        hub.upload(fake.url, [scan, feed])
+        assert [s[1] for s in fake.seen[n:]] == ["/api/scans"]
+    finally:
+        hub.PART_FILE, hub.PART_MAX, hub.ONESHOT_MAX = old
+        fake.stop(); older.stop()
+        _fresh_hub()
+
+
+def test_hub_uploads_resume():
+    """A lost answer: the app asks the hub where it is and goes on (no part sent twice). Apex starting between two
+    parts pauses the upload; the next try (even after a restart: the id is in hub-uploads.json, never the key)
+    carries on from the hub's count. An upload the hub forgot starts again."""
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    old = _small_parts(hub)
+    fake = PartsHub("new")
+    sleep = hub.time.sleep
+    hub.time.sleep = lambda s: None
+    try:
+        scan, feed, mic = _parts_files("parts2", 3.5)
+        fake.drop_puts = 1
+        hub.upload(fake.url, [scan, feed, mic])
+        assert fake.got["rec.mic.m4a"] == mic.read_bytes()
+        assert sum(n for _, _, n in fake.puts()) == mic.stat().st_size      # the lost part was not sent again
+        # Apex starts after the first part
+        mic.write_bytes(os.urandom(int(3.5 * 1024 * 1024)))
+        fake.seen.clear()
+        def apex():
+            return len(fake.puts()) >= 1              # Apex starts once the first part arrived
+        try:
+            hub.upload(fake.url, [scan, feed, mic], stop=apex)
+            raise AssertionError("not paused")
+        except hub.HubError as e:
+            assert e.kind == "paused" and hub.reason(e) == "Waits for Apex to close", e
+        assert len(fake.puts()) == 1 and not fake.oneshot[1:]           # scan and feed wait for the mic track
+        kept = hub.UPLOADS_FILE.read_text(encoding="utf-8")
+        assert "up-" in kept and GOOD_KEY not in kept
+        hub.S.loaded = False                                            # "restart": state read from disk again
+        hub.upload(fake.url, [scan, feed, mic])
+        assert fake.got["rec.mic.m4a"] == mic.read_bytes()
+        assert sum(n for _, _, n in fake.puts()) == mic.stat().st_size, fake.puts()   # nothing sent twice
+        assert [s for s in fake.seen if s[0] == "GET" and s[1].startswith("/api/uploads/")]
+        # the hub forgot it (expired): starts again from 0
+        mic.write_bytes(os.urandom(int(2.5 * 1024 * 1024)))
+        try:
+            hub.upload(fake.url, [scan, feed, mic], stop=lambda: len(fake.puts()) >= 1 and fake.ups != {} and
+                       any(len(u["data"]) for u in fake.ups.values()))
+        except hub.HubError as e:
+            assert e.kind == "paused"
+        fake.ups.clear()
+        hub.upload(fake.url, [scan, feed, mic])
+        assert fake.got["rec.mic.m4a"] == mic.read_bytes()
+    finally:
+        hub.time.sleep = sleep
+        hub.PART_FILE, hub.PART_MAX, hub.ONESHOT_MAX = old
+        fake.stop()
+        _fresh_hub()
+
+
+def test_review_talk_in_parts():
+    """Review talk audio over the part size goes in parts with its session, track and segments; a hub before 0.6
+    gets one request; a session the hub doesn't know is refused once and kept on this PC (not asked again)."""
+    from pcs_recorder import talk
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    old = _small_parts(hub)
+    fake, older = PartsHub("new"), PartsHub("old")
+    try:
+        talk.TALK_DIR.mkdir(parents=True, exist_ok=True)
+        f = talk.TALK_DIR / "s-1-mic.m4a"
+        f.write_bytes(os.urandom(int(2.2 * 1024 * 1024)))
+        seg = [{"at": 1.0, "t": 0.0, "rate": 1}]
+        talk.save_pending([{"session": "s-1", "track": "mic", "segments": seg, "file": str(f)}])
+        assert talk.send_pending(fake.url) == 1 and not f.exists()
+        kind, fields = fake.audio[-1]
+        assert kind == "parts" and fields["session"] == "s-1" and fields["track"] == "mic" and fields["segments"] == seg
+        f.write_bytes(os.urandom(int(2.2 * 1024 * 1024)))
+        talk.save_pending([{"session": "s-1", "track": "mic", "segments": seg, "file": str(f)}])
+        assert talk.send_pending(older.url) == 1 and older.audio[-1][0] == "oneshot"
+        f.write_bytes(os.urandom(int(2.2 * 1024 * 1024)))
+        talk.save_pending([{"session": "s-9", "track": "voice", "segments": seg, "file": str(f)}])
+        assert talk.send_pending(fake.url) == 0 and f.exists() and talk.load_pending()[0]["refused"] == 404
+        n = len(fake.seen)
+        talk.send_pending(fake.url)
+        assert len(fake.seen) == n                                       # refused: not asked again
+    finally:
+        hub.PART_FILE, hub.PART_MAX, hub.ONESHOT_MAX = old
+        talk.save_pending([])
+        fake.stop(); older.stop()
+        _fresh_hub()
+
+
+def test_hub_address_https_and_lan():
+    """Typed without http(s)://: a public name gets https (the public hub), the home network and Tailscale keep
+    http. A pasted page address keeps the hub's address only. Watch together uses wss:// for an https hub, with
+    the certificate always checked."""
+    from pcs_recorder import settings as st, watch
+    cases = {"hub.example.com": "https://hub.example.com", "hub.example.com/coach/": "https://hub.example.com",
+             "https://hub.example.com/join": "https://hub.example.com", "pcs-hub:8420": "http://pcs-hub:8420",
+             "pcs-hub": "http://pcs-hub", "192.168.1.20:8420": "http://192.168.1.20:8420",
+             "100.103.156.7:8420": "http://100.103.156.7:8420", "laptop.tail1234.ts.net": "http://laptop.tail1234.ts.net",
+             "hub.example.com:8443": "http://hub.example.com:8443", "http://hub.example.com": "http://hub.example.com",
+             " https://hub.example.com/ ": "https://hub.example.com", "": "", "localhost:8420": "http://localhost:8420"}
+    for typed, want in cases.items():
+        assert st.hub_address(typed) == want, (typed, st.hub_address(typed))
+        assert st.Settings(hub_url=typed).clamp().hub_url == want
+    assert watch.ws_address("https://hub.example.com") == "wss://hub.example.com"
+    assert watch.ws_address("http://192.168.1.20:8420") == "ws://192.168.1.20:8420"
+    import ssl
+    o = watch.sslopt()
+    assert o["cert_reqs"] == ssl.CERT_REQUIRED and o["check_hostname"] is True and os.path.exists(o["ca_certs"])
+    # nothing in the app turns certificate checks off
+    app_dir = Path(pcs_server.WEB).parent
+    for p in list(app_dir.glob("*.py")) + list((app_dir / "pcs_recorder").glob("*.py")):
+        src = p.read_text(encoding="utf-8")
+        assert "verify=False" not in src and "CERT_NONE" not in src and "_create_unverified" not in src, p
+    # an invite link on the public address: the https address is kept with the key
+    hub = _fresh_hub()
+    code = "pcsi_" + "C" * 43
+    assert hub.parse_invite(f"https://hub.example.com/join#code={code}") == (code, "https://hub.example.com")
+    assert hub.parse_key(f"https://hub.example.com/login#key={GOOD_KEY}") == (GOOD_KEY, "https://hub.example.com")
+
+
+def test_hub_unreachable_reasons():
+    """Why the hub can't be reached, in the player's words: no internet, address wrong (name not found, not a
+    valid certificate), hub down (nothing answers, Cloudflare says the hub is off), key refused. Settings shows
+    the latest; an http:// address of a hub that only answers https:// is switched by Test."""
+    import socket
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    up = hub.internet_up
+    fake = PartsHub("new")
+    try:
+        hub.internet_up = lambda: False
+        r = hub.test("http://pcs-hub-not-here.invalid:8420")
+        assert not r["ok"] and r["reach"] == "offline" and r["text"] == "No internet connection", r
+        hub.internet_up = lambda: True
+        r = hub.test("http://pcs-hub-not-here.invalid:8420")
+        assert r["reach"] == "address" and "address not found" in r["text"], r
+        assert hub.public_state("http://pcs-hub-not-here.invalid:8420")["reach"]["state"] == "address"
+        # nothing listens at that port: hub down (no internet check needed: the PC answered "nobody here")
+        hub.internet_up = lambda: (_ for _ in ()).throw(AssertionError("asked"))
+        r = hub.test("http://127.0.0.1:9")
+        assert r["reach"] == "down" and r["text"].startswith("Hub down"), r
+        hub.internet_up = lambda: True
+        # https to something that isn't the hub's certificate (here: plain http): address wrong, check never off
+        r = hub.test(fake.url.replace("http://", "https://"))
+        assert r["reach"] == "address" and "certificate" in r["text"], r
+        # Cloudflare in front, hub off: 530 / 502
+        fake.force = (530, {"detail": "tunnel"}, None)
+        r = hub.test(fake.url)
+        assert r["reach"] == "down" and hub.public_state(fake.url)["reach"]["state"] == "down", r
+        try:
+            hub.upload(fake.url, [_parts_files("parts3", 0.01)[0]])
+            raise AssertionError("no error")
+        except hub.HubError as e:
+            assert e.reach == "down" and hub.reason(e) == "Hub down"
+        # http:// of a hub only on https://: Test says which address to use
+        fake.force = (301, {}, {"Location": fake.url.replace("http://", "https://") + "/api/ping"})
+        r = hub.test(fake.url)
+        assert r["https"] == fake.url.replace("http://", "https://") and "Use https://" in r["text"], r
+        # key refused
+        fake.force = None
+        hub.set_key(BAD_KEY)
+        r = hub.test(fake.url)
+        assert not r["ok"] and hub.public_state(fake.url)["reach"]["state"] == "refused"
+        hub.set_key(GOOD_KEY)
+        r = hub.test(fake.url)
+        assert r["ok"] and hub.public_state(fake.url)["reach"]["state"] == "ok", r
+        # the name lookup that tells "no internet" from "address wrong" is a lookup only, cached
+        hub.internet_up = up
+        hub._probe.update(at=0.0)
+        looked = []
+        real = socket.getaddrinfo
+        socket.getaddrinfo = lambda *a, **k: (looked.append(a[0]), [])[1]
+        try:
+            assert hub.internet_up() and hub.internet_up() and looked == [hub.PROBE_HOST]
+        finally:
+            socket.getaddrinfo = real
+    finally:
+        hub.internet_up = up
+        fake.stop()
+        _fresh_hub()
+
+
+def test_hub_unreachable_told_once_in_activity():
+    """Results that can't reach the hub: one Activity line per reason (no corner message), the reason on the
+    recording, Settings' hub status; told again only when the reason changes; sent by themselves when it works."""
+    from pcs_recorder import retention, runtime, settings as st
+    from pcs_recorder.core import Recorder
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    up = hub.internet_up
+    hub.internet_up = lambda: True
+    fake = PartsHub("new")
+    folder = TMP / "reach"
+    folder.mkdir(exist_ok=True)
+    v = folder / "Apex Legends_reach.mp4"
+    v.write_bytes(DATA)
+    out = v.with_suffix(".scan")
+    out.mkdir(exist_ok=True)
+    (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}]}')
+    (out / (v.stem + ".feed.json")).write_text("{}")
+    s = st.Settings(folder=str(folder), player="Tester", hub_url="http://127.0.0.1:9")
+    toasts, lines = [], []
+
+    class UI:
+        def notify(self, t, m, sticky=False, action=None):
+            toasts.append((t, m))
+
+        def activity(self, text):
+            lines.append(text)
+    sender = runtime.Sender(s, lambda paths: True)
+    clock = {"t": 1000.0}
+    rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False, clock=lambda: clock["t"])
+    rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
+    try:
+        for _ in range(3):
+            clock["t"] += 61
+            rec._retry_uploads()
+        assert not toasts and len(lines) == 1 and "Hub down" in lines[0], (toasts, lines)
+        assert rec.idx["k"].status == "scanned" and rec.idx["k"].note == "not sent yet: Hub down"
+        s.hub_url = "http://pcs-hub-not-here.invalid:8420"
+        clock["t"] += 61
+        rec._retry_uploads()
+        assert len(lines) == 2 and "address not found" in lines[1] and rec.idx["k"].note.endswith("Hub address wrong")
+        s.hub_url = fake.url
+        clock["t"] += 61
+        rec._retry_uploads()
+        assert rec.idx["k"].status == "uploaded" and toasts and toasts[-1][0] == "Results sent", toasts
+        assert rec.hub_told == ""
+    finally:
+        hub.internet_up = up
+        fake.stop()
+        _fresh_hub()
+
+
+def test_hub_status_in_settings_page():
+    """Settings → Team hub shows the latest reason the hub can't be reached (newer than the last Test)."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    fn = js[js.index("function hubStatusHTML"):js.index("function wireHubKey")]
+    assert "h.reach" in fn and "re.state !== 'ok'" in fn
 
 
 if __name__ == "__main__":

@@ -815,7 +815,7 @@ def test_skip_and_offline_hub():
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
     assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
-    hub2.down = False; r2.next_upload = 0; r2.tick()
+    hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
 
@@ -852,6 +852,141 @@ def test_pause_never_stacks():
         if hub.uploads:
             break
     assert hub.uploads, "scan never finished after resume"
+
+
+def test_upload_part_never_delays_a_recording():
+    """A big file going to the hub in parts on a slow line: Apex starting starts the recording in the same tick
+    (the upload runs in its own thread), the part in flight stops at once, and once Apex closes the upload goes on
+    from what the hub already has, until the hub has the whole file."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlsplit, parse_qs
+    from pcs_recorder import hub as hubmod
+    from pcs_recorder.runtime import Sender
+    key = "pcs_" + "A" * 43
+    hubmod.set_key(key)
+    hubmod.reset()
+    old = (hubmod.PART_FILE, hubmod.PART_MAX)
+    hubmod.PART_FILE, hubmod.PART_MAX = 1024 * 1024, 16 * 1024 * 1024
+    PART = 16 * 1024 * 1024
+    st = {"data": b"", "size": 0, "reading": threading.Event(), "offsets": [], "cut": 0, "active": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            raw = __import__("json").dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _view(self):
+            return {"id": "up-" + "0" * 32, "received": len(st["data"]), "size": st["size"],
+                    "part_max": PART, "complete": len(st["data"]) == st["size"]}
+
+        def _go(self):
+            u = urlsplit(self.path)
+            n = int(self.headers.get("Content-Length") or 0)
+            if self.command == "PUT":                 # a slow line: 128 KB every 20 ms; a part kept when whole
+                off = int(parse_qs(u.query)["offset"][0])
+                st["offsets"].append(off)
+                if off != len(st["data"]):
+                    self.rfile.read(n)
+                    return self._send(409, dict(self._view(), error="offset_mismatch"))
+                got, left = b"", n
+                st["active"] += 1
+                while left:
+                    if len(st["data"]) >= PART and len(got) >= 1024 * 1024:
+                        st["reading"].set()               # the second part is on its way
+                    try:
+                        chunk = self.rfile.read(min(131072, left))
+                    except OSError:
+                        chunk = b""
+                    if not chunk:
+                        st["cut"] += 1
+                        st["active"] -= 1
+                        return                        # the app stopped the part: nothing of it kept
+                    got += chunk
+                    left -= len(chunk)
+                    time.sleep(0.02)
+                st["data"] += got
+                st["active"] -= 1
+                try:
+                    return self._send(200, self._view())
+                except OSError:
+                    return
+            body = self.rfile.read(n) if n else b""
+            if u.path == "/api/uploads" and self.command == "POST":
+                st["size"] = __import__("json").loads(body)["size"]
+                return self._send(200, self._view())
+            if u.path.startswith("/api/uploads/") and u.path.endswith("/finish"):
+                return self._send(200, {"scan_ids": [5], "imports": []})
+            if u.path.startswith("/api/uploads/"):
+                return self._send(200, self._view())
+            if u.path == "/api/scans":
+                return self._send(200, {"scan_ids": [4], "imports": [{"status": "imported", "games": 2}]})
+            return self._send(200, {"ok": True})
+
+        do_GET = do_POST = do_PUT = _go
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s = settings.load()
+        s.folder, s.enabled = str(TMP / f"vids-{time.time_ns()}"), True
+        s.hub_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        v = make_file(s.folder_path, "Apex Legends_slow.mp4", UNIT)
+        out = v.with_suffix(".scan")
+        out.mkdir()
+        (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}]}')
+        (out / (v.stem + ".feed.json")).write_text("{}")
+        mic = out / (v.stem + ".mic.m4a")
+        mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI()
+        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
+        r.tick()                                                 # the upload starts in its own thread
+        assert st["reading"].wait(10), "the part never started"
+        apex["on"] = True
+        t0 = time.monotonic()
+        r.tick()                                                 # Apex starts while the part is on its way
+        took = time.monotonic() - t0
+        assert obs.rec and r.current is not None, "recording not started"
+        assert took < 1.0, f"the tick waited {took:.1f} s for the upload"
+        r.wait_uploads(1.0 - took)                               # the part in flight needs ~2 s more
+        assert not r.upload_thread.is_alive(), "the part in flight did not stop"
+        for _ in range(200):                                     # the hub reads what was already on the line
+            if not st["active"]:
+                break
+            time.sleep(0.05)
+        had = len(st["data"])
+        assert 0 < had < mic.stat().st_size and r.idx["k"].status == "scanned", (had, st)
+        apex["on"] = False
+        r._final_file = lambda p, wait_s=0: p
+        r.ui.answer = False                                      # no scan of the new recording in this test
+        r.tick()                                                 # game over: recording stops
+        r.next_upload = 0
+        for _ in range(40):
+            r.tick()
+            r.wait_uploads(30)
+            if r.idx["k"].status == "uploaded":
+                break
+        assert r.idx["k"].status == "uploaded", r.idx["k"].note
+        assert st["data"] == mic.read_bytes(), "the hub's copy differs"
+        assert st["offsets"].count(0) == 1, st["offsets"]                    # part 1 never sent again
+    finally:
+        hubmod.PART_FILE, hubmod.PART_MAX = old
+        hubmod.set_key(None)
+        hubmod.reset()
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_mkv_duplicate_removed():
@@ -2027,6 +2162,102 @@ def test_ring_ends_and_speed():
     assert [e['t'] for e in games[1]['ringCircles']] == [2500.0], games[1]
 
 
+def _icons_frame(care=(), other=(), red=(), dark=(), seed=4):
+    """A synthetic full-map frame with map icons (numbers only, no game picture): care packages (a light diamond outline
+    around the helmet drawn from pcs_mapicons.CARE_SIGNS), other diamonds (another glyph), red octagons (strongholds that
+    can be taken) and dark octagons with a light outline (taken). Centres in screen px."""
+    import numpy as np
+    import pcs_mapicons as I
+    rng = np.random.default_rng(seed)
+    a = np.clip(rng.normal(70, 12, (1440, 2560, 3)), 0, 255).astype(np.float32)
+    a[0:1340, 604:1957] = np.clip(a[0:1340, 604:1957] * [1.6, 0.8, 0.7], 0, 255)          # red-tinted map outside the ring
+    for k in range(30):                                                                   # white labels
+        y, x = rng.integers(40, 1300), rng.integers(620, 1800)
+        a[y:y + 14, x:x + 90:6] = 235
+    Y, X = np.mgrid[-30:31, -30:31]
+    D = np.abs(X) + np.abs(Y)
+    O = np.maximum(np.maximum(np.abs(X), np.abs(Y)), (np.abs(X) + np.abs(Y)) / np.sqrt(2))
+    S = np.array([c == '#' for c in I.CARE_SIGNS]).reshape(I.G, I.G)
+    k = 0.62 * 22
+    gi = np.clip(((X + k) / (2 * k) * I.G).astype(int), 0, I.G - 1)
+    gj = np.clip(((Y + k) / (2 * k) * I.G).astype(int), 0, I.G - 1)
+    inside_sq = (np.abs(X) < k) & (np.abs(Y) < k)
+
+    def put(cx, cy, mask, col):
+        a[cy - 30:cy + 31, cx - 30:cx + 31][mask] = col
+    for cx, cy, glyph in [(x, y, S) for x, y in care] + [(x, y, ~S[:, ::-1].T) for x, y in other]:
+        put(cx, cy, D < 26, (40, 40, 40))
+        put(cx, cy, (D >= 22) & (D < 25.5), (230, 230, 230))
+        put(cx, cy, inside_sq & (D < 17) & glyph[gj, gi], (235, 235, 235))
+    door = np.array([c == '#' for c in I.DOOR_SIGNS]).reshape(I.G, I.G)       # True = the red fill
+    kd = 12.4
+    di = np.clip(((X + kd) / (2 * kd) * I.G).astype(int), 0, I.G - 1); dj = np.clip(((Y + kd) / (2 * kd) * I.G).astype(int), 0, I.G - 1)
+    in_door = (np.abs(X) < kd) & (np.abs(Y) < kd)
+    for cx, cy in red:
+        put(cx, cy, O < 21, (20, 20, 20)); put(cx, cy, O < 18, (233, 50, 85)); put(cx, cy, in_door & ~door[dj, di], (20, 20, 20))
+    for cx, cy in dark:
+        put(cx, cy, O < 22, (25, 25, 25)); put(cx, cy, (O >= 18) & (O < 19.5), (225, 225, 225))
+        put(cx, cy, in_door & ~door[dj, di], (190, 190, 190))
+    return a.astype(np.uint8)
+
+
+def test_map_icons_care_packages_and_strongholds():
+    """Care packages (diamond with the helmet) and strongholds (red or dark octagon) are found on the full map, in map %
+    through the map transform; another diamond icon (a survey beacon) and labels are not care packages."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_mapicons as I, pcs_ring
+    M = pcs_ring.M_DEFAULT
+    pct = lambda x, y: (x * M[0, 0] + M[2, 0], y * M[1, 1] + M[2, 1])
+    care, other, red, dark = [(1000, 500), (1500, 900)], [(1200, 300), (800, 1000)], [(1300, 600)], [(900, 700)]
+    r = I.read(_icons_frame(care, other, red, dark), M)
+    got = sorted((round(c['px']), round(c['py'])) for c in r['care'])
+    assert len(got) == 2 and all(abs(g[0] - w[0]) <= 2 and abs(g[1] - w[1]) <= 2 for g, w in zip(got, sorted(care))), r['care']
+    c0 = min(r['care'], key=lambda c: c['px']); e = pct(1000, 500)
+    assert abs(c0['x'] - e[0]) < 0.3 and abs(c0['y'] - e[1]) < 0.3 and c0['style'] == 'white' and c0['score'] >= I.CARE_MIN, c0
+    st = sorted((s['state'], round(s['px']), round(s['py'])) for s in r['strongholds'])
+    assert [s[0] for s in st] == ['available', 'unavailable'], st
+    assert abs(st[0][1] - 1300) <= 2 and abs(st[0][2] - 600) <= 2 and abs(st[1][1] - 900) <= 3 and abs(st[1][2] - 700) <= 3, st
+    # nothing there: nothing read
+    assert I.read(_icons_frame(), M) == {'care': [], 'strongholds': []}
+
+
+def test_map_icons_per_game():
+    """Per game: reads of one place make one care package (seen count, first seen), numbered by the ring phases
+    (1-2 after ring 1 starts closing, 3 in round 2, 4 in round 3), checked against the next ring's circle; reads before
+    ring 1 starts closing are dropped; strongholds keep their last state; a taken one seen once only (never red) is not kept."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_mapicons as I
+    ring = [{'round': 1, 'kind': 'wait', 'endsAt': 300.0}, {'round': 1, 'kind': 'closing', 'endsAt': 560.0},
+            {'round': 2, 'kind': 'wait', 'endsAt': 690.0}, {'round': 2, 'kind': 'closing', 'endsAt': 790.0},
+            {'round': 3, 'kind': 'wait', 'endsAt': 885.0}, {'round': 3, 'kind': 'closing', 'endsAt': 935.0}]
+    ends = [{'ring': 2, 'cx': 50.0, 'cy': 50.0, 'r': 15.0}, {'ring': 3, 'cx': 52.0, 'cy': 48.0, 'r': 8.0}]
+    cp = lambda x, y, st='white': {'care': [{'x': x, 'y': y, 'score': 0.8, 'style': st}], 'strongholds': []}
+    sh = lambda x, y, st: {'care': [], 'strongholds': [{'x': x, 'y': y, 'state': st}]}
+    reads = [(200.0, 'ED', cp(10.0, 10.0)),                            # before ring 1 starts closing: not a package
+             (320.0, 'ED', {'care': [{'x': 45.0, 'y': 52.0, 'score': 0.8, 'style': 'white'},
+                                     {'x': 70.0, 'y': 30.0, 'score': 0.8, 'style': 'white'}], 'strongholds': []}),
+             (330.0, 'ED', cp(45.3, 51.8)), (600.0, 'ED', cp(45.1, 52.1, 'opened')),
+             (650.0, 'ED', cp(53.0, 47.0)), (700.0, 'ED', cp(53.1, 47.2)),
+             (400.0, 'ED', sh(30.0, 60.0, 'available')), (800.0, 'ED', sh(30.5, 60.2, 'unavailable')),
+             (810.0, 'ED', sh(80.0, 80.0, 'unavailable')),             # taken, seen once, never red: dropped
+             (820.0, 'ED', sh(10.0, 90.0, 'unavailable')), (830.0, 'ED', sh(10.1, 90.0, 'unavailable')),   # seen twice: kept
+             (5000.0, 'ED', cp(20.0, 20.0))]                            # the next game's
+    games = [{'map': 'ED', 'tStart': 100.0, 'ring': ring, 'ringEnds': ends}, {'map': 'ED', 'tStart': 4000.0, 'ring': []}]
+    I.attach(games, reads)
+    P = games[0]['carePackages']
+    assert [(p['n'], p['seenCount'], p['t']) for p in P] == [(1, 3, 320.0), (2, 1, 320.0), (3, 2, 650.0)], P
+    a, b, c = P
+    assert a['openedAt'] == 600.0 and a['styles'] == ['white', 'opened'] and a['nSure'], a
+    assert a['nextRing'] == 2 and a['inNextRing'] and abs(a['mapX'] - 45.1) < 0.01, a
+    assert b['inNextRing'] is False and c['nextRing'] == 3 and c['inNextRing'] and c['nSure'], (b, c)
+    assert a['inRings'] == {'2': True, '3': True} and b['inRings'] == {'2': False, '3': False}, (a, b)
+    assert games[0]['carePackageRingCheck'] == {'checked': 3, 'inside': 2, 'checkedClosing': 1, 'insideClosing': 1}, games[0]['carePackageRingCheck']
+    S = games[0]['strongholds']
+    assert len(S) == 2 and S[0]['state'] == 'unavailable' and S[0]['availableLast'] == 400.0 and S[0]['seenCount'] == 2, S
+    assert S[1]['mapX'] == 10.05 and S[1]['state'] == 'unavailable' and 'availableLast' not in S[1], S
+    assert [p['t'] for p in games[1]['carePackages']] == [5000.0] and games[1]['carePackages'][0]['nSure'] is False
+
+
 def _card_frame(cards, dy=0):
     """Bottom-left squad cards (synthetic, rows as measured at 1440p): per card a white name at x 184, then a white
     health bar (alive) or a lime status line (dead). cards: list of (name row, 'alive' | 'dead', frame RGB, letters)."""
@@ -2364,11 +2595,11 @@ def test_hub_retried_when_only_drive_took_it():
     r._start = lambda: None                                                            # no recording in this test
     clock["t"] += 120; r.tick()
     assert len(hub.hub_calls) == 2                                                     # never while Apex runs
-    apex["on"] = False; r.tick()
+    apex["on"] = False; r.tick(); r.wait_uploads()
     assert len(hub.hub_calls) == 3 and r.hub_state("k0") == {"hub": "sent", "why": ""}
     assert r.idx["k0"].note == "Sent to hub: 2 games"
     assert any(t == "Sent to hub" and "2 games" in m for t, m, *_ in ui.notes), ui.notes
-    clock["t"] += 3600; r.tick(); r._retry_hub()
+    clock["t"] += 3600; r.tick(); r.wait_uploads(); r._retry_hub()
     assert len(hub.hub_calls) == 3                                                     # a 200 is never re-sent
     # after a restart the state is read back: still on the hub, nothing re-sent
     r2 = Recorder(r.s, FakeOBS(r.s.folder_path), hub, FakeUI(), fake_scan, is_apex_running=lambda: False)

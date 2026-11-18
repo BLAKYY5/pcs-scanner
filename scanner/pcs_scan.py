@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_minimap
+import pcs_ring, pcs_respawn, pcs_mapicons, pcs_minimap
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -35,6 +35,7 @@ def build_stamp(here=HERE):
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
 USE_HW = True
+ICONS_EVERY = 2.0  # s between two care package / stronghold reads of the full map (about 0.1 s a read)
 RING_EVERY = 3.0   # s between two ring-circle reads of the full map (one read takes about 2 s; a 10 s map open gives 4)
 LAYOUT = None   # None = detect per recording; False = 16:9; True = 4:3 stretched to 16:9 (forced with --layout)
 
@@ -421,7 +422,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0; mm_at = -99.0
+    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -455,6 +456,11 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     try: rr = pcs_ring.read(view_map(img) if st else img, mr.cache[1], hint)
                     except Exception: rr = None
                     if rr and (rr['cur'] or rr['next']): perf.setdefault('_rings', []).append((round(t, 2), d['map'], rr))
+                if t - icons_at >= ICONS_EVERY:    # care packages and strongholds (pcs_mapicons)
+                    icons_at = t
+                    try: ic = pcs_mapicons.read(view_map(img) if st else img, mr.cache[1], pcs_mapicons.SCALE_43 if st else 1.0)
+                    except Exception: ic = None
+                    if ic and (ic['care'] or ic['strongholds']): perf.setdefault('_icons', []).append((round(t, 2), d['map'], ic))
                 break
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
@@ -595,10 +601,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []; minimap = []
+    rings = []; cards = []; icons = []; minimap = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
-        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); minimap += pf.pop('_minimap', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); minimap += pf.pop('_minimap', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -611,7 +617,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
-    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
+    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0]); perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -737,6 +743,8 @@ def main():
         timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []))
         try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_mapicons.attach(games, perf.pop('_icons', []))         # care packages (after the ring ends), strongholds
+        except Exception as e: perf['mapIconsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_respawn.attach(games, perf.pop('_cards', []), samples)    # respawns, the player's own deaths
         except Exception as e: perf['respawnError'] = f'{type(e).__name__}: {e}'[:200]
         t_mm = time.time(); mm = perf.pop('_minimap', [])
