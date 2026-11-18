@@ -28,6 +28,13 @@ function fmtT(s) {
 }
 const fmtGB = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
 /* GB per hour of recording at a video rate: the one place Home and Settings take it from (audio share from the app) */
+// the recommended bitrate depends on the encoder the test picked: AV1 10 Mb/s, HEVC / H.264 12 (coach, 18 Nov 2026)
+function bitrateTip(r) {
+  const d = r && r.bitrateDefault ? r.bitrateDefault : 12, av1 = !!(r && r.encoder && /av1/i.test(r.encoder));
+  const enc = r && r.encoder ? (av1 ? 'AV1' : 'HEVC / H.264') : '';
+  return `${d} is recommended${enc ? ' for your encoder (' + enc + ')' : ''}: AV1 10, HEVC / H.264 12.` +
+    (r && r.bitrateAuto === false ? ' You picked your own value; drag to ' + d + ' to follow the recommendation again.' : '');
+}
 function gbHour(mbps) {
   const r = S && S.recorder, audio = r && r.audioKbps != null ? r.audioKbps : 160;
   return ((+mbps * 1000 + audio) * 3600 / 8 / 1e6).toFixed(1);
@@ -297,10 +304,11 @@ function gameChips(it) {
 /* ------------------------------------------------------------------ recordings */
 let filter = 'all', kindFilter = '', selected = new Set();
 const KINDS = {scrims: 'Scrims', ranked: 'Ranked', pubs: 'Pubs', wildcard: 'Wildcard'};
-function labelSelect(label, byHand, attrs) {
+function labelSelect(label, byHand, attrs, why, source) {
   const auto = !byHand;
-  return `<select class="label k-${label || 'none'} ${auto ? 'auto' : ''}" ${attrs} title="Session type. Auto = from the scan (scrim drop screen → Scrims, ranked badge → Ranked). Pubs and Wildcard are set by hand.">
-    <option value="" ${auto ? 'selected' : ''}>${label ? KINDS[label] + ' · auto' : 'Type?'}</option>
+  const tip = 'Session type. Auto = from the scan (scrim drop screen → Scrims, ranked badge → Ranked) or from EEC (drops agree). Pubs and Wildcard are set by hand.' + (why ? ' Now: ' + why + '.' : '');
+  return `<select class="label k-${label || 'none'} ${auto ? 'auto' : ''}" ${attrs} title="${esc(tip)}">
+    <option value="" ${auto ? 'selected' : ''}>${label ? KINDS[label] + (source === 'eec' ? ' · EEC' : ' · auto') : 'Type?'}</option>
     ${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${byHand && k === label ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
 }
 async function loadLibrary() {
@@ -350,7 +358,7 @@ function drawList() {
     el.innerHTML = `<div class="recrow head"><span></span><span>Recording</span><span class="c3">Recorded</span><span class="c4">Size</span><span class="c5">Status</span><span></span></div>` +
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
-        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${hubNote(it)}</div></div>
+        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label', it.label_why, it.label_source)}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${hubNote(it)}</div></div>
         <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
@@ -482,7 +490,9 @@ function buildEvents(d) {
     else if (!sel && g.tStart != null) ev.push({t: g.tStart, k: 'start', g: gi, title: 'Game start', sub: map !== '?' ? map : ''});
     const L = g.landing || {};
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: 'Jumped from the ship'});
-    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: ours ? 'at ' + poiName(ours.poi) : ''});
+    const ee = eecOf(d, gi), here = (ours && ours.poi) || L.poi;
+    const landSub = ee ? 'EEC drop ' + ee.eecDrop + (ee.check === 'different' ? ' · scan says ' + ee.ourDrop : '') : (here ? 'at ' + poiName(here) : '');
+    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: landSub});
     (g.ring || []).forEach(r => {
       const n = r.round ? ' ' + r.round : '', after = r.endsAfterGame ? ' · after your game ended' : '';
       if (r.kind === 'wait') {
@@ -705,16 +715,24 @@ function drawSide() {
   $$('[data-t]', body).forEach(el => el.onclick = () => seek(+el.dataset.t));
   onTime(true);
 }
+// EEC's drop for a game of this recording, when EEC's results were compared with it (EEC wins for display; ours stays)
+function eecOf(d, gi) { return ((d && d.eecGames) || []).find(x => x.i === gi && x.eecDrop) || null; }
+function eecDropHTML(g, i) {
+  const e = eecOf(RV && RV.d, i);
+  if (!e) return '';
+  const diff = e.check === 'different';
+  return `<div class="eecdrop" title="${esc(e.why || '')}">EEC drop: <b>${esc(e.eecDrop)}</b>${diff ? ` <span class="pill warn" title="Our scan says ${esc(e.ourDrop)} (${esc(e.ourFrom || 'scan')}). EEC is shown; check it in the review.">scan: ${esc(e.ourDrop)}</span>` : ''}</div>`;
+}
 function dropHTML(g, i) {
   const spots = (g.drop && g.drop.spots) || [];
-  if (!spots.length) return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))}</div><div class="muted" style="padding:6px">The drop map wasn't seen in this game.</div>`;
+  if (!spots.length) return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))}</div>${eecDropHTML(g, i)}<div class="muted" style="padding:6px">The drop map wasn't seen in this game.</div>`;
   const byPoi = {};
   spots.forEach(s => { const k = poiName(s.poi) || 'Open ground'; (byPoi[k] = byPoi[k] || {n: 0, ours: false}).n++; if (s.kind === 'ours') byPoi[k].ours = true; });
   const rows = Object.entries(byPoi).sort((a, b) => b[1].ours - a[1].ours || b[1].n - a[1].n);
   const grid = [20, 40, 60, 80].map(p => `<line x1="${p}" y1="0" x2="${p}" y2="100"/><line x1="0" y1="${p}" x2="100" y2="${p}"/>`).join('');
   const dots = spots.slice().sort((a, b) => (a.kind === 'ours') - (b.kind === 'ours')).map(s =>
     `<circle cx="${s.x}" cy="${s.y}" r="${s.kind === 'ours' ? 2.6 : 1.7}" fill="${s.kind === 'ours' ? '#e5392d' : '#d9d6cf'}" stroke="#121211" stroke-width=".6"><title>${esc(poiName(s.poi) || 'Open ground')}${s.kind === 'ours' ? ' (us)' : ''}</title></circle>`).join('');
-  return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))} · ${spots.length} squads</div>
+  return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))} · ${spots.length} squads</div>${eecDropHTML(g, i)}
     <svg class="dropmap" viewBox="0 0 100 100" role="img" aria-label="Drop spots"><g stroke="#24231f" stroke-width=".3">${grid}</g>${dots}</svg>
     <div class="faint" style="font-size:12px;margin-top:4px">Positions on the map as shown on the drop screen. Red = your squad.</div>
     <div class="pois">${rows.map(([k, v]) => `<div class="${v.ours ? 'ours' : ''}"><span>${esc(k)}${v.ours ? ' · you' : ''}</span><span class="mono">${v.n} squad${v.n > 1 ? 's' : ''}</span></div>`).join('')}</div>`;
@@ -1148,10 +1166,11 @@ function renderSettings() {
       <div class="form">
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
         <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub', 'Coach'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select>
-          <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s Google account.'}</small></label>
+          <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s hub key.'}</small></label>
         <div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
+        <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>
         <label class="field wide"><span>Team link${S.iconsFromHub ? ' (optional)' : ''}</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="${S.iconsFromHub ? 'Not needed: the hub gives the weapon icons' : 'Paste the Google Drive link from your coach'}">
           <small>${S.iconsFromHub ? 'Not needed: the team hub gives the weapon icons. A link here is only a backup. ' : 'Lets the scan name the weapons in the kill feed. Not needed once the team hub has the weapon icons. '}${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
       </div></section>
@@ -1173,7 +1192,7 @@ function renderSettings() {
           <small>Only when the scan is sure nothing was played (no game, not one kill-feed line). 0 = right after the scan. They also go first when space is needed.</small></label>
         <label class="field"><span>Maximum folder size (GB)</span><input id="f-max_gb" type="number" min="20" value="${s.max_gb}"><small>Oldest recordings go first. At least 20 GB.</small></label>
         <label class="field wide"><span>Quality: <b id="q-val" class="unit">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint" class="unit"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
-          <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
+          <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). ${bitrateTip(r)}</small></label>
         <label class="field"><span>Capture</span><select id="f-capture">${[['window', 'Apex window (recommended)'], ['game', 'Game capture'], ['display', 'Whole screen']].map(([v, l]) => `<option value="${v}" ${v === s.capture ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></section>
     <section class="card section"><h2>Sound and comms</h2>
@@ -1238,7 +1257,7 @@ function renderSettings() {
       </div></section>` : '<div class="notice">Auto-record isn\'t available in this build.</div>'}
     <section class="card section"><h2>About</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
-        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to Blakey if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
+        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to your coach if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + gbHour(q.value) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
@@ -1303,7 +1322,7 @@ function askUnsaved(target) {
   $('[data-a="save"]', box).focus();
 }
 function settingsBody() {
-  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim()};
+  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim(), coach_email: $('#f-coach_email').value.trim()};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
@@ -1471,7 +1490,7 @@ async function loadQueue() {
         <div class="row"><button class="btn small brand" data-a="save">Save</button><button class="btn small ghost" data-a="cancel">Cancel</button></div></div>` : '';
     return `<div class="ytrow" data-id="${esc(b.id)}">
       <div style="min-width:0"><div class="name">${fmtDate(b.start)} <span class="faint">→ ${new Date(b.end * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span></div>
-        <div class="sub">${done || busy ? (b.label ? `<span class="chip">${KINDS[b.label]}</span>` : '') : labelSelect(b.label, b.label_by_hand, 'data-label')}
+        <div class="sub">${done || busy ? (b.label ? `<span class="chip">${KINDS[b.label]}</span>` : '') : labelSelect(b.label, b.label_by_hand, 'data-label', b.label_why, b.label_source)}
           <span class="faint" style="font-size:12px">${b.games} game${b.games === 1 ? '' : 's'}${b.maps.length ? ' · ' + esc(b.maps.join(', ')) : ''} · ${b.recordings} recording${b.recordings === 1 ? '' : 's'}${res}${b.eec && !b.res ? ' · EEC link' : ''}</span></div>${custom}</div>
       <div class="ytstate"><span class="pill ${cls}">${word}</span><small class="muted">${esc(busy ? b.progress : b.why)}</small></div>
       <div class="acts">${acts}</div>${form}</div>`;

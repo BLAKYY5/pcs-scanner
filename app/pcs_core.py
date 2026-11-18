@@ -27,7 +27,7 @@ def load_json(p, default):
     try: return json.load(open(p, encoding='utf-8'))
     except Exception: return default
 
-BUILD = load_json(os.path.join(HERE, 'build.json'), {'version': 'dev', 'repo': '', 'coach': ''})
+BUILD = load_json(os.path.join(HERE, 'build.json'), {'version': 'dev', 'repo': ''})
 SETTINGS_F = os.path.join(DATA, 'settings.json')
 SETTINGS = load_json(SETTINGS_F, {'player': '', 'role': '', 'uploaded': [], 'library': []})
 SETTINGS.setdefault('library', [])   # videos added by hand (the Recordings page lists them)
@@ -149,7 +149,7 @@ def drive_service(interactive=True):
     if not creds or not creds.valid:
         if not interactive: return None
         client = os.path.join(HERE, 'client.json')
-        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask Blakey for a new build.')
+        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask your coach for a new build.')
         creds = InstalledAppFlow.from_client_secrets_file(client, SCOPES).run_local_server(port=0, open_browser=True,
             success_message='PCS Scanner is signed in. You can close this tab.')
         write_token(TOKEN_F, creds.to_json())
@@ -170,7 +170,7 @@ def youtube_service(interactive=True):
     if not creds or not creds.valid:
         if not interactive: return None
         client = os.path.join(HERE, 'client.json')
-        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask Blakey for a new build.')
+        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask your coach for a new build.')
         creds = InstalledAppFlow.from_client_secrets_file(client, YT_SCOPES).run_local_server(port=0, open_browser=True,
             success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
         write_token(YT_TOKEN_F, creds.to_json())
@@ -179,12 +179,31 @@ def youtube_service(interactive=True):
 def scans_folder(svc):
     q = f"name = '{FOLDER}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
     r = svc.files().list(q=q, fields='files(id,name)', spaces='drive').execute().get('files', [])
-    if r: return r[0]['id']
+    if r:
+        try: share_folder(svc, r[0]['id'])      # coach's address added or changed in Settings
+        except Exception: pass
+        return r[0]['id']
     fid = svc.files().create(body={'name': FOLDER, 'mimeType': 'application/vnd.google-apps.folder'}, fields='id').execute()['id']
-    if BUILD.get('coach'):
-        svc.permissions().create(fileId=fid, sendNotificationEmail=False,
-                                 body={'type': 'user', 'role': 'reader', 'emailAddress': BUILD['coach']}).execute()
+    share_folder(svc, fid)
     return fid
+
+def coach_email():
+    """The coach's Google address the player typed in Settings (never built into the app), '' if none."""
+    e = str(SETTINGS.get('coach_email') or '').strip()
+    return e if valid_email(e) else ''
+
+def valid_email(e):
+    return bool(_re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', str(e or '').strip()))
+
+def share_folder(svc, fid):
+    """Share the scans folder (read only) with the coach's address from Settings, once per address."""
+    who = coach_email()
+    if not who or SETTINGS.get('shared_with') == who.lower():
+        return
+    svc.permissions().create(fileId=fid, sendNotificationEmail=False,
+                             body={'type': 'user', 'role': 'reader', 'emailAddress': who}).execute()
+    SETTINGS['shared_with'] = who.lower()
+    save_settings()
 
 def upload(svc, folder, path, log):
     from googleapiclient.http import MediaFileUpload
