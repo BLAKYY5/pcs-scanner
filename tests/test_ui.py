@@ -1952,8 +1952,10 @@ def test_audio_track_never_blocks_the_review():
     def slow_cut(video, outs):                        # stands in for ffmpeg on a 3-hour recording
         cuts.append([n for n, _ in outs])
         gate.wait(10)
-        for _, out in outs:
-            out.write_bytes(b"m4a-track-" + out.name.encode())
+        for _, out in outs:                           # written whole, then renamed, like the real cut (.part)
+            tmp = out.with_name(out.name + ".tmp")
+            tmp.write_bytes(b"m4a-track-" + out.name.encode())
+            os.replace(tmp, out)
     c = tracks.Cutter(is_apex_running=lambda: apex[0], cut=slow_cut, count=lambda video: 3, wait_s=0.05)
     b = pcs_server.Backend()
     b.cutter = c

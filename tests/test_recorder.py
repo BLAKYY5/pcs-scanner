@@ -1644,6 +1644,11 @@ def test_ring_circles_on_full_map():
     assert r == {"cur": None, "next": None}, r
     # a zoomed map is skipped
     assert pcs_ring.read(_ring_frame(cur, nxt), np.array([[0.05, 0], [0, 0.05], [-20, 0]])) is None
+    # 4:3 stretched: the unzoomed map has the stretched layout's scale (scanner ST_MAP_M0); it is read, not skipped
+    M43 = np.array([[100 / 1264, 0], [0, 100 / 1264], [-648 * 100 / 1264, -40 * 100 / 1264]])
+    r = pcs_ring.read(_ring_frame(cur, nxt, decoy=(1000, 400, 130)), M43)
+    assert r and r["cur"] and r["next"], r
+    assert abs(r["cur"]["r"] - cur[2] * M43[0, 0]) < 0.5 and abs(r["next"]["r"] - nxt[2] * M43[0, 0]) < 0.5, r
 
 
 def test_ring_ends_and_speed():

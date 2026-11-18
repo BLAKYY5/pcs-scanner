@@ -22,6 +22,7 @@ from scipy import ndimage
 MAP_X0, MAP_X1, MAP_Y1 = 604, 1957, 1340
 DS = 2                    # work at half size (circles are hundreds of px: no precision lost, 4x less work)
 UNZOOMED = 0.0739         # map % per screen px of the unzoomed full map (MapReader M0); zoomed maps are skipped
+UNZOOMED_43 = 100 / 1264  # the same in a 4:3 stretched recording, after the scanner's view_map (its ST_MAP_M0)
 M_DEFAULT = np.array([[UNZOOMED, 0], [0, UNZOOMED], [-44.64, 0.27]])
 ANG = np.linspace(0, 2 * np.pi, 180, endpoint=False)
 
@@ -204,7 +205,9 @@ def read(a, M=None, hint=None):
     Returns {'cur': circle or None, 'next': circle or None} (circle: cx, cy, r in map %, support, visible, px), or None
     when the map is zoomed."""
     M = M_DEFAULT if M is None else np.asarray(M)
-    if abs(M[0, 0] - UNZOOMED) > 0.03 * UNZOOMED: return None      # zoomed map: circles cut off, skip
+    if all(abs(M[0, 0] - u) > 0.03 * u for u in (UNZOOMED, UNZOOMED_43)): return None   # zoomed map: circles cut off, skip
+    # (4:3 stretched: the map is about 7 % smaller on screen, so its unzoomed scale is UNZOOMED_43; it used to be taken for
+    # a zoomed map and no ring was ever read on 4:3 recordings)
     c = half(a); T = tint(c)
     hp = lambda k: [((h[k]['px'][0] - MAP_X0) / DS, h[k]['px'][1] / DS, h[k]['px'][2] / DS)
                     for h in [hint or {}] if h.get(k)]
