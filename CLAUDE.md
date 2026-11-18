@@ -427,7 +427,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   100, as `landing.mapX`; q = score x 100), or `noPicture: true` with no points. Pictures are EA's: `PCS_MINIMAPS`
   (an RSX export folder) for developers, else the app's data folder `minimaps/` (downloaded from the hub by
   `pcs_recorder.minimaps`; `Backend.minimaps_tick` fetches all maps every 6 h while Apex is closed), only when the
-  hub's transform is the one in `MAPS`. Checked against the coach's debug-overlay POS (MINIMAP_RESULTS below).
+  hub's transform is the one in `MAPS`. Checked against the coach's debug-overlay POS on region caches (box `minimap`;
+  split fixed before tuning: dev 17 + 4 Nov, held-out 7 + 15 Nov). Held-out, 15 games: of the moments every 3 s from
+  the jump to the game's end in own view, 83 % have a minimap position within 2 s (dev 92 / 77 %); error median 0.06 %
+  of the map, 99th percentile 0.3-1.4 %, 98.7 % within 1 %, one point of 979 wrong (107 %: dropship off the map's edge).
   The POS reader itself misreads now and then (a minus sign lost, 9 read as 8, a dropped digit): the minimap was
   right in every case looked at; those POS rows were the "errors".
   Cost: ~1 ms per read at scan time (0.3 ms per keyframe), matching ~3-8 ms per read after the chunks are done.
