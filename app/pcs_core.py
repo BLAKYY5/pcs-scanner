@@ -41,9 +41,11 @@ LOG_F = os.path.join(DATA, 'app.log')
 import re as _re
 _SECRET = _re.compile(r"""(password\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;)'"]+)""", _re.IGNORECASE)
 
+_HUBSECRET = _re.compile(r"pcsi?_[A-Za-z0-9_-]{43}")
+
 def redact(text):
-    """password=... / password: ... values replaced by ***."""
-    return _SECRET.sub(r'\1***', text)
+    """password=... / password: ... values replaced by ***; a hub key or invite code (pcs_… / pcsi_…) too."""
+    return _HUBSECRET.sub('pcs_***', _SECRET.sub(r'\1***', text))
 
 class RedactFilter(logging.Filter):
     def filter(self, record):

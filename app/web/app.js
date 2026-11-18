@@ -189,7 +189,7 @@ function setupHTML() {
         st.name ? `<span class="pill good">${esc(S.player)}</span>` : `<input id="su-name" type="text" placeholder="EEC name" maxlength="40" value="${esc(st.hubName)}"><button class="btn small brand" id="su-name-save">Save</button>`)}
       ${li(st.rec, st.recBusy, 2, 'Record Apex by itself', st.recBusy ? 'Setting up the recorder: download and graphics card test, about a minute. Keep going below.' : 'Sets up a private recorder (your own OBS is never touched).',
         st.rec ? '<span class="pill good">On</span>' : st.recBusy ? '<span class="pill info">Setting up…</span>' : '<button class="btn small brand" id="su-rec">Turn on</button>')}
-      ${li(st.hub, false, 3, 'Join the team hub', 'Paste the link your coach sent you.',
+      ${li(st.hub, false, 3, 'Join the team hub', st.hub && S.iconsFromHub ? 'Weapon icons come from the hub: no team link needed.' : 'Paste the link your coach sent you.',
         st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
           : '<input id="su-link" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the link from your coach"><button class="btn small brand" id="su-join">Join</button>',
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
@@ -1186,14 +1186,14 @@ function renderSettings() {
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
         <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>
-        <label class="field wide"><span>Team link</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="Paste the Google Drive link from your coach">
-          <small>Lets the scan name the weapons in the kill feed. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
+        <label class="field wide"><span>Team link${S.iconsFromHub ? ' (optional)' : ''}</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="${S.iconsFromHub ? 'Not needed: the hub gives the weapon icons' : 'Paste the Google Drive link from your coach'}">
+          <small>${S.iconsFromHub ? 'Not needed: the team hub gives the weapon icons. A link here is only a backup. ' : 'Lets the scan name the weapons in the kill feed. Not needed once the team hub has the weapon icons. '}${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
       </div></section>
     ${r ? `
     <section class="card section"><h2>Team hub</h2>
       <div class="form">
         <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Empty = results go to Google Drive only.</small></label>
-        <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in link your coach sent. Don't share it.</small></div>
+        <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in or invite link your coach sent. Don't share it.</small></div>
       </div>
       ${switchHTML('f-crash_reports', s.crash_reports !== false, 'Send crash reports to the team hub', 'When recording, OBS or a scan fails: the error, app and Windows version, graphics card and the end of the app log, for your coach only. Keys, passwords, e-mails and your Windows name are removed. Only when you are on the hub.')}
       ${S.hubBackup ? hubBackupHTML(S.hubBackup) : ''}
@@ -1407,7 +1407,7 @@ function wireHubKey() {
   const box = $('#hubKey'); if (!box || !S) return;
   const h = S.hub || {}, edit = hubKeyEdit || !h.key;
   box.innerHTML = `<div class="row">${edit
-      ? `<input id="f-hub_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key or sign-in link">${h.key ? '<button class="btn small ghost" id="hk-cancel">Cancel</button>' : ''}`
+      ? `<input id="f-hub_key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your key, sign-in link or invite link">${h.key ? '<button class="btn small ghost" id="hk-cancel">Cancel</button>' : ''}`
       : `<span class="keybox">${esc(h.key)}</span><button class="btn small ghost" id="hk-change">Change</button><button class="btn small ghost danger" id="hk-remove">Remove</button>`}
     <button class="btn small" id="hk-test">Test</button></div>
     <div id="hk-result" class="hubres">${hubStatusHTML(h)}</div>`;

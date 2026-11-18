@@ -29,7 +29,7 @@ def selftest(out):
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
-        import pcs_recorder.minimaps, pcs_recorder.squadpaths   # noqa: F401
+        import pcs_recorder.minimaps, pcs_recorder.squadpaths, pcs_recorder.weaponicons   # noqa: F401
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
@@ -454,7 +454,7 @@ def main():
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)
-            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the team link, same rhythm
+            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the hub or team link, same rhythm
             except Exception: logging.exception('team link')
             try: b.hub_backup_tick()                       # coach's hub key: the hub's nightly zip, once a day
             except Exception: logging.exception('hub backup copy')
