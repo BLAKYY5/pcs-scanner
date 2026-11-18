@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn
+import pcs_ring, pcs_respawn, pcs_minimap
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -421,7 +421,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0
+    legends = HUD.Legends(); ring_at = -99.0; mm_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -478,6 +478,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 except Exception: own = {}
                 if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
                     perf.setdefault('_own', []).append((round(t, 2), own))
+                if t - mm_at >= pcs_minimap.EVERY and not (hud and hud[2] and hud[2]['spec']):   # HUD minimap: position
+                    try: mm = pcs_minimap.grab(img)
+                    except Exception: mm = None
+                    if mm is not None: mm_at = t; perf.setdefault('_minimap', []).append((round(t, 2), mm))
         if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
@@ -591,10 +595,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []
+    rings = []; cards = []; minimap = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
-        rings += pf.pop('_rings', []); cards += pf.pop('_cards', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); minimap += pf.pop('_minimap', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -607,7 +611,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
-    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0])
+    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -735,6 +739,10 @@ def main():
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_respawn.attach(games, perf.pop('_cards', []), samples)    # respawns, the player's own deaths
         except Exception as e: perf['respawnError'] = f'{type(e).__name__}: {e}'[:200]
+        t_mm = time.time(); mm = perf.pop('_minimap', [])
+        try: pcs_minimap.attach(games, mm)                                 # position from the HUD minimap (no debug overlay needed)
+        except Exception as e: perf['minimapError'] = f'{type(e).__name__}: {e}'[:200]
+        perf['minimap'] = time.time() - t_mm; perf['minimapReads'] = len(mm)
         perf['refine'] = time.time() - t_tl
         audio = None
         if kind == 'video':     # sound cues from the game track back up what was read on screen

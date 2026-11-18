@@ -161,3 +161,14 @@ def picture(code: str) -> tuple[Path, str] | None:
     with open(f, "rb") as fh:
         kind = _kind(fh.read(8))
     return (f, kind) if kind else None
+
+
+SCAN_MAPS = ("WE", "SP", "ED", "BM", "KC", "OL")
+
+
+def prefetch(url: str) -> int:
+    """Every map picture the hub has, downloaded once (the scanner places the player on them: pcs_minimap, for
+    players without the debug overlay). Returns how many pictures are here. Nothing without a hub and key."""
+    if not url or not hub.get_key():
+        return 0
+    return sum(1 for code in SCAN_MAPS if get(url, code).get("available"))

@@ -42,6 +42,7 @@ BOXES = {
                                           #   Caches built before 16 Nov 2026 start at x = 1990: ranked kills there
                                           #   lose their skull icon, so OwnStats leaves them unread on those caches.
     'feed':     (260, 640, 1820, 2470),   # Feed: a[260:640, 1820:2470]
+    'minimap':  (56, 396, 56, 396),       # pcs_minimap: the HUD minimap a[66:386, 66:388] with a margin
 }
 CODEC = 'webp-lossless'
 

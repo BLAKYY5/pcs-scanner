@@ -1265,6 +1265,90 @@ def test_voice_app_choice():
     settings.save(settings.Settings())
 
 
+def _mm_picture(size=2048, seed=3):
+    """A made-up map picture (the game's are EA's files: never in the repo): smooth blobs and a few roads."""
+    import numpy as np
+    from scipy import ndimage
+    rng = np.random.default_rng(seed)
+    g = ndimage.gaussian_filter(rng.normal(0, 1, (size, size)), 9)
+    g = (g - g.min()) / (g.max() - g.min()) * 170 + 40
+    for _ in range(40):                                        # roads: thin bright lines
+        if rng.random() < 0.5:
+            g[rng.integers(0, size), :] = 230
+        else:
+            g[:, rng.integers(0, size)] = 230
+    return np.repeat(g.astype(np.uint8)[..., None], 3, 2)
+
+
+def _mm_frame(pic, M, code, x, y, zoom, icon=True, brackets=True):
+    """A 1440p frame whose HUD minimap shows the picture around world (x, y) at a zoom, like the game draws it."""
+    import numpy as np
+    from scipy import ndimage
+    _, px, py, sc = M.MAPS[code]
+    S = pic.shape[0]; k = zoom / sc * S / 4096
+    fx, fy = (x - px) / sc / 4096, (py - y) / sc / 4096
+    rr, cc = np.mgrid[66:386, 66:388].astype(np.float32)
+    ys = fy * S + (rr + 0.5 - (M.CY + 0.5)) * k - 0.5; xs = fx * S + (cc + 0.5 - (M.CX + 0.5)) * k - 0.5
+    img = np.zeros((1440, 2560, 3), np.uint8); img[:] = (60, 70, 80)
+    v = ndimage.map_coordinates(pic[..., 0].astype(np.float32), [ys, xs], order=1, cval=35)
+    img[66:386, 66:388] = np.clip(v, 0, 255).astype(np.uint8)[..., None]
+    if icon:                                                   # the player's arrow and a ping: coloured, masked
+        img[216:236, 216:236] = (40, 220, 230); img[120:150, 300:330] = (230, 200, 30)
+    if brackets:
+        img[64:66, 300:392] = 255; img[387:389, 300:392] = 255
+    return img
+
+
+def test_minimap_track():
+    """The HUD minimap gives the player's position on the map's picture (players without the debug overlay): every
+    read at the right place within a fraction of a percent, the zoom found when it changes, frames without the
+    minimap (no corner brackets: menus, map open, spectating) skipped, a lone read with nothing to confirm it dropped,
+    and no picture = an empty track that says so."""
+    import json
+    import numpy as np
+    from PIL import Image
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_minimap as M
+    pic = _mm_picture()
+    d = TMP / "minimaps-rsx"; d.mkdir(exist_ok=True)
+    Image.fromarray(pic).save(d / "mp_rr_district_mu1.png")    # the 2048 px copy, as on the hub
+    os.environ["PCS_MINIMAPS"] = str(d); M._REFS.clear()
+    assert set(M.pictures()) == {"ED"}
+    assert M.grab(_mm_frame(pic, M, "ED", 0, 0, 78.0, brackets=False)) is None
+    path = [(100.0 + 3 * i, -8000 + 600 * i, 5000 - 250 * i, 78.0 if i < 8 else 62.5) for i in range(14)]
+    reads = [(t, M.grab(_mm_frame(pic, M, "ED", x, y, z))) for t, x, y, z in path]
+    assert all(r is not None for _, r in reads)
+    reads += [(140.5, reads[0][1]), (170.0, reads[0][1])]      # a read far from where the player was 1.5 s before; a lone read
+    games = [{"tStart": 90.0, "tEndGame": 200.0, "map": "ED"}, {"tStart": 300.0, "map": "SP"}]
+    M.attach(games, reads + [(320.0, reads[0][1])])
+    tr = games[0]["minimapTrack"]
+    assert tr["v"] == 1 and tr["every"] == M.EVERY and tr["reads"] == 16, tr
+    ref = M.load_ref("ED")
+    pts = {p[0]: p for p in tr["pts"]}
+    assert 140.5 not in pts and 170.0 not in pts, tr
+    for t, x, y, z in path:
+        fx, fy = ref.frac(x, y)
+        p = pts[round(t, 1)]
+        assert abs(p[1] - 100 * fx) < 0.15 and abs(p[2] - 100 * fy) < 0.15, (t, p, 100 * fx, 100 * fy)
+        assert 0 < p[3] <= 100
+    assert games[1]["minimapTrack"] == {"v": 1, "every": M.EVERY, "pts": [], "reads": 1, "noPicture": True}
+    json.dumps(games)                                          # plain JSON for the scan file
+    # the app's data folder: pictures downloaded from the hub, used only when the hub's transform is this one
+    os.environ.pop("PCS_MINIMAPS"); M._REFS.clear()
+    data = TMP / "mm-data"; (data / "minimaps").mkdir(parents=True, exist_ok=True)
+    Image.fromarray(pic).save(data / "minimaps" / ("BM-" + "a" * 32 + ".img"), "JPEG")
+    Image.fromarray(pic).save(data / "minimaps" / ("KC-" + "b" * 32 + ".img"), "JPEG")
+    (data / "minimaps" / "index.json").write_text(json.dumps({"maps": {
+        "BM": {"asset": "a" * 32, "pos_x": -45000, "pos_y": 43500, "scale": 21, "size": 4096},
+        "KC": {"asset": "b" * 32, "pos_x": -1, "pos_y": 43886, "scale": 20, "size": 4096}}}))
+    old = os.environ.get("PCS_DATA_DIR"); os.environ["PCS_DATA_DIR"] = str(data)
+    try:
+        assert set(M.pictures()) == {"BM"}
+    finally:
+        if old is None: os.environ.pop("PCS_DATA_DIR")
+        else: os.environ["PCS_DATA_DIR"] = old
+
+
 def test_sound_ring_moving():
     """The ring alarm (steady 374 + 533 Hz tones, pulsing) is found in noisy game sound, and matched to the rings
     read on screen; other tones and plain noise don't trigger it."""

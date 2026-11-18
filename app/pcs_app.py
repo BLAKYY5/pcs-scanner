@@ -23,7 +23,7 @@ from pcs_core import APP, OUT, BUILD, SETTINGS
 def selftest(out):
     """Used by the build: proves the libraries, the scanner and the interface files are inside the exe."""
     try:
-        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, tkinter   # noqa: F401
+        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, pcs_minimap, scipy.fft, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
@@ -463,6 +463,8 @@ def main():
             except Exception: logging.exception('hub backup copy')
             try: b.team_tracks_tick()                      # teammates' mic tracks, when the player agreed
             except Exception: logging.exception('team tracks')
+            try: b.minimaps_tick()                         # map pictures for the minimap position track
+            except Exception: logging.exception('minimap pictures')
             # tell the player once per new version with a corner message (not during a game: it waits)
             if b.update and told != b.update[0] and b.auto and not b.update_blocked():
                 told = b.update[0]

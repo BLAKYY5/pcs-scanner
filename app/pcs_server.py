@@ -1251,6 +1251,17 @@ class Backend:
         if self.auto and self.auto.s.hub_url:
             self.teamtracks.tick()
 
+    def minimaps_tick(self) -> int:
+        """The hub's map pictures in the data folder, so scans can read the player's position from the HUD minimap
+        (pcs_minimap). Not while Apex runs; a picture already here is not downloaded again."""
+        if not (self.auto and self.auto.s.hub_url):
+            return 0
+        from pcs_recorder.core import apex_running
+        if apex_running():
+            return 0
+        from pcs_recorder import minimaps
+        return minimaps.prefetch(self.auto.s.hub_url)
+
     def set_autorecord(self, on: bool) -> None:
         a = self.auto
         if not a:
