@@ -669,7 +669,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     def save():
         s.enabled, s.hub_url, s.folder = en.get(), hub.get(), folder.get()
         s.keep_days, s.max_gb = int(kd.get() or 7), int(mg.get() or 100)
-        s.bitrate_mbps = int(br.get() or 12)
+        s.set_bitrate(int(br.get() or s.bitrate_mbps))
         s.game_audio, s.auto_scan, s.capture = ga.get(), au.get(), cap.get()
         st.save(s)
         w.destroy()

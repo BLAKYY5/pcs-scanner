@@ -28,6 +28,13 @@ function fmtT(s) {
 }
 const fmtGB = b => b >= 1e9 ? (b / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(b / 1e6)) + ' MB';
 /* GB per hour of recording at a video rate: the one place Home and Settings take it from (audio share from the app) */
+// the recommended bitrate depends on the encoder the test picked: AV1 10 Mb/s, HEVC / H.264 12 (coach, 18 Nov 2026)
+function bitrateTip(r) {
+  const d = r && r.bitrateDefault ? r.bitrateDefault : 12, av1 = !!(r && r.encoder && /av1/i.test(r.encoder));
+  const enc = r && r.encoder ? (av1 ? 'AV1' : 'HEVC / H.264') : '';
+  return `${d} is recommended${enc ? ' for your encoder (' + enc + ')' : ''}: AV1 10, HEVC / H.264 12.` +
+    (r && r.bitrateAuto === false ? ' You picked your own value; drag to ' + d + ' to follow the recommendation again.' : '');
+}
 function gbHour(mbps) {
   const r = S && S.recorder, audio = r && r.audioKbps != null ? r.audioKbps : 160;
   return ((+mbps * 1000 + audio) * 3600 / 8 / 1e6).toFixed(1);
@@ -1173,7 +1180,7 @@ function renderSettings() {
           <small>Only when the scan is sure nothing was played (no game, not one kill-feed line). 0 = right after the scan. They also go first when space is needed.</small></label>
         <label class="field"><span>Maximum folder size (GB)</span><input id="f-max_gb" type="number" min="20" value="${s.max_gb}"><small>Oldest recordings go first. At least 20 GB.</small></label>
         <label class="field wide"><span>Quality: <b id="q-val" class="unit">${s.bitrate_mbps} Mb/s</b> · <span id="q-hint" class="unit"></span></span><input id="f-bitrate_mbps" type="range" min="8" max="60" step="1" value="${s.bitrate_mbps}">
-          <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). 12 is recommended.</small></label>
+          <small>8 Mb/s is the lowest that keeps the HUD readable for the scanner (Twitch streams are 8–10). ${bitrateTip(r)}</small></label>
         <label class="field"><span>Capture</span><select id="f-capture">${[['window', 'Apex window (recommended)'], ['game', 'Game capture'], ['display', 'Whole screen']].map(([v, l]) => `<option value="${v}" ${v === s.capture ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
       </div></section>
     <section class="card section"><h2>Sound and comms</h2>
