@@ -467,6 +467,7 @@ class Backend:
             elif p in self.scan_queue:
                 status = "waiting"
             yt = None
+            chk = None
             if norm in rec_index and self.auto and getattr(self.auto.rec, "youtube", None):
                 up = self.auto.rec.youtube
                 b = up.block_of(rec_index[norm][0])
@@ -475,12 +476,23 @@ class Backend:
                 r = up.results_of(rec_index[norm][0])
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
-            label, by_hand = labels.of(p, full)
+                try:
+                    chk = up.check_of_key(rec_index[norm][0])
+                except Exception:
+                    chk = None
+                if chk:
+                    yt["eecCheck"] = {"verdict": chk["verdict"], "why": chk["why"]}
+            lab = labels.explain(p, full, chk)
+            label, by_hand = lab["label"], lab["source"] == "hand"
             rec = recorded_at(p, full)
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         # "Recorded" = when the recording started, not when the file was last written
                         "recorded": rec if rec is not None else st.st_mtime,
-                        "label": label, "label_by_hand": by_hand,
+                        "label": label, "label_by_hand": by_hand, "label_source": lab["source"], "label_why": lab["why"],
+                        # EEC drop per game where EEC's results were compared with this recording's games
+                        "eecGames": [{k: x.get(k) for k in ("i", "eecGame", "eecDrop", "ourDrop", "ourFrom", "check", "why")}
+                                     for x in (chk or {}).get("games", []) if norm in rec_index and x.get("rec") == rec_index[norm][0]]
+                                    if chk and chk["verdict"] != "mismatch" else [],
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
                         # on the team hub? {"hub": "sent" | "pending" | "", "why": "Hub not reachable" | "Key refused"…}

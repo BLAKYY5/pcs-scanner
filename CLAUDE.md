@@ -101,6 +101,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
+- **EEC drops** (`eec.py`, coach's rule 18 Nov 2026: "EEC is correct 95% of the time"): drops come from the export's
+  `draft` joined to each row's `map_pick_id` (as hub/eec.py), or from hub documents imported with the fixed drops
+  (`draft` present; old Loot Book drops are not used). `eec.check_block` compares a block's scanned games with the
+  lobby: same map, jump within 15 min of EEC's match start, EEC drop vs our landing POI (`same` / `near` /
+  `different`; a drop not in our map table is not compared). More agree = `match`: label scrims, source `eec`. More
+  differ, or no game at the lobby's times = `mismatch`: the lobby is not attached to that block (e.g. a tournament
+  the same evening), the label comes from the scan alone, the reason is kept (`eec_rejected`, `label_why`). Nothing
+  to compare = old behaviour. Display: EEC's drop wins, ours is shown next to it when different ("scan: ...").
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
   Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
