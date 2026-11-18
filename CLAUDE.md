@@ -208,6 +208,13 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   each app downloads them with the key into the data folder (`minimaps/`), never in this repo. No hub / no key: "Minimap
   needs the team hub"; no picture (Olympus) or map `?`: "No minimap for this map yet". Drawn on changes only (time,
   view, size), never in an animation loop. Key M = map (mute moved to U).
+  Also on the map: ring circles when the scan has `games[].ringCircles` ({t, x, y, r} world, or {t, mapX, mapY, mapR} in
+  map %, or [t, x, y, r]; passed through `GAME_FIELDS`; the last one bright, the one before faint), our squad's kill
+  feed lines (so far) and the coach's notes, both placed where the player was at that moment, and with the Squad switch
+  the teammates' paths (`pcs_recorder/squadpaths.py`, `/api/squadpaths`): only from what the hub already gives any key
+  (`/api/db/timings` gameKey + `recording.jumpAt`, `/api/scans` + `/api/scans/<id>/file` samples), in game time, cached
+  in `squad-cache/` for offline. Watch together shows the large view's player on the same map (`wtMapSetup` /
+  `wtMapTick` from `session.js`'s 4-per-second tick). Redraws: at most 4 per second, none while the window is hidden.
 - **Hub backup copy** (`pcs_recorder/hubbackup.py`, coach's hub key only, hub 0.5.4 `GET`/`HEAD /api/backup/latest`):
   a second copy of the hub's nightly zip (`pcs-hub-<yyyymmdd>.zip`) on the coach's main PC (coach's decision, 17 Nov
   2026: "Yes, also on E:"). Settings → Team hub shows "Hub backup copy" only when `/api/me` says coach (asked at most

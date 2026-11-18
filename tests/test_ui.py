@@ -2365,6 +2365,161 @@ def test_minimap_transform_and_page():
     assert not [f for f in web.rglob("*") if f.suffix.lower() in (".jpg", ".jpeg", ".img")]
 
 
+class SquadHub:
+    """A hub with two players' scans of one game (gameKey g-1): `timings` documents and the scan files, as any key
+    reads them (hub 0.5). `calls` lists the paths asked; `down` makes it answer nothing."""
+    REC_ME, REC_MOE = "Apex Legends_2026.11.17-20.00", "Apex Legends_2026.11.17-19.58"
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.calls, self.down = [], False
+        me_scan = {"games": [{"landing": {"exitAtExact": 100.0}, "samples": [[101, 0, None, False, 10, 20, 0, 0]]}]}
+        # Moe jumped 220 s into his recording: game time = t - 220. A spectating row, a row before the jump, a gap.
+        moe_scan = {"games": [
+            {"landing": {"exitAtExact": 40.0}, "samples": [[41, 0, None, False, 1, 1, 0, 0]]},                       # an earlier game
+            {"landing": {"exitAtExact": 220.0, "x": 1000.4, "y": -2000.6}, "tEndGame": 400.0,
+             "samples": [[150, 0, None, False, 5, 5, 0, 0], [221, 0, None, False, 1000, -2000, 0, 0], [222, 0, None, False, 1010, -2010, 0, 0],
+                      [223, 0, None, True, 0, 0, 0, 0], [240, 0, None, False, 1100, -2100, 0, 0], [500, 0, None, False, 9, 9, 0, 0]]}]}
+        self.files = {"7": me_scan, "9": moe_scan}
+        self.timings = [
+            {"id": "tm-a", "data": {"gameKey": "g-1", "uploadedBy": "Blakey", "map": "SP", "recording": {"file": self.REC_ME, "jumpAt": 100.0}}},
+            {"id": "tm-b", "data": {"gameKey": "g-1", "uploadedBy": "Moe", "map": "SP", "recording": {"file": self.REC_MOE, "jumpAt": 220.0}}},
+            {"id": "tm-c", "data": {"gameKey": "g-2", "uploadedBy": "Moe", "map": "WE", "recording": {"file": "x", "jumpAt": 5.0}}},
+            {"id": "tm-d", "data": {"title": "a Loot Book document by hand"}}]
+        self.scans = [{"id": 9, "uploader": "moe", "name": self.REC_MOE + ".scan.json", "kind": "scan", "recording": self.REC_MOE},
+                      {"id": 8, "uploader": "moe", "name": self.REC_MOE + ".feed.json", "kind": "feed", "recording": self.REC_MOE},
+                      {"id": 7, "uploader": "Blakey", "name": self.REC_ME + ".scan.json", "kind": "scan", "recording": self.REC_ME}]
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, data):
+                data = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                hub.calls.append(self.path)
+                if hub.down:
+                    return self._send(503, {"detail": "down"})
+                if self.headers.get("Authorization", "") != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if self.path == "/api/db/timings":
+                    return self._send(200, hub.timings)
+                if self.path.startswith("/api/scans?"):
+                    return self._send(200, hub.scans)
+                parts = self.path.split("/")
+                if len(parts) == 5 and parts[:3] == ["", "api", "scans"] and parts[4] == "file" and parts[3] in hub.files:
+                    return self._send(200, hub.files[parts[3]])
+                return self._send(404, {"detail": "Not Found"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_squad_paths_from_the_hub():
+    """Map panel Squad switch / Watch together map: teammates' paths of the same game, read from what the hub already
+    gives any key (timings + scan files), lined up in game time (0 = the jump), our own recording left out; kept in the
+    data folder so they show offline; no key: nothing asked."""
+    from pcs_recorder import squadpaths
+    hub = _fresh_hub()
+    fake = SquadHub()
+    folder = TMP / "squad"
+    folder.mkdir(exist_ok=True)
+    rec = folder / (SquadHub.REC_ME + ".mp4")
+    rec.write_bytes(b"x" * 10)
+    auto = _Auto(str(TMP / "squadrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["name"] == rec.name)
+    srv = pcs_server.Server(b)
+    srv.start()
+    data = Path(os.environ["PCS_DATA_DIR"]) / "squad-cache"
+    try:
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100")[1]
+        assert r == {"available": False, "text": "Squad paths need the team hub"} and not fake.calls, r
+        assert call(srv, f"/api/squadpaths?id={vid}&jump=100", token=False)[0] == 403
+        hub.set_key(GOOD_KEY)
+        # review player: our game found by recording name + jump; only Moe comes back (not our own recording)
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100.8")[1]
+        assert r["available"] and r["gameKey"] == "g-1" and r["map"] == "SP" and not r["offline"], r
+        assert [p["player"] for p in r["players"]] == ["Moe"], r
+        moe = r["players"][0]
+        # game time, not while spectating, nothing before the jump or after the game, a gap (None) after 17 s unread
+        assert moe["path"] == [[1.0, 1000, -2000], [2.0, 1010, -2010], None, [20.0, 1100, -2100]], moe
+        assert moe["land"] == [1000, -2001] and moe["recording"] == SquadHub.REC_MOE
+        assert "/api/scans/9/file" in fake.calls and "/api/scans/7/file" not in fake.calls
+        assert not any(GOOD_KEY in c for c in fake.calls)
+        # a jump that isn't on the hub: said so
+        assert call(srv, f"/api/squadpaths?id={vid}&jump=300")[1]["text"] == "This game isn't on the hub yet"
+        assert call(srv, "/api/squadpaths?id=nope&jump=1")[0] >= 400
+        # Watch together: the whole game by its key, both players
+        r = call(srv, "/api/squadpaths?gameKey=g-1")[1]
+        assert [p["player"] for p in r["players"]] == ["Blakey", "Moe"] and r["players"][0]["path"] == [[1.0, 10, 20]], r
+        # kept: asked again = no new request; the hub down = the copies, marked offline
+        n = len(fake.calls)
+        call(srv, "/api/squadpaths?gameKey=g-1")
+        assert len(fake.calls) == n
+        fake.down = True
+        lists = json.loads((data / "lists.json").read_text())
+        lists["at"] -= squadpaths.LIST_TTL + 1
+        (data / "lists.json").write_text(json.dumps(lists))
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100")[1]
+        assert r["available"] and r["offline"] and r["players"][0]["path"][0] == [1.0, 1000, -2000], r
+        assert GOOD_KEY not in "".join(f.read_text() for f in data.iterdir())
+        # no hub address: needs the hub
+        auto.s.hub_url = ""
+        assert call(srv, "/api/squadpaths?gameKey=g-1")[1]["available"] is False
+    finally:
+        srv.stop()
+        fake.stop()
+        _fresh_hub()
+        shutil.rmtree(data, ignore_errors=True)
+
+
+def test_squad_paths_from_a_scan():
+    """Only the positions a path needs are kept from a scan file: per game with a jump, in game time, thinned out."""
+    from pcs_recorder import squadpaths
+    seen = [[100 + i, 0, None, False, i, -i, 0, 0] for i in range(squadpaths.MAX_POINTS + 500)]
+    out = squadpaths.paths_of_scan({"games": [{"landing": {}}, {"landing": {"exitAt": 100}, "samples": seen + [[1, 0, None, False, None, 3, 0, 0], "x"]}]})
+    assert len(out) == 1 and out[0]["jump"] == 100 and out[0]["land"] is None
+    assert len(out[0]["path"]) == squadpaths.MAX_POINTS and out[0]["path"][0] == [0.0, 0, 0]
+    assert squadpaths.slug("Moe X!") == "moe-x" and squadpaths.slug("") == "unknown"
+
+
+def test_minimap_layers_and_quiet_drawing():
+    """Map panel: rings (when the scan has `ringCircles`), kill feed and coach notes placed on the path, teammates'
+    paths, Watch together's map; drawn at most 4 times a second, nothing while the window is hidden, no loop."""
+    web = Path(pcs_server.WEB)
+    js = (web / "minimap.js").read_text(encoding="utf-8")
+    for text in ("ringCircles", "/api/squadpaths?id=", "/api/squadpaths?gameKey=", "MM_EVERY_MS = 250", "document.hidden",
+                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">Squad</button>", "pcs-map-squad",
+                 "No teammate\\'s recording of this game on the hub", "Squad paths need the team hub",
+                 "function wtMapSetup", "function wtMapTick", "pcs-wt-map", "Click the path or a mark to go there"):
+        assert text in js, text
+    assert "requestAnimationFrame" not in js and "setInterval" not in js
+    assert "ringCircles" in pcs_server.GAME_FIELDS                                   # passed to the page when the scan has it
+    ses = (web / "session.js").read_text(encoding="utf-8")
+    assert 'id="wtMap"' in ses and "wtMapSetup($('#wtMap'), st," in ses
+    tick = ses[ses.index("function syncTick"):]
+    tick = tick[:tick.index("\n}\n")] if "\n}\n" in tick else tick[:tick.index("\r\n}\r\n")]
+    assert "document.hidden" in tick.split("wtMapTick")[0] and "wtMapTick(T)" in tick   # the map follows the hidden-safe tick
+    css = (web / "minimap.css").read_text(encoding="utf-8")
+    assert ".mm-k.note" in css and ".wt-map" in css and "@keyframes" not in css and "animation" not in css
+
 def _edge():
     for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):
         p = Path(base) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
