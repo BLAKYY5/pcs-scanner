@@ -94,7 +94,9 @@ def _scan_why(kind: str | None, scans: list[dict] | None = None) -> str:
             if g.get("mode") == _MODE[kind]:
                 signs += [x for x in (g.get("modeSeen") or {}).get("from", []) if x in _SIGN and x not in signs]
     if signs:
-        return " and ".join(_SIGN[x] for x in signs) + " showed " + TITLE[kind]
+        words = [_SIGN[x] for x in signs]
+        said = ", ".join(words[:-1]) + " and " + words[-1] if len(words) > 1 else words[0]
+        return said + " showed " + TITLE[kind]
     return {"scrims": "the scrim drop screen was read", "ranked": "the ranked badge was seen",
             "wildcard": "the loading banner said wildcard", "pubs": "the loading banner said trios (pubs)"}[kind]
 

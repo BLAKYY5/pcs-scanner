@@ -99,7 +99,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   drop, select = rank badges at legend select, banner = loading banner word, emblem), conflict, emblem (asset id),
   emblemReads}; `games[].mode` = its mode or `unknown`. Order kept from before: RP panel -> ranked, drop screen ->
   scrim; then the other signs must agree. Two signs naming different modes, or the emblem of a playlist we can't
-  name, = no mode (unlabelled), never a guess. Wildcard and pubs come from the loading banner's word (pubs: trios
+  name, = no mode (unlabelled), never a guess (an unnamed emblem is ignored next to ranked
+  signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
   emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
 - **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 only): the round emblem at
@@ -109,6 +110,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   `tools/mode_emblems.py` from a private RSX export of ui.rpak; the images are never in the repo; 7 more round
   playlist emblems are in the table with mode null so their games are not taken for pubs). Per game: the reads from
   150 s before its start to 150 s before the next; one emblem >= 3 reads and >= 90 % of them.
+  Checked 19 Nov 2026 on full scans of 9 recordings (38 ranked, 4 Wildcard, 4 pubs trios games, read by eye; dev =
+  13 Nov 17.24 + 15 Nov, held = the rest): every game's mode right, none unlabelled; the emblem alone named all 8
+  Wildcard / pubs games (69 to 369 reads each, never the other one) and was read once in 38 ranked games.
 - **YouTube**: blocks = recordings less than `yt_gap_min` apart, one video per block per player, ffmpeg concat
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
