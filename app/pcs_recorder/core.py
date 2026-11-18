@@ -4,7 +4,8 @@ Every few seconds `tick()` looks at whether Apex is running:
 - Apex starts      -> OBS records the Apex window.
 - Apex closes      -> recording stops; the player is asked (with a countdown) to scan;
                       the scanner runs at low priority; results go to the hub.
-- Apex starts again while a scan runs -> the scan is paused until Apex closes.
+- Apex starts again while a scan runs -> the scan is stopped (its memory freed) and goes on from where it was
+                      when Apex closes (finished chunks are kept on disk by the scanner).
 Nothing is uploaded while Apex is running, so the player's connection is never shared
 with an upload mid-game. Old recordings are cleaned up after each session.
 """
@@ -35,6 +36,64 @@ def apex_running() -> bool:
     return False
 
 
+def stop_tree(proc, wait_s: float = 10) -> None:
+    """Stop a scan and every process it started (worker processes, their ffmpeg). Everything is paused first, so
+    nothing can start a new worker while the rest is ended. In the exe, the top process only unpacks the app to a
+    temporary folder and waits: it is let go once the others are gone, so it removes that folder itself, as at
+    the end of a normal scan. Run from source, the top process is the scanner itself and is ended too."""
+    import sys
+    import psutil
+    try:
+        root = psutil.Process(proc.pid)
+    except psutil.Error:
+        return
+    try:
+        root.suspend()                                   # the top first, then its children: the list is complete
+    except psutil.Error:
+        pass
+    try:
+        kids = root.children(recursive=True)
+    except psutil.Error:
+        kids = []
+    for p in kids:
+        try:
+            p.suspend()
+        except psutil.Error:
+            pass
+    for p in kids:
+        try:
+            p.kill()
+        except psutil.Error:
+            pass
+    psutil.wait_procs(kids, timeout=wait_s)
+    onefile = getattr(sys, "frozen", False) and Path(getattr(sys, "_MEIPASS", "")).name.startswith("_MEI")
+    if onefile:
+        try:
+            root.resume()                               # the unpacker: sees its app end, cleans up, exits
+            root.wait(timeout=wait_s)
+        except psutil.TimeoutExpired:
+            pass
+        except psutil.Error:
+            pass
+    try:
+        if root.is_running():
+            root.kill()
+            root.wait(timeout=wait_s)
+    except psutil.Error:
+        pass
+    try:
+        proc.wait(timeout=wait_s)                        # reaps it for subprocess too
+    except Exception:
+        pass
+
+
+def result_files(out: Path) -> list[Path]:
+    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks."""
+    if not out.exists():
+        return []
+    return sorted(p for p in out.rglob("*") if p.is_file() and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
+
+
 class NeedsSignIn(ConnectionError):
     """Results couldn't be sent because the Google sign-in is missing or expired (message shows a Sign in button)."""
     action = "signin"
@@ -50,8 +109,8 @@ class Recorder:
         self.current: str | None = None          # index key of the recording in progress
         self.scan_proc: subprocess.Popen | None = None
         self.scan_key: str | None = None
-        self.paused = False
-        self.suspended: list = []                # processes this recorder paused (to resume exactly once)
+        self.paused = False                      # a scan was stopped because Apex runs (goes on when it closes)
+        self.resumed: set[str] = set()           # recordings whose scan was stopped for Apex (no new message)
         self.next_upload = 0.0
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
@@ -263,9 +322,10 @@ class Recorder:
             log.warning("events not saved: %s", ex)
 
     # ---------------------------------------------------------- scanning
-    def _begin_scan(self, key: str) -> None:
+    def _begin_scan(self, key: str, queued: bool = False) -> None:
         e = self.idx[key]
-        if self.scan_proc is not None:          # another session is being scanned: wait for it
+        # another session is being scanned, or others wait before this one (a scan stopped while Apex ran): wait
+        if self.scan_proc is not None or (not queued and any(k != key for k in self.queue)):
             e.status = "waiting"
             if key not in self.queue:
                 self.queue.append(key)
@@ -284,48 +344,43 @@ class Recorder:
         e.status = "scanning"
         retention.save_index(self.idx)
         self.status = "Scanning last session"
+        if key in self.resumed:                 # goes on after Apex closed: the player was told when it started
+            self.resumed.discard(key)
+            return
         waiting = f" ({len(self.queue)} more after this one)" if self.queue else ""
         self.ui.notify("Scanning your session" + waiting,
                        "Usually a few minutes. You can keep using your PC; it pauses by itself if you start Apex.")
 
     def _manage_scan(self, apex: bool) -> None:
+        # Apex starts while a scan runs: the scan is stopped, not paused. A paused scan kept its memory (up to ~5 GB
+        # with 8 workers) for the whole game, and Windows pushed it to disk while Apex wanted the RAM. The scanner
+        # keeps each finished chunk next to its results, so when Apex closes the scan starts again and goes on
+        # from the chunks still to do (same results as one uninterrupted scan).
+        if apex and self.scan_proc is not None and self.scan_proc.poll() is None:
+            key = self.scan_key
+            stop_tree(self.scan_proc)
+            log.info("scan stopped while Apex runs; it goes on when Apex closes")
+            self.scan_proc, self.scan_key = None, None
+            if key in self.idx:
+                self.idx[key].status = "waiting"
+                if key in self.queue:
+                    self.queue.remove(key)
+                self.queue.insert(0, key)               # first in line when Apex closes
+                self.resumed.add(key)
+                retention.save_index(self.idx)
+            self.paused = True
+        if self.paused:
+            if apex:
+                self.status = "Scan paused while Apex runs"
+                return
+            self.paused = False
+            self.status = "Scanning last session"
+            self._next_in_queue(apex)
         if not self.scan_proc:
             return
-        import psutil
-        # The scanner splits a recording into parallel worker processes: pause/resume all of them.
-        # On Windows pauses stack (paused twice = must be resumed twice), so each process is paused at
-        # most once and exactly the processes that were paused get resumed. A worker that ends in the
-        # meantime is simply skipped.
-        if apex:
-            # pause the scanner first (then it can't start new workers), then its workers; on later checks,
-            # also catch a worker that was being started at that instant. Never the same process twice.
-            try:
-                root = psutil.Process(self.scan_proc.pid)
-                done = {p.pid for p in self.suspended}
-
-                def pause(p):
-                    if p.pid in done:
-                        return
-                    try:
-                        p.suspend()
-                        self.suspended.append(p)
-                        done.add(p.pid)
-                    except psutil.Error:
-                        pass                                         # ended in the meantime
-                pause(root)                                          # frozen first: it can't start new workers,
-                for p in root.children(recursive=True):              # so this list is complete
-                    pause(p)
-            except psutil.Error:
-                pass
-            self.paused = True
-            self.status = "Scan paused while Apex runs"
-        elif not apex and self.paused:
-            self._resume_all()
-            self.status = "Scanning last session"
         code = self.scan_proc.poll()
         if code is None:
             return
-        self._resume_all()                      # nothing may stay paused once the scan is over
         key, self.scan_proc, self.scan_key = self.scan_key, None, None
         e = self.idx.get(key)
         if e:
@@ -396,21 +451,11 @@ class Recorder:
         except Exception as ex:
             log.warning("extras not added: %s", ex)
 
-    def _resume_all(self) -> None:
-        import psutil
-        for p in self.suspended:
-            try:
-                p.resume()
-            except psutil.Error:
-                pass
-        self.suspended = []
-        self.paused = False
-
     def _next_in_queue(self, apex: bool) -> None:
         while self.queue and self.scan_proc is None and not apex:
             k = self.queue.pop(0)
             if k in self.idx:
-                self._begin_scan(k)
+                self._begin_scan(k, queued=True)
 
     # ---------------------------------------------------------- upload
     def _retry_uploads(self) -> None:
@@ -420,7 +465,7 @@ class Recorder:
             if e.status != "scanned":
                 continue
             out = Path(e.path).with_suffix(".scan")
-            files = sorted(p for p in out.rglob("*") if p.is_file()) if out.exists() else []
+            files = result_files(out)
             try:
                 where = self.hub.upload(files)
             except Exception as ex:
@@ -484,7 +529,7 @@ class Recorder:
         for key in sorted(pending, key=lambda k: self.idx[k].started):
             e = self.idx[key]
             out = Path(e.path).with_suffix(".scan")
-            files = sorted(p for p in out.rglob("*") if p.is_file()) if out.exists() else []
+            files = result_files(out)
             if not files:                                        # results deleted by hand: nothing to send
                 self.sent[key]["hub"], self.sent[key]["why"] = "", ""
                 self._save_sent()
