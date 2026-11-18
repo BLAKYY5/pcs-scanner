@@ -2545,6 +2545,352 @@ def test_review_talk_recording():
         talkmod.save_pending([])
 
 
+# ------------------------------------------------------------------ hub backup copy (coach's hub key only)
+PLAYER_KEY = "pcs_" + "P" * 43
+
+
+def _zip_bytes(tag: str, pad: int = 0) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("data/hub.db", tag.encode() + os.urandom(pad))
+        zf.writestr("backup-info.json", json.dumps({"hub_version": "0.5.4"}))
+    return buf.getvalue()
+
+
+class BackupHub:
+    """A hub 0.5.4: /api/me (GOOD_KEY = coach, PLAYER_KEY = player) and the coach-only /api/backup/latest (GET, HEAD,
+    ?date=). `zips` = {yyyymmdd: bytes}; `fail` = status to answer on the backup route; `lie` = bytes added to the
+    size header. Every request is kept (method, path)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.zips, self.fail, self.lie, self.calls = {}, 0, 0, []
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(data)
+
+            def _go(self):
+                hub.calls.append((self.command, self.path))
+                auth = self.headers.get("Authorization", "")
+                role = {"Bearer " + GOOD_KEY: "coach", "Bearer " + PLAYER_KEY: "player"}.get(auth)
+                if not role:
+                    return self._json(401, {"error": "bad_key"})
+                if self.path == "/api/me":
+                    return self._json(200, {"name": "Blakey" if role == "coach" else "Moe", "role": role})
+                if self.path.startswith("/api/backup/latest"):
+                    if role != "coach":
+                        return self._json(403, {"error": "coach_only"})
+                    if hub.fail:
+                        return self._json(hub.fail, {"error": "x"})
+                    q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    days = sorted(hub.zips, reverse=True)
+                    if q.get("date"):
+                        days = [d for d in days if d == q["date"][0]]
+                    if not days:
+                        return self._json(404, {"error": "none"})
+                    data = hub.zips[days[0]]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("X-Backup-Date", days[0])
+                    self.send_header("X-Backup-Bytes", str(len(data) + hub.lie))
+                    self.end_headers()
+                    if self.command == "GET":
+                        self.wfile.write(data)
+                    return
+                return self._json(404, {"error": "not found"})
+
+            do_GET = do_HEAD = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def backup_calls(self):
+        return [c for c in self.calls if c[1].startswith("/api/backup")]
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _backup_setup(key=GOOD_KEY):
+    """App server + fake hub + a scratch target folder (standing in for E:). The test PC's own drives are never
+    used: the Windows drive is pretended to be Q:, the E: drive check answers what the test says."""
+    from pcs_recorder import hubbackup, settings as st
+    hub = _fresh_hub()
+    hub.set_key(key)
+    hubbackup.STATE_FILE.unlink(missing_ok=True)
+    if not hasattr(_backup_setup, "real_save"):
+        _backup_setup.real_save = st.save
+    st.save = lambda s: None                # the stand-in isn't a real Settings object (restored by _backup_done)
+    fake = BackupHub()
+    auto = _Auto(str(TMP / "bkrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    hb = b.hubbackup
+    hb.drive_exists = lambda p: False
+    hb.busy = lambda: None
+    clock = {"t": time.mktime((2026, 11, 18, 5, 0, 0, 0, 0, -1))}       # 05:00, after the hub's nightly zip
+    hb.now = lambda: clock["t"]
+    target = TMP / "E-drive" / "PCS Hub backups"
+    shutil.rmtree(target.parent, ignore_errors=True)
+    srv = pcs_server.Server(b)
+    srv.start()
+    return hubbackup, hub, fake, b, hb, srv, clock, target
+
+
+def _backup_done(srv, fake):
+    from pcs_recorder import settings as st
+    st.save = _backup_setup.real_save
+    srv.stop()
+    fake.stop()
+    _fresh_hub()
+
+
+def _backup_wait(hb, s=10):
+    end = time.time() + s
+    while hb.running and time.time() < end:
+        time.sleep(0.02)
+    assert not hb.running
+
+
+def test_hub_backup_folder_rules():
+    """Default E:\\PCS Hub backups only when there is an E: drive (never C:); C: refused; bad paths refused."""
+    from pcs_recorder import hubbackup
+    real = hubbackup.system_drive
+    try:
+        hubbackup.system_drive = lambda: "C:"
+        assert hubbackup.default_folder(lambda p: p == "E:\\") == "E:\\PCS Hub backups"
+        assert hubbackup.default_folder(lambda p: False) == ""
+        for bad in ("C:\\PCS Hub backups", "c:/x", "relative\\folder", "\\\\server\\share\\x", "E:"):
+            try:
+                hubbackup.check_folder(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(bad)
+        assert hubbackup.check_folder("  ") == "" and hubbackup.check_folder("E:\\PCS Hub backups") == "E:\\PCS Hub backups"
+        hubbackup.system_drive = lambda: "E:"                  # Windows on E: -> no default there either
+        assert hubbackup.default_folder(lambda p: True) == ""
+        for k in (0, 366, "x"):
+            try:
+                hubbackup.validate(None, k)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(k)
+    finally:
+        hubbackup.system_drive = real
+
+
+def test_hub_backup_download_skip_and_keep():
+    """Coach: Settings block, folder + keep saved, the daily copy downloads the newest zip (.partial, then renamed),
+    the same date again is skipped, only pcs-hub-<8 digits>.zip files beyond `keep` are removed, Copy now works."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd = hubbackup.system_drive
+    hubbackup.system_drive = lambda: "Q:"                      # the scratch folder may be on this PC's C:
+    try:
+        fake.zips = {"20261117": _zip_bytes("old"), "20261118": _zip_bytes("new", 3 << 20)}   # 3 MB: several chunks
+        assert call(srv, "/api/state")[1]["hubBackup"] is None       # role not known yet: no block
+        assert hb.role() == "coach" and fake.calls == [("GET", "/api/me")]
+        st = call(srv, "/api/state")[1]["hubBackup"]
+        assert st["folder"] == "" and st["keep"] == 14 and st["last"] == {}, st   # no E: here: off
+        assert not hb.tick() and not fake.backup_calls()                         # off: nothing asked
+        # settings: folder and keep, through the normal Save
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": str(target), "hub_backup_keep": 3})
+        assert code == 200 and r["hubBackup"]["folder"] == str(target) and r["hubBackup"]["keep"] == 3, r
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": "Q:\\backups", "player": "changed?"})
+        assert code == 500 and "another drive" in r["error"] and core.SETTINGS.get("player") != "changed?"
+        assert hb.folder == str(target)
+        # files that aren't the copy's own, and older copies
+        target.mkdir(parents=True)
+        others = ["holiday.jpg", "pcs-hub-notes.zip", "pcs-hub-2026111.zip", "PCS-HUB-20261101.zip.bak",
+                  "pcs-hub-20261101.zip.txt", "my pcs-hub-20261101.zip"]
+        for o in others:
+            (target / o).write_text("mine")
+        (target / "sub").mkdir()
+        (target / "sub" / "pcs-hub-20261101.zip").write_text("mine")
+        for d in ("20261110", "20261111", "20261112", "20261113"):
+            (target / f"pcs-hub-{d}.zip").write_text("old copy")
+        (target / "pcs-hub-20261112.zip.partial").write_text("left over")
+        # 03:00: not yet
+        clock["t"] -= 2 * 3600
+        assert not hb.due() and not hb.tick()
+        clock["t"] += 2 * 3600
+        assert hb.tick()
+        _backup_wait(hb)
+        z = target / "pcs-hub-20261118.zip"
+        assert z.read_bytes() == fake.zips["20261118"] and not list(target.glob("*.partial"))
+        assert fake.backup_calls() == [("HEAD", "/api/backup/latest"), ("GET", "/api/backup/latest?date=20261118")]
+        own = sorted(p.name for p in target.iterdir() if hubbackup.NAME_RE.fullmatch(p.name))
+        assert own == ["pcs-hub-20261112.zip", "pcs-hub-20261113.zip", "pcs-hub-20261118.zip"], own
+        for o in others:
+            assert (target / o).read_text() == "mine"
+        assert (target / "sub" / "pcs-hub-20261101.zip").exists()
+        last = call(srv, "/api/state")[1]["hubBackup"]["last"]
+        assert last["ok"] and last["result"] == "Copied" and last["date"] == "20261118" and last["bytes"] == z.stat().st_size
+        assert not any("Hub backup" in m["text"] for m in b.messages)          # no message when it works
+        # same day: not again; next day, same zip on the hub: HEAD only, skipped
+        assert not hb.due() and not hb.tick()
+        clock["t"] += 86400
+        n = len(fake.backup_calls())
+        assert hb.tick()
+        _backup_wait(hb)
+        assert fake.backup_calls()[n:] == [("HEAD", "/api/backup/latest")]
+        assert call(srv, "/api/state")[1]["hubBackup"]["last"]["result"] == "Already copied"
+        # Copy now (the button): a new zip on the hub
+        fake.zips["20261119"] = _zip_bytes("newer")
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 200 and r["started"], r
+        _backup_wait(hb)
+        assert (target / "pcs-hub-20261119.zip").read_bytes() == fake.zips["20261119"]
+        assert not (target / "pcs-hub-20261112.zip").exists() and (target / "holiday.jpg").exists()
+        # an incomplete download: nothing kept, the previous copies stay
+        fake.zips["20261120"], fake.lie = _zip_bytes("bad"), 5
+        res = hb.copy_once()
+        assert not res["ok"] and "incomplete" in res["error"] and not (target / "pcs-hub-20261120.zip").exists()
+        assert not list(target.glob("*.partial")) and (target / "pcs-hub-20261119.zip").exists()
+        # the key is never in the state file
+        assert GOOD_KEY not in hubbackup.STATE_FILE.read_text()
+    finally:
+        hubbackup.system_drive = real_sd
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_never_during_apex():
+    """Apex running (or a recording, a scan): no request at all, Copy now refused; Apex starting during a download
+    stops it (partial removed, not counted as a failure) and it is tried again later."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd, real_every = hubbackup.system_drive, hubbackup.BUSY_EVERY_S
+    hubbackup.system_drive = lambda: "Q:"
+    try:
+        fake.zips = {"20261118": _zip_bytes("big", 4 << 20)}
+        hb.role()
+        hb.set(str(target), 14)
+        fake.calls.clear()
+        hb.busy = lambda: "Apex is running"
+        assert not hb.tick() and fake.calls == []
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 500 and r["error"] == "Close Apex first." and fake.calls == []
+        # the real check: Apex, the recorder, a scan
+        b2 = pcs_server.Backend(_Auto(str(TMP / "bkrecs2")))
+        b2._apex_running = lambda: True
+        assert b2._backup_busy() == "Apex is running"
+        b2._apex_running = lambda: False
+        assert b2._backup_busy() is None
+        b2.auto.rec.current = object()
+        assert b2._backup_busy() == "the auto-recorder is busy"
+        b2.auto.rec.current, b2.scan_now = None, "x.mp4"
+        assert b2._backup_busy() == "a scan is running"
+        # Apex starts after the download began
+        looks = []
+        hb.busy = lambda: (looks.append(1), None if len(looks) <= 2 else "Apex is running")[1]
+        hubbackup.BUSY_EVERY_S = 0
+        assert hb.tick()
+        _backup_wait(hb)
+        assert ("GET", "/api/backup/latest?date=20261118") in fake.calls
+        assert not list(target.glob("pcs-hub-*")), list(target.iterdir())
+        assert hb.st.get("fail_days", []) == [] and hb.st.get("last") is None and hb.next_try > clock["t"]
+        # later, Apex closed: done
+        hb.busy = lambda: None
+        clock["t"] = hb.next_try + 1
+        assert hb.tick()
+        _backup_wait(hb)
+        assert (target / "pcs-hub-20261118.zip").read_bytes() == fake.zips["20261118"]
+    finally:
+        hubbackup.system_drive, hubbackup.BUSY_EVERY_S = real_sd, real_every
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_not_for_players():
+    """A player's key: no Settings block, settings ignored, Copy now refused, the backup route never asked."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup(PLAYER_KEY)
+    try:
+        fake.zips = {"20261118": _zip_bytes("x")}
+        hb.drive_exists = lambda p: True                       # even with an E: drive
+        assert not hb.tick()
+        assert hb.role() == "player" and fake.backup_calls() == []
+        assert call(srv, "/api/state")[1]["hubBackup"] is None
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": str(target), "hub_backup_keep": 3})
+        assert code == 200 and r["hubBackup"] is None and not hubbackup.STATE_FILE.exists()
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 403 and "coach" in r["error"] and fake.backup_calls() == []
+        assert not target.exists()
+        # the page's code: the block only when the state has it
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "S.hubBackup ? hubBackupHTML(S.hubBackup) : ''" in js and "Copy now" in js and "Hub backup copy" in js
+        # no hub address: nothing
+        b.auto.s.hub_url = ""
+        assert call(srv, "/api/state")[1]["hubBackup"] is None
+    finally:
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_failure_message_rule():
+    """One short line in Activity only when copies failed 3 days in a row; once; a working copy resets it."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd = hubbackup.system_drive
+    hubbackup.system_drive = lambda: "Q:"
+    try:
+        hb.role()
+        hb.set(str(target), 14)
+        fake.fail = 500
+        said = lambda: [m["text"] for m in b.messages if "Hub backup" in m["text"]]
+        for day in range(2):                                   # day 1 twice (retry), day 2
+            hb._run("daily")
+            hb._run("daily")
+            assert said() == [] and hb.next_try > clock["t"]
+            clock["t"] += 86400
+        hb._run("daily")                                       # day 3
+        assert said() == ["Hub backup copy failed: hub error 500"], said()
+        assert call(srv, "/api/state")[1]["hubBackup"]["last"]["error"] == "hub error 500"
+        clock["t"] += 86400
+        hb._run("daily")                                       # day 4: told already
+        assert len(said()) == 1
+        # it works again: reset; then two failed days, a day off, one more: not 3 in a row
+        fake.fail, fake.zips = 0, {"20261122": _zip_bytes("ok")}
+        hb._run("daily")
+        assert hb.st["fail_days"] == [] and "told" not in hb.st
+        fake.fail = 500
+        for gap in (1, 1, 2):
+            clock["t"] += gap * 86400
+            hb._run("daily")
+        assert len(said()) == 1
+        clock["t"] += 86400                                    # now 2 in a row... and a third
+        hb._run("daily")
+        hb._run("daily")
+        assert len(said()) == 1
+        clock["t"] += 86400
+        hb._run("daily")
+        assert len(said()) == 2 and said()[-1] == "Hub backup copy failed: hub error 500"
+        # the hub writing tonight's zip (409): waits, not a failure day
+        n = len(hb.st["fail_days"])
+        fake.fail = 409
+        clock["t"] += 86400
+        hb._run("daily")
+        assert len(hb.st["fail_days"]) == n and hb.next_try == clock["t"] + 900
+        assert "Hub backup copy failed: " == hubbackup.FAILED
+    finally:
+        hubbackup.system_drive = real_sd
+        _backup_done(srv, fake)
+
+
 if __name__ == "__main__":
     try:
         code = run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")])
