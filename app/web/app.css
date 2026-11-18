@@ -194,6 +194,10 @@ select.label:disabled{opacity:.5;cursor:default}
 .tick.respawn::before{content:"";position:absolute;left:50%;top:-7px;width:10px;height:10px;margin-left:-5px;border-radius:50%;border:2px solid var(--respawn);background:var(--bg);box-sizing:border-box;pointer-events:none}
 .tick.respawn:hover{box-shadow:0 0 0 2px rgba(184,224,74,.35)}
 .tick.respawn:hover::before{background:var(--respawn)}
+/* the player's own knock (scan field ownKnocks): grey like "we went down", a square head */
+.tick.knock{background:#8a877f;width:2px;margin-left:-1px;top:9px;bottom:3px;opacity:1;z-index:2}
+.tick.knock::before{content:"";position:absolute;left:50%;top:-7px;width:8px;height:8px;margin-left:-4px;border:2px solid #8a877f;background:var(--bg);box-sizing:border-box;pointer-events:none}
+.tick.knock:hover::before{background:#8a877f}
 .ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
 .mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */
