@@ -2078,7 +2078,8 @@ def test_review_respawns_like_kills():
             rows = page.js("[...document.querySelectorAll('#rvBody .ev')].map(x => [x.classList.contains('respawn'), x.querySelector('b').textContent])")
             assert [r for r in rows if r[0]] == [[True, "Wraith respawned"], [True, "Teammate respawned"], [True, "You respawned"]], rows
             names = [r[1] for r in rows]
-            assert names.index("You killed") < names.index("Wraith respawned"), names
+            assert "You killed" in names and names.index("You killed") < names.index("Wraith respawned"), \
+                (names, page.js("JSON.stringify([RV.d.feed, RV.d.feedSides, RV.d.games[0].select])"))
             page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
             page.js("document.querySelector('#rvBody .ev.respawn').click(); document.querySelector('#laneF .tick.respawn[data-t=\"650.5\"]').click(); 1")
             assert page.js("__seeks") == [400, 650.5], page.js("__seeks")
