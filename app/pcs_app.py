@@ -33,6 +33,7 @@ def selftest(out):
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         import pcs_recorder.teamtracks   # noqa: F401
+        import pcs_recorder.stitch   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
