@@ -76,7 +76,7 @@ BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
 gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
 build and compare it with a scan from the previous build (same games and values).
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 is released).
 
 ## How the pieces work (things that bit us)
 
