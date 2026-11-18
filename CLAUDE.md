@@ -101,6 +101,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
+- **EEC drops** (`eec.py`, coach's rule 18 Nov 2026: "EEC is correct 95% of the time"): drops come from the export's
+  `draft` joined to each row's `map_pick_id` (as hub/eec.py), or from hub documents imported with the fixed drops
+  (`draft` present; old Loot Book drops are not used). `eec.check_block` compares a block's scanned games with the
+  lobby: same map, jump within 15 min of EEC's match start, EEC drop vs our landing POI (`same` / `near` /
+  `different`; a drop not in our map table is not compared). More agree = `match`: label scrims, source `eec`. More
+  differ, or no game at the lobby's times = `mismatch`: the lobby is not attached to that block (e.g. a tournament
+  the same evening), the label comes from the scan alone, the reason is kept (`eec_rejected`, `label_why`). Nothing
+  to compare = old behaviour. Display: EEC's drop wins, ours is shown next to it when different ("scan: ...").
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
   Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
@@ -146,8 +154,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).
-- **Coach role**: unlocked when the signed-in Google account matches the build's coach address (a CI variable,
-  never in the repo). Coach-only: importing recordings by hand.
+- **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
+  No coach address or account name is built into the exe (a security review found one in `build.json`; removed
+  18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
+  player types in Settings (`coach_email`, once per address: `shared_with`). Coach-only: importing recordings by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file

@@ -68,9 +68,28 @@ def is_scrim(g: dict) -> bool:
     return g.get("mode") == "scrim" and bool(g.get("drop"))
 
 
-def block_label(idx, keys: list[str]) -> tuple[str | None, bool]:
+def block_label(idx, keys: list[str], eec_check: dict | None = None) -> tuple[str | None, bool]:
     """(scrims / ranked / pubs / wildcard / None, set by hand?) for a block of recordings."""
-    return labels.of_block([idx[k].path for k in keys], [scan_of(idx[k]) for k in keys])
+    return labels.of_block([idx[k].path for k in keys], [scan_of(idx[k]) for k in keys], eec_check)
+
+
+def block_games(idx, keys: list[str]) -> list[dict]:
+    """The block's scanned games for eec.check_block: clock time = the jump from the dropship when the scan saw it
+    (EEC's match start is about then), else the game's start."""
+    out = []
+    for k in keys:
+        for i, g in enumerate(scan_of(idx[k]).get("games", [])):
+            ld = g.get("landing") or {}
+            t = ld.get("exitAtExact") or ld.get("exitAt")
+            t = t if t is not None else g.get("tStart")
+            if t is not None:
+                out.append({"rec": k, "i": i, "at": idx[k].started + t, "map": g.get("map"), "game": g})
+    return out
+
+
+def check_of(idx, keys: list[str], res: dict | None) -> dict | None:
+    """EEC results against the block's scans (eec.check_block), or None without results."""
+    return eec.check_block(res, block_games(idx, keys)) if res else None
 
 
 def scan_of(e: retention.Entry) -> dict:
@@ -132,13 +151,20 @@ def tags_for(s: Settings, desc: str, kind: str | None = "scrims") -> list[str]:
 
 
 def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: list[str] | None = None,
-             audio: str = "game", results: dict | None = None, kind: str | None = None) -> tuple[str, str, int]:
-    """Title, description with chapters, and the number of games."""
+             audio: str = "game", results: dict | None = None, kind: str | None = None,
+             check: dict | None = None) -> tuple[str, str, int]:
+    """Title, description with chapters, and the number of games. check (eec.check_block): EEC's drop is shown for
+    the games it was compared on; where our scan says otherwise, ours follows in brackets."""
     games, marks = [], []
+    by_game = {(x["rec"], x["i"]): x for x in (check or {}).get("games", [])}
     for k, off in zip(keys, offsets):
-        for g in scan_of(idx[k]).get("games", []):
+        for gi, g in enumerate(scan_of(idx[k]).get("games", [])):
             if g.get("tStart") is not None:
-                games.append((off + g["tStart"], g.get("map"), "scrim" if is_scrim(g) else ("ranked" if g.get("mode") == "ranked" else "unknown"), our_drop(g),
+                drop = our_drop(g)
+                x = by_game.get((k, gi))
+                if x and x.get("eecDrop"):
+                    drop = x["eecDrop"] + (f" (scan: {x['ourDrop']})" if x.get("check") == "different" else "")
+                games.append((off + g["tStart"], g.get("map"), "scrim" if is_scrim(g) else ("ranked" if g.get("mode") == "ranked" else "unknown"), drop,
                               idx[k].started + g["tStart"]))
         for m in events_of(idx[k]).get("events", []):
             if m.get("kind") == "mark":
@@ -250,7 +276,7 @@ class Uploader:
 
     def _set(self, bid: str, **kw) -> dict:
         """Update a block's state, keeping what the player added (EEC links) and what was already asked."""
-        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "eec_res", "asked", "hub_tried", "custom_title", "privacy")}
+        keep = {k: v for k, v in self.state.get(bid, {}).items() if k in ("eec", "eec_res", "eec_rejected", "asked", "hub_tried", "custom_title", "privacy")}
         self.state[bid] = {**keep, **kw}
         return self.state[bid]
 
@@ -276,9 +302,15 @@ class Uploader:
             raise RuntimeError(f"Team \"{self.s.yt_team}\" isn't in this lobby (check the team name in Settings → YouTube)")
         starts = [g["start"] for g in lobby["games"] if g.get("start")]
         idx = self.rec.idx
+        refused = []
         for keys in blocks(idx, self.s.yt_gap_min):
             b0, b1 = idx[keys[0]].started, end_of(idx[keys[-1]])
             if not starts or b0 - 1800 <= min(starts) <= b1 + 600:
+                chk = check_of(idx, keys, res)
+                if chk and chk["verdict"] == "mismatch":       # e.g. a tournament the same evening: not this lobby
+                    refused.append(chk["why"])
+                    self._reject(keys, res, chk)
+                    continue
                 st = self.state.setdefault(keys[0], {"keys": keys})
                 if st.get("status") in ("uploading", "done"):
                     raise RuntimeError("That block is already on YouTube")
@@ -286,13 +318,36 @@ class Uploader:
                 if res.get("url") and res["url"] not in st.get("eec", []):
                     st["eec"] = st.get("eec", []) + [res["url"]]
                 save_state(self.state)
-                return {"block": keys, **res}
+                return {"block": keys, **res, "check": chk}
+        if refused:
+            raise RuntimeError(f"This lobby doesn't match your games: {refused[0]}")
         raise RuntimeError("None of your recordings was made while this lobby was played")
+
+    def _reject(self, keys: list[str], res: dict, chk: dict) -> None:
+        """Keep why a lobby was not taken for this block (shown in the queue, never used for it)."""
+        st = self.state.setdefault(keys[0], {"keys": keys})
+        rej = [r for r in st.get("eec_rejected", []) if r.get("url") != res.get("url")]
+        st["eec_rejected"] = (rej + [{"url": res.get("url", ""), "why": chk["why"]}])[-5:]
+        save_state(self.state)
+
+    def usable(self, keys: list[str]) -> tuple[dict | None, dict | None]:
+        """(EEC results to use for this block, the check against its scans): no results when the drops say the
+        lobby is another one."""
+        res = self.state.get(keys[0], {}).get("eec_res")
+        chk = check_of(self.rec.idx, keys, res)
+        return (None if chk and chk["verdict"] == "mismatch" else res), chk
+
+    def check_of_key(self, key: str) -> dict | None:
+        """The EEC check of the block this recording belongs to (None without results)."""
+        for keys in blocks(self.rec.idx, self.s.yt_gap_min):
+            if key in keys:
+                return self.usable(keys)[1]
+        return None
 
     def results_of(self, key: str) -> dict | None:
         for keys in blocks(self.rec.idx, self.s.yt_gap_min):
             if key in keys:
-                return self.state.get(keys[0], {}).get("eec_res")
+                return self.usable(keys)[0]
         return None
 
     def _try_hub(self, keys: list[str]) -> None:
@@ -302,11 +357,19 @@ class Uploader:
             return
         self.state.setdefault(keys[0], {"keys": keys})["hub_tried"] = self.clock()
         try:
-            res = eec.from_hub(self.s.hub_url, self.s.yt_team, self.rec.idx[keys[0]].started,
-                               end_of(self.rec.idx[keys[-1]]))
+            found = eec.hub_candidates(self.s.hub_url, self.s.yt_team, self.rec.idx[keys[0]].started,
+                                       end_of(self.rec.idx[keys[-1]]))
         except Exception as e:
             log.info("hub results not available: %s", e)
             return
+        res = None
+        for r in found:                    # the first lobby whose drops don't say it's another one
+            chk = check_of(self.rec.idx, keys, r)
+            if chk and chk["verdict"] == "mismatch":
+                self._reject(keys, r, chk)
+                continue
+            res = r
+            break
         if res:
             st = self.state[keys[0]]
             st["eec_res"] = res
@@ -348,13 +411,15 @@ class Uploader:
                 if all(idx[k].status in ("skipped", "failed") for k in keys):
                     self._set(bid, keys=keys, status="skipped", why="not scanned")
                 continue                                   # wait for the scans (they give the chapters)
-            kind, by_hand = block_label(idx, keys)
+            kind, by_hand = block_label(idx, keys, self.usable(keys)[1])
             if not requested and self.s.yt_scrims_only and by_hand and kind != "scrims":
                 self._set(bid, keys=keys, status="skipped", why=f"labelled {kind}")
                 save_state(self.state)
                 continue                                   # labelled by hand: no need to ask for EEC results
             self._try_hub(keys)
             st = self.state.get(bid, {})
+            res, chk = self.usable(keys)
+            kind, by_hand = block_label(idx, keys, chk)
             if self.s.yt_wait_eec and not (st.get("eec") or st.get("eec_res")) and not requested:
                 waited = self.clock() - end_of(idx[keys[-1]])
                 if waited < self.s.yt_wait_eec_h * 3600:
@@ -366,7 +431,7 @@ class Uploader:
                                        "paste the lobby link (Recordings → EEC). The upload waits for it up to "
                                        f"{self.s.yt_wait_eec_h} h.", sticky=True, action="eeclink")
                     continue                               # waiting for the link (at most yt_wait_eec_h)
-            if not requested and self.s.yt_scrims_only and kind != "scrims" and not st.get("eec_res"):
+            if not requested and self.s.yt_scrims_only and kind != "scrims" and not res:
                 self._set(bid, keys=keys, status="skipped", why="no scrim game")
                 save_state(self.state)
                 continue
@@ -501,9 +566,13 @@ class Uploader:
                 offsets.append(t)
                 durations.append(duration(p))
                 t += durations[-1]
-            kind, _ = block_label(idx, keys)
-            title, desc, n_games = describe(self.s, idx, keys, offsets, links=st.get("eec", []), audio=audio,
-                                            results=st.get("eec_res"), kind=kind)
+            res, chk = self.usable(keys)
+            kind, _ = block_label(idx, keys, chk)
+            links = st.get("eec", [])
+            if chk and chk["verdict"] == "mismatch":        # the lobby the drops refused isn't linked either
+                links = [l for l in links if l != chk.get("lobby")]
+            title, desc, n_games = describe(self.s, idx, keys, offsets, links=links, audio=audio,
+                                            results=res, kind=kind, check=chk)
             title = (st.get("custom_title") or title)[:100]
             build_video(paths, tracks, audio, out)
             st.update(status="uploading", title=title)
@@ -589,7 +658,7 @@ class Uploader:
         if any(idx[k].status not in DONE_STATES + ("skipped",) for k in keys):
             return "waiting for the scans"
         if st.get("status") != "requested" and self.s.yt_scrims_only:
-            kind, by_hand = block_label(idx, keys)
+            kind, by_hand = block_label(idx, keys, self.usable(keys)[1])
             if by_hand and kind != "scrims":
                 return f"won't upload: labelled {labels.TITLE[kind]} (Scrims only is on)"
         if st.get("status") == "requested":
@@ -616,14 +685,19 @@ class Uploader:
             if status in ("skipped", "failed") and st.get("keys") != keys:
                 status = None                              # the block grew since: judged again
             games = [g for k in keys for g in scan_of(idx[k]).get("games", [])]
-            kind, by_hand = block_label(idx, keys)
+            res, chk = self.usable(keys)
+            lab = labels.explain_block([idx[k].path for k in keys], [scan_of(idx[k]) for k in keys], chk)
+            kind, by_hand = lab["label"], lab["source"] == "hand"
             item = {"id": bid, "keys": keys, "start": idx[keys[0]].started, "end": end_of(idx[keys[-1]]),
                     "recordings": len(keys), "games": len(games),
                     "maps": list(dict.fromkeys(MAP_NAMES.get(g.get("map"), g.get("map") or "?") for g in games)),
                     "label": kind, "label_by_hand": by_hand, "status": status or "pending",
                     "url": st.get("url"), "title": st.get("title"), "custom_title": st.get("custom_title", ""),
                     "privacy": st.get("privacy", ""), "eec": bool(st.get("eec") or st.get("eec_res")),
-                    "res": {k: st["eec_res"].get(k) for k in ("standing", "teams", "pts")} if st.get("eec_res") else None,
+                    "res": {k: res.get(k) for k in ("standing", "teams", "pts")} if res else None,
+                    "label_source": lab["source"], "label_why": lab["why"],
+                    "eec_check": {k: chk[k] for k in ("verdict", "why", "lobby", "games")} if chk else None,
+                    "eec_rejected": st.get("eec_rejected", []),
                     "why": "", "progress": ""}
             if item["status"] in ("waiting", "uploading"):
                 item["progress"] = self.status

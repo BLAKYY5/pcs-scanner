@@ -420,6 +420,202 @@ def test_eec_results():
         pass
 
 
+def _eec_rec(folder, name, started, end, games):
+    """A recording with a scan, for the EEC drop tests."""
+    import json
+    v = folder / f"Apex Legends_{name}.mp4"
+    v.write_bytes(b"x")
+    os.utime(v, (end, end))
+    v.with_suffix(".scan").mkdir()
+    (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps({"games": games}))
+    return retention.Entry(path=str(v), started=started, status="scanned")
+
+
+def _eec_export(t0, pcs_pois, other_pois=("THERMAL STATION (8)", "CITY HALL (1)")):
+    """A November-style export: one pick per team and map (WE then ED, two games each), map_pick_id on every row."""
+    maps = ["mp_rr_desertlands_hu", "mp_rr_desertlands_hu", "mp_rr_district", "mp_rr_district"]
+    matches = []
+    for i, mn in enumerate(maps):
+        def row(team, player, place, kills, pid):
+            return {"team_name": team, "player_name": player, "team_placement": place, "kills": kills,
+                    "map_pick_id": str(pid)}
+        m = 0 if i < 2 else 1
+        matches.append({"map_name": mn, "match_start": str(int(t0 + 1500 + i * 1800)), "data": [
+            row("PCS", "a", 2, 3, 500 + m), row("PCS", "b", 2, 1, 500 + m), row("Other", "c", 1, 2, 600 + m)]})
+    draft = [{"team": "PCS", "poi": pcs_pois[0], "pick_num": 4, "seed": 2},
+             {"team": "PCS", "poi": pcs_pois[1], "pick_num": 25, "seed": 2},
+             {"team": "Other", "poi": other_pois[0], "pick_num": 1, "seed": 1},
+             {"team": "Other", "poi": other_pois[1], "pick_num": 22, "seed": 1}]
+    return {"matches": matches[::-1], "draft": draft}       # file order isn't play order
+
+
+def _scrim_game(t, mp, poi, jump=60.0):
+    return {"map": mp, "mode": "scrim", "tStart": t, "drop": {"spots": [{"poi": poi, "kind": "ours"}]},
+            "landing": {"poi": poi, "exitAtExact": t + jump}}
+
+
+def test_eec_drops_confirm_scrims():
+    """EEC drops (draft joined by map_pick_id): EEC wins for display, ours kept when it differs; a block whose games
+    fit the lobby by map, time and drop is labelled scrims from EEC, with the reason kept."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 8 * 3600
+    lobby = eec.from_export(_eec_export(t0, ("STAGING (3)", "CITY HALL (1)")), "lobbies_4_abc123_scores.json")
+    assert [g["map"] for g in lobby["games"]] == ["WE", "WE", "ED", "ED"]          # sorted by start
+    assert lobby["drops"] == "export, pick id"
+    assert [g["drops"]["pcs"] for g in lobby["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
+    assert lobby["games"][0]["drops"]["other"] == "Thermal Station"
+    res = eec.results(lobby, "PCS")
+    assert [g["drop"] for g in res["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
+    assert eec.compare_drop("WE", "Staging", "we-staging")[0] == "same"
+    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] in ("near", None)
+    assert eec.compare_drop("WE", "Staging", "we-thermal")[0] == "different"
+    assert eec.compare_drop("WE", "Skyhook West", "we-staging")[0] is None          # not in our map table: no verdict
+    assert eec.compare_drop("WE", "", "we-staging")[0] is None
+
+    folder = TMP / f"eecdrops-{time.time_ns()}"
+    folder.mkdir()
+    # 4 games 30 min apart; the third one landed somewhere else than EEC says (EEC wins, ours kept)
+    # game 2 has no drop screen read (mode unknown): EEC still counts it
+    games = [_scrim_game(1440, "WE", "we-staging"), _scrim_game(3240, "WE", "we-staging"),
+             _scrim_game(5040, "ED", "ed-old-town"), _scrim_game(6840, "ED", "ed-city-hall")]
+    games[1].update(mode="unknown", drop=None)
+    idx = {"s": _eec_rec(folder, "s", t0, t0 + 8000, games)}
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    got = up.add_results(lobby)
+    assert got["block"] == ["s"] and got["check"]["verdict"] == "match", got["check"]
+    chk = got["check"]
+    assert [(x["eecGame"], x["check"]) for x in chk["games"]] == [(1, "same"), (2, "same"), (3, "different"), (4, "same")]
+    assert chk["why"] == "EEC drops agree with where we landed in 3 of 4 game(s)"
+    g3 = chk["games"][2]
+    assert (g3["eecDrop"], g3["ourDrop"], g3["ourFrom"]) == ("City Hall", "Old Town", "landing")
+    # label: scrims from EEC (even a block with no drop screen read would be)
+    lab = labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk)
+    assert lab == {"label": "scrims", "source": "eec", "why": chk["why"]}, lab
+    q = up.queue()[0]
+    assert q["label"] == "scrims" and q["label_source"] == "eec" and q["eec_check"]["verdict"] == "match"
+    # description: EEC's drop, ours in brackets where it differs
+    title, desc, n = youtube.describe(s, idx, ["s"], [0.0], results=res, kind="scrims", check=chk)
+    assert "Game 1 · World's Edge · Staging · 2nd" in desc, desc
+    assert "Game 3 · E-District · City Hall (scan: Old Town) · 2nd" in desc, desc
+    # a block with no drop screen at all: the scan says nothing, EEC says scrims
+    bare = [dict(g, mode="unknown", drop=None) for g in games]
+    idx2 = {"b": _eec_rec(folder, "b", t0, t0 + 8000, bare)}
+    chk2 = youtube.check_of(idx2, ["b"], res)
+    assert chk2["verdict"] == "match"
+    assert labels.of_block([idx2["b"].path], [youtube.scan_of(idx2["b"])]) == (None, False)
+    assert labels.of_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2) == ("scrims", False)
+    # a label set by hand still wins
+    labels.set_label(idx2["b"].path, "ranked")
+    assert labels.explain_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2)["source"] == "hand"
+    labels.FILE.unlink(missing_ok=True)
+
+
+def test_eec_drops_refuse_tournament():
+    """A tournament the same evening, played while the lobby's games ran (times fit) but from other drops, is not
+    that scrim: the lobby goes to the block whose drops agree; the tournament keeps its scan label and says why."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 10 * 3600
+    lobby = eec.from_export(_eec_export(t0, ("STAGING (3)", "CITY HALL (1)")), "lobbies_4_abc123_scores.json")
+    res = eec.results(lobby, "PCS")
+    folder = TMP / f"eectour-{time.time_ns()}"
+    folder.mkdir()
+    # tournament block: 2 WE games, jumps 10 min before the EEC games 1 and 2, landed at Thermal Station
+    tour = _eec_rec(folder, "t", t0, t0 + 1500, [_scrim_game(800, "WE", "we-thermal"), _scrim_game(1340, "WE", "we-thermal")])
+    # the scrim block, 15 min later
+    scrim = _eec_rec(folder, "s", t0 + 2400, t0 + 9000,
+                     [_scrim_game(1440 - 2400 + 1800, "WE", "we-staging"), _scrim_game(5040 - 2400, "ED", "ed-city-hall")])
+    idx = {"t": tour, "s": scrim}
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False,
+                          yt_gap_min=10)
+    assert youtube.blocks(idx, 10) == [["t"], ["s"]]
+    chk_t = youtube.check_of(idx, ["t"], res)
+    assert chk_t["verdict"] == "mismatch" and "differ" in chk_t["why"], chk_t
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    got = up.add_results(lobby)
+    assert got["block"] == ["s"] and got["check"]["verdict"] == "match", got     # the tournament block was passed over
+    assert up.state["t"]["eec_rejected"][0]["url"] == res["url"]
+    assert "eec_res" not in up.state["t"] and up.results_of("t") is None
+    lab = labels.explain_block([tour.path], [youtube.scan_of(tour)], chk_t)
+    assert lab["label"] == "scrims" and lab["source"] == "scan" and "not the EEC lobby" in lab["why"], lab
+    # results attached to the tournament block by an older version: no longer used for it (title, scrims-only)
+    up.state["t"]["eec_res"] = res
+    assert up.usable(["t"]) == (None, chk_t) and up.results_of("t") is None
+    q = {b["id"]: b for b in up.queue()}
+    assert q["t"]["res"] is None and q["t"]["eec_check"]["verdict"] == "mismatch" and q["s"]["label_source"] == "eec"
+    # only the tournament in the recordings: the lobby is refused, with the reason
+    rec.idx = {"t": tour}
+    up2 = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    up2.state = {}
+    try:
+        up2.add_results(lobby)
+        raise AssertionError("tournament got the scrim lobby")
+    except RuntimeError as e:
+        assert "doesn't match your games" in str(e), e
+    # times that don't fit at all (a block in the lobby's window, games an hour off): not that lobby either
+    off = _eec_rec(folder, "o", t0 - 1500, t0 + 1000, [_scrim_game(10, "WE", "we-staging")])
+    assert youtube.check_of({"o": off}, ["o"], res)["verdict"] == "mismatch"
+
+
+def test_eec_drops_missing_fallback():
+    """No EEC drops (an export without a draft, an old Loot Book document) or nothing to compare: the old behaviour
+    (lobby by time, label from the scan)."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 12 * 3600
+    export = _eec_export(t0, ("STAGING (3)", "CITY HALL (1)"))
+    export.pop("draft")
+    lobby = eec.from_export(export, "lobbies_4_abc123_scores.json")
+    assert lobby["drops"] == "" and all(not g["drops"] for g in lobby["games"])
+    res = eec.results(lobby, "PCS")
+    assert all(g["drop"] == "" for g in res["games"])
+    folder = TMP / f"eecnone-{time.time_ns()}"
+    folder.mkdir()
+    # landed somewhere else than the (unknown) drop: no verdict without EEC drops
+    games = [_scrim_game(1440, "WE", "we-thermal"), _scrim_game(5040, "ED", "ed-old-town")]
+    idx = {"s": _eec_rec(folder, "s", t0, t0 + 8000, games)}
+    chk = youtube.check_of(idx, ["s"], res)
+    assert chk["verdict"] == "unknown" and chk["why"] == "the EEC results have no drops (game times fit)", chk
+    assert labels.of_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk) == ("scrims", False)
+    lab = labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk)
+    assert lab["source"] == "scan" and lab["why"].startswith("the scrim drop screen was read"), lab
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    assert up.add_results(lobby)["block"] == ["s"] and up.results_of("s")["pts"] == res["pts"]
+    title, desc, n = youtube.describe(s, idx, ["s"], [0.0], results=res, kind="scrims", check=chk)
+    assert "Game 1 · World's Edge · Thermal · 2nd" in desc, desc            # our drop screen, as before
+    # an old Loot Book document (no draft): its drops are not used
+    doc = {"url": "u", "games": [{"start": t0 + 1500, "map": "WE",
+                                  "rows": [["PCS", "a", "", 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, "Thermal Station"]]}]}
+    assert eec.from_hub_doc(doc)["games"][0]["drops"] == {}
+    doc["draft"] = [{"team": "PCS"}]
+    assert eec.from_hub_doc(doc)["games"][0]["drops"] == {"pcs": "Thermal Station"}
+    # no EEC results at all: labels as before
+    assert youtube.check_of(idx, ["s"], None) is None
+    assert labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], None)["label"] == "scrims"
+    assert labels.explain(idx["s"].path, youtube.scan_of(idx["s"]))["source"] == "scan"
+
+
 def test_night_uploads_and_shutdown():
     """Night mode: uploads only at night when idle; PC turned off only after a night upload with nothing left."""
     import datetime as dt
@@ -676,17 +872,72 @@ def test_settings_limits():
 def test_quality_setting():
     import json
     from pcs_recorder import obs as obsmod
-    assert settings.Settings(bitrate_mbps=4).clamp().bitrate_mbps == settings.MIN_MBPS == 8
-    assert settings.Settings(bitrate_mbps=500).clamp().bitrate_mbps == settings.MAX_MBPS
+    assert settings.Settings(bitrate_mbps=4, bitrate_auto=False).clamp().bitrate_mbps == settings.MIN_MBPS == 8
+    assert settings.Settings(bitrate_mbps=500, bitrate_auto=False).clamp().bitrate_mbps == settings.MAX_MBPS
     s = settings.Settings(folder=str(TMP / "q"))
     assert s.bitrate_mbps == 12 and 5 < s.gb_per_hour < 6
     obsmod.write_config(s, "av1_texture_amf", 2560, 1440)
     enc = json.loads((obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json").read_text())
-    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 12000 and enc["keyint_sec"] == 1, enc
+    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 10000 and enc["keyint_sec"] == 1, enc   # AV1: 10
     ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
     assert "RecEncoder=av1_texture_amf" in ini and "FPSInt=60" in ini and "BaseCX=2560" in ini
-    s.bitrate_mbps = 16
+    s.set_bitrate(16)
     assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
+
+
+def test_bitrate_per_encoder():
+    """Coach's decision (18 Nov 2026): AV1 records at 10 Mbit/s, HEVC and H.264 at 12. Players who never changed
+    the bitrate get it (a saved 12, the old default, follows the encoder); a value set by hand is kept."""
+    import json
+    from pcs_recorder import obs as obsmod
+    for enc in ("av1_texture_amf", "obs_nvenc_av1_tex", "jim_av1_nvenc", "obs_qsv11_av1"):
+        assert settings.default_mbps(enc) == 10, enc
+    for enc in ("h265_texture_amf", "h264_texture_amf", "obs_nvenc_hevc_tex", "jim_hevc_nvenc", "obs_nvenc_h264_tex",
+                "jim_nvenc", "obs_qsv11_hevc", "obs_qsv11_v2", ""):
+        assert settings.default_mbps(enc) == 12, enc
+    prof = obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json"
+    # a new player: the encoder test tries each candidate at its own bitrate, the setting follows the one picked
+    s = settings.Settings(folder=str(TMP / "br"))
+    for enc, mbps in (("av1_texture_amf", 10), ("h265_texture_amf", 12), ("obs_nvenc_h264_tex", 12)):
+        obsmod.write_config(s, enc, 1920, 1080)
+        assert json.loads(prof.read_text())["bitrate"] == mbps * 1000, enc
+        s.encoder = enc
+        assert s.clamp().bitrate_mbps == mbps and s.bitrate_auto, enc
+        assert obsmod.config_signature(s).startswith(f"{enc}|{mbps}|")
+    s.encoder = "av1_texture_amf"
+    assert s.clamp().bitrate_mbps == 10 and 4 < s.gb_per_hour < 5
+    # Settings page: the shown value comes back with every save (unchanged = still automatic)
+    s.set_bitrate(10)
+    assert s.bitrate_auto and s.bitrate_mbps == 10
+    s.set_bitrate(14)                                       # the player's own value: kept on any encoder
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 14
+    s.encoder = "h264_texture_amf"
+    assert s.clamp().bitrate_mbps == 14 and s.mbps_for("av1_texture_amf") == 14
+    s.encoder = "av1_texture_amf"
+    s.set_bitrate(12)                                       # 12 on AV1 is a choice too
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 12
+    s.set_bitrate(10)                                       # back to the recommendation: follows the encoder again
+    assert s.bitrate_auto
+    # existing recorder.json files (saved before this setting): only the old default moves
+    saved_file = settings.SETTINGS_FILE
+    try:
+        settings.SETTINGS_FILE = TMP / "br" / "recorder.json"
+        for enc, old, want, auto in (("av1_texture_amf", 12, 10, True), ("obs_nvenc_hevc_tex", 12, 12, True),
+                                     ("h264_texture_amf", 12, 12, True), ("av1_texture_amf", 16, 16, False),
+                                     ("av1_texture_amf", 8, 8, False), ("h264_texture_amf", 10, 10, False)):
+            settings.SETTINGS_FILE.write_text(json.dumps({"encoder": enc, "bitrate_mbps": old}), encoding="utf-8")
+            s = settings.load()
+            assert (s.bitrate_mbps, s.bitrate_auto) == (want, auto), (enc, old, s.bitrate_mbps, s.bitrate_auto)
+            on_disk = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+            assert on_disk["bitrate_mbps"] == want and on_disk["bitrate_auto"] is auto
+            s2 = settings.load()                            # loaded again: unchanged (the migration runs once)
+            assert (s2.bitrate_mbps, s2.bitrate_auto) == (want, auto)
+        # an AV1 player who moved to 12 by hand after this version keeps 12
+        settings.SETTINGS_FILE.write_text(json.dumps({"encoder": "av1_texture_amf", "bitrate_mbps": 12,
+                                                      "bitrate_auto": False}), encoding="utf-8")
+        assert settings.load().bitrate_mbps == 12
+    finally:
+        settings.SETTINGS_FILE = saved_file
 
 
 def test_obs_password_renewed_once_while_obs_closed():
@@ -2323,6 +2574,28 @@ def test_audio_tracks_cut_after_recording():
     part.write_bytes(b"half")
     assert tracks.clean_parts([folder]) == 1 and not part.exists()
     assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
+
+
+def test_failed_recording_never_deletes_other_files():
+    """A recording without a file (path "") is older than the keep limit: retention removes the entry only, never the
+    files of the folder the app runs in (Path("") is the working folder; its glob matched every file there)."""
+    work = TMP / f"workdir-{time.time_ns()}"
+    work.mkdir()
+    keep = [make_file(work, n, 10) for n in ("PCS-Scanner.exe", "notes.txt", ".gitignore")]
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        idx = {"f": retention.Entry(path="", started=time.time() - 30 * 86400, status="failed"),
+               "g": retention.Entry(path="relative.mp4", started=time.time() - 30 * 86400, status="failed")}
+        assert retention.files_of(idx["f"]) == [] and retention.files_of(idx["g"]) == []
+        removed = retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert all(p.exists() for p in keep), [p.name for p in work.iterdir()]
+        assert [n for n, _ in removed] == [""] and idx == {}                # entries gone, no file deleted
+        idx = {"new": retention.Entry(path="", started=time.time() - 3600, status="failed")}
+        retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert "new" in idx                                                 # a fresh failure stays listed
+    finally:
+        os.chdir(old_cwd)
 
 
 def _scanner():
