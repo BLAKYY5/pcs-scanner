@@ -130,11 +130,19 @@ def _dbg_line(m, y):
         s += '-' if cell[3:6, 1:6].sum(1).max() >= 4 and cell[7:9].sum() <= 2 else '?'
     return s
 
+# POS line: exactly three numbers from the line's start. The decimal point is often read as '-' or '?', the gap before
+# a minus as '-'. Anything else unreadable makes the line unread instead of wrong (Nov 2026, checked against the
+# minimap position): a '?' at the start is a lost minus sign or first digit (?1607 for 11607), a '?' inside the
+# digits split a number (15?63 for 15863.63; -7?77-31-27333 for -7377.31 27333). Wrong POS reads 1.9 % -> 0.4 %, reads kept 89 % -> 83 %.
+_POSN = r'(-?\d{1,6})[.\-?](\d\d)'
+POSRX = re.compile(r'^ *' + _POSN + r'[ -]' + _POSN + r'[ -]' + _POSN + r'(?!\d)')   # a gap cell between the numbers
+
 def read_dbg(a):
     m = white(a[40:110, 0:300], 170)
-    pos = [float(x + '.' + y) for x, y in NUMRX.findall(_dbg_line(m, 22))]
+    p = POSRX.match(_dbg_line(m, 22))
+    pos = [float(p.group(2 * i + 1) + '.' + p.group(2 * i + 2)) for i in range(3)] if p else None
     vel = [float(x + '.' + y) for x, y in NUMRX.findall(_dbg_line(m, 50))]
-    return (pos[:3] if len(pos) >= 3 else None), (vel[0] if vel else None)
+    return pos, (vel[0] if vel else None)
 
 # ---------- timeline ----------
 def _end(pts):
@@ -179,12 +187,14 @@ def ring_segments(samples):
 
 def clean_pos(samples):
     """The minus sign is the most fragile glyph (thin line, bright skies). For x and y, take the sign most
-    neighbours (+-5 samples, similar magnitude) agree on."""
+    neighbours (+-5 samples, similar magnitude) agree on; not within 3000 units of 0, where the player can really be
+    on either side (a landing at x 748 was turned to -748)."""
     P = [s for s in samples if s[4] is not None]
     for k in (4, 5):
         signs = [1 if s[k] >= 0 else -1 for s in P]
         for i in range(len(P)):
             a = abs(P[i][k]); vote = 0
+            if a < 3000: continue        # near 0 the player really crosses between signs: the neighbours can't tell
             for j in range(max(0, i - 5), min(len(P), i + 6)):
                 if j != i and abs(abs(P[j][k]) - a) < 3000: vote += signs[j]
             if vote and (1 if vote > 0 else -1) != signs[i]: P[i][k] = -P[i][k]
@@ -192,20 +202,23 @@ def clean_pos(samples):
 
 def landing(samples, t0):
     """Own view only. On the dropship VEL reads 0.00; jumping makes it > 0; free fall > 600.
-    exit = first moving sample of the run that leads into free fall; touchdown = height stops dropping."""
-    P = [(s[0], s[4], s[5], s[6], s[7]) for s in samples if s[0] >= t0 and not s[3] and s[4] is not None]
-    if len(P) < 4: return None
+    exit = first moving sample of the run that leads into free fall; touchdown = height stops dropping.
+    VEL counts from frames whose POS line was not read too (the POS reader refuses doubtful lines)."""
+    P = [(s[0], s[4], s[5], s[6], s[7]) for s in samples if s[0] >= t0 and not s[3] and (s[4] is not None or s[7] is not None)]
+    if sum(1 for p in P if p[1] is not None) < 4: return None
     fall = next((i for i in range(1, len(P)) if (P[i][4] or 0) > 600), None)
     if fall is None: return None
     ex = fall
     while ex > 0 and (P[ex - 1][4] is None or P[ex - 1][4] > 50): ex -= 1   # unreadable speed: keep walking back
+    Z = [i for i in range(fall, len(P)) if P[i][1] is not None]            # touchdown: frames with a position
     land = None
-    for i in range(fall, len(P) - 1):
-        dz = (P[i + 1][3] - P[i][3]) / max(P[i + 1][0] - P[i][0], 0.2)
-        if dz > -60 and (P[i][4] or 0) < 600: land = i; break
+    for a, b in zip(Z, Z[1:]):
+        dz = (P[b][3] - P[a][3]) / max(P[b][0] - P[a][0], 0.2)
+        if dz > -60 and (P[a][4] or 0) < 600: land = a; break
     if land is None: return None
+    prev = max((i for i in range(land) if P[i][1] is not None), default=land)
     return {'exitWindow': [round(P[ex - 1][0], 2) if ex > 0 else None, round(P[ex][0], 2)], 'exitAt': round(P[ex][0], 2),
-            'exitZ': P[ex][3], 'landWindow': [round(P[land - 1][0], 2), round(P[land][0], 2)], 'landedAt': round(P[land][0], 2),
+            'exitZ': P[ex][3], 'landWindow': [round(P[prev][0], 2), round(P[land][0], 2)], 'landedAt': round(P[land][0], 2),
             'x': P[land][1], 'y': P[land][2], 'z': P[land][3]}
 
 def _corner(path, a, b, W=2560, H=1440, cw=420, ch=570):
