@@ -30,6 +30,7 @@ def selftest(out):
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
         import pcs_recorder.minimaps, pcs_recorder.squadpaths   # noqa: F401
+        import pcs_recorder.hubbackup   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
@@ -344,6 +345,8 @@ def main():
             show_running_instance()                        # the running one shows its window instead
         return
     core.cleanup_staged()
+    if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
+        threading.Thread(target=core.clean_old_unpacked, daemon=True, name='clean-temp').start()
     try:
         from pcs_recorder import runtime as autorec
     except Exception:
@@ -444,6 +447,8 @@ def main():
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)
             try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the team link, same rhythm
             except Exception: logging.exception('team link')
+            try: b.hub_backup_tick()                       # coach's hub key: the hub's nightly zip, once a day
+            except Exception: logging.exception('hub backup copy')
             # tell the player once per new version with a corner message (not during a game: it waits)
             if b.update and told != b.update[0] and b.auto and not b.update_blocked():
                 told = b.update[0]
