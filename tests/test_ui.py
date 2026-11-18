@@ -2043,7 +2043,7 @@ def test_review_respawns_like_kills():
     folder.mkdir(parents=True, exist_ok=True)
     rec = folder / "Apex Legends_2026.11.17-20.10.mp4"
     rec.write_bytes(b"x" * 1000)
-    old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}                # a scan from before PR #52
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}              # a game scanned before PR #52
     (rec.with_suffix(".scan")).mkdir(exist_ok=True)
     (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [RESPAWN_GAME, old]}))
     feed = {"lines": [{"t": 380.0, "jpg": "", "event": "kill", "killer": {"side": "squad", "hue": 39}, "victim": {"side": "other"}}]}
