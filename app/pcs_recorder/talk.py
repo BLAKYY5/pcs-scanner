@@ -219,8 +219,12 @@ def add_pending(items: list[dict]) -> None:
     save_pending(keep + items)
 
 
-def send_pending(url: str) -> int:
-    """Upload the review talk waiting here; a file the hub took is deleted. Returns how many were sent."""
+REFUSED_CODES = (400, 403, 404, 413)
+
+
+def send_pending(url: str, stop=None) -> int:
+    """Upload the review talk waiting here; a file the hub took is deleted. Returns how many were sent. Files over
+    50 MB go in parts (hub 0.6; resumable, `stop()` pauses between parts); a hub before 0.6 gets one request."""
     if not url or not hub.get_key():
         return 0
     items, sent = load_pending(), 0
@@ -233,18 +237,30 @@ def send_pending(url: str) -> int:
             left.append(it)
             continue
         try:
-            with open(f, "rb") as fh:
-                r = hub.request(url, "POST", "/api/session-audio", timeout=600,
-                                data={"session": it["session"], "track": it["track"], "segments": json.dumps(it["segments"])},
-                                files={"file": (f.name, fh, "audio/mp4")})
-            if r.status_code in (400, 403, 404, 413):  # the hub won't take it: kept on this PC, not asked again
-                log.warning("hub refused review talk %s: %s", f.name, r.status_code)
-                it["refused"] = r.status_code
-                left.append(it)
-                continue
-            hub._check(r)
+            done = None
+            if f.stat().st_size > hub.PART_FILE:      # big: in parts (Cloudflare's 100 MB limit), resumable
+                done = hub.send_in_parts(url, "session-audio", f, {"session": it["session"], "track": it["track"],
+                                                                    "segments": it["segments"]}, stop=stop)
+            if done is None:                         # small, or a hub before 0.6: one request
+                with open(f, "rb") as fh:
+                    r = hub.request(url, "POST", "/api/session-audio", timeout=600,
+                                    data={"session": it["session"], "track": it["track"],
+                                          "segments": json.dumps(it["segments"])},
+                                    files={"file": (f.name, fh, "audio/mp4")})
+                if r.status_code in REFUSED_CODES:   # the hub won't take it: kept on this PC, not asked again
+                    log.warning("hub refused review talk %s: %s", f.name, r.status_code)
+                    it["refused"] = r.status_code
+                    left.append(it)
+                    continue
+                hub._check(r)
+            else:
+                hub._forget_done(url, "session-audio", [f])
         except hub.HubError as e:
-            log.info("review talk not sent yet: %s", e)
+            if e.kind == "http" and e.status in REFUSED_CODES and e.code and e.code != "bad_checksum":
+                log.warning("hub refused review talk %s: %s %s", f.name, e.status, e.code)
+                it["refused"] = e.status
+            else:
+                log.info("review talk not sent yet: %s", e)
             left.append(it)
             continue
         f.unlink(missing_ok=True)
