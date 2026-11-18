@@ -3,6 +3,7 @@ Run:  python tests/test_ui.py
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -467,39 +468,96 @@ def test_delete_and_sound_levels():
 
 
 def test_coach_role():
-    """Coach only for the coach's Google account; importing recordings by hand is the coach's."""
-    b = pcs_server.Backend()
-    srv = pcs_server.Server(b)
-    srv.start()
-    real_build, real_drive = dict(core.BUILD), core.drive_service
-    core.BUILD["coach"] = "coach@example.com"
-    who = {"email": "player@example.com"}
-
-    class Svc:
-        def about(self):
-            class A:
-                def get(self, fields):
-                    class X:
-                        def execute(self):
-                            return {"user": {"emailAddress": who["email"]}}
-                    return X()
-            return A()
-    core.drive_service = lambda interactive=True: Svc()
+    """Coach only for the coach's hub key (the hub's /api/me says coach); importing recordings by hand is the coach's.
+    No coach address is built into the app."""
+    assert "coach" not in core.BUILD
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup(PLAYER_KEY)
     try:
         code, r, _ = call(srv, "/api/settings", {"role": "Coach", "player": "Xno"})
         assert code == 403 and "coach" in r["error"].lower()
         assert core.SETTINGS["player"] == "Xno" and core.SETTINGS.get("role") != "Coach"   # the rest was saved
         assert call(srv, "/api/library/add", {"paths": []})[0] == 403
-        who["email"] = "Coach@Example.com"
+        hub.set_key(GOOD_KEY)
         code, st, _ = call(srv, "/api/settings", {"role": "Coach"})
-        assert code == 200 and st["coach"] is True and st["role"] == "Coach"
+        assert code == 200 and st["coach"] is True and st["role"] == "Coach", st
         assert call(srv, "/api/library/add", {"paths": []})[0] == 200
         code, st, _ = call(srv, "/api/settings", {"role": "IGL"})
         assert st["coach"] is False
+        hub.set_key(None)                                    # no key: never the coach
+        assert call(srv, "/api/settings", {"role": "Coach"})[0] == 403
     finally:
-        core.BUILD.clear(); core.BUILD.update(real_build); core.drive_service = real_drive
         core.SETTINGS["role"] = ""
+        _backup_done(srv, fake)
+
+
+def test_coach_email_from_settings():
+    """The scans folder on Drive is shared with the coach's address the player typed in Settings, once per address;
+    without one nothing is shared."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    calls = {"share": [], "folders": []}
+
+    class Svc:
+        def files(self):
+            class F:
+                def list(self, **kw):
+                    return _X({"files": [{"id": f} for f in calls["folders"]]})
+
+                def create(self, body, fields):
+                    calls["folders"].append("F1")
+                    return _X({"id": "F1"})
+            return F()
+
+        def permissions(self):
+            class P:
+                def create(self, fileId, sendNotificationEmail, body):
+                    calls["share"].append((fileId, body["emailAddress"]))
+                    return _X({})
+            return P()
+
+    class _X:
+        def __init__(self, v):
+            self.v = v
+
+        def execute(self):
+            return self.v
+    try:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == []          # no address: not shared
+        code, r, _ = call(srv, "/api/settings", {"coach_email": "not an address"})
+        assert code == 500 and "address" in r["error"]
+        code, st, _ = call(srv, "/api/settings", {"coach_email": " coach@example.com "})
+        assert code == 200 and st["coachEmail"] == "coach@example.com"
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == [("F1", "coach@example.com")]
+        core.scans_folder(Svc())
+        assert len(calls["share"]) == 1                                           # once per address
+        call(srv, "/api/settings", {"coach_email": "new.coach@example.com"})
+        core.scans_folder(Svc())
+        assert calls["share"][-1] == ("F1", "new.coach@example.com") and len(calls["share"]) == 2
+    finally:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        core.save_settings()
         srv.stop()
+
+
+def test_no_personal_email_in_app():
+    """No personal address in what the exe is built from (a security review found the coach's address in the exe):
+    app/, scanner/ and the build workflow. Only obviously fake examples are allowed."""
+    root = Path(__file__).resolve().parent.parent
+    allowed = ("example.com", "example.org", "example.net", "users.noreply.github.com")
+    found = []
+    files = [p for d in ("app", "scanner") for p in (root / d).rglob("*")
+             if p.is_file() and p.suffix.lower() in (".py", ".js", ".html", ".css", ".json", ".txt", ".md", ".yml")]
+    files += list((root / ".github").rglob("*.yml"))
+    for p in files:
+        for m in re.finditer(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})",
+                             p.read_text(encoding="utf-8", errors="replace")):
+            if not m.group(1).lower().endswith(allowed):
+                found.append(f"{p.relative_to(root)}:{m.group(1)}")      # domain only: never print the address
+    assert not found, "personal email address in: " + ", ".join(found)
+    wf = (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
 def test_team_link_weapon_icons():

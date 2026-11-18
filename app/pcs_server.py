@@ -753,7 +753,7 @@ class Backend:
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
-                "teamLink": core.SETTINGS.get("team_link", ""),
+                "teamLink": core.SETTINGS.get("team_link", ""), "coachEmail": core.SETTINGS.get("coach_email", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
@@ -987,24 +987,20 @@ class Backend:
 
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
-        """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
-        checked against the Google account this app is signed in with, not just the menu choice."""
+        """The Coach role is only for the coach's hub key: the team hub says which key is the coach's (`/api/me`),
+        checked here, not just the menu choice. No address or account name is built into the app."""
         self.coach = False
-        if core.SETTINGS.get("role") != "Coach":
+        if core.SETTINGS.get("role") != "Coach" or not self.auto:
             return False
-        want = (core.BUILD.get("coach") or "").strip().lower()
         try:
-            svc = core.drive_service(interactive=False)
-            email = svc.about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"] if svc else ""
+            self.coach = self.hubbackup.role(ask=True) == "coach"
         except Exception:
-            email = ""
-        self.coach = bool(want) and email.strip().lower() == want
+            self.coach = False
         return self.coach
 
     def require_coach(self) -> None:
         if not getattr(self, "coach", False):
-            raise PermissionError("Only the coach can do this (Settings → Role: Coach, signed in with the coach's "
-                                  "Google account).")
+            raise PermissionError("Only the coach can do this (Settings → Role: Coach, with the coach's hub key).")
 
     def save_settings(self, body: dict) -> None:
         body = dict(body)
@@ -1051,6 +1047,11 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "coach_email" in body:
+            mail = str(body["coach_email"] or "").strip()
+            if mail and not core.valid_email(mail):
+                raise ValueError("The coach's Google address doesn't look right. Check it and try again.")
+            core.SETTINGS["coach_email"] = mail
         if "team_link" in body:
             link = str(body["team_link"]).strip()
             if link and not core.drive_link_id(link):
@@ -1066,8 +1067,8 @@ class Backend:
             if body["role"] == "Coach" and not self.check_coach():
                 core.SETTINGS["role"] = before
                 core.save_settings()
-                raise PermissionError("Coach is reserved for the coach's Google account. Sign in with it first "
-                                      "(Settings → Google Drive), then choose Coach again.")
+                raise PermissionError("Coach is reserved for the coach's hub key. Add it first "
+                                      "(Settings → Team hub), then choose Coach again.")
             if body["role"] != "Coach":
                 self.coach = False
         core.save_settings()

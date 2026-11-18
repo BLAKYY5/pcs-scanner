@@ -474,4 +474,4 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
     close()                                                # also closes any error box OBS left open
     log.warning("no encoder worked on %r (tried %s)", names, tried)
     raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}): "
-                       + "; ".join(why) + ". Send Blakey this message and the OBS logs (Settings → About → Recorder logs).")
+                       + "; ".join(why) + ". Send your coach this message and the OBS logs (Settings → About → Recorder logs).")
