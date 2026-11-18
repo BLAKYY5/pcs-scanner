@@ -8,6 +8,8 @@ The key
 - The app's own page only ever gets it masked (`pcs_…abcd`).
 - The coach sends players a sign-in link `http://<hub>/login#key=pcs_...`: pasting it gives the key, and the
   address when none is set yet.
+- Or a single-use invite link `http://<hub>/join#code=pcsi_...`: the app sends the code to the hub (in the request
+  body, no key), gets the player's new key once, and keeps it and the link's address. The code is never logged.
 
 Answers
 - 401 (no key / wrong or revoked key): the hub is marked "key refused"; no upload is tried again until the key
@@ -78,6 +80,66 @@ def parse_key(text) -> tuple[str | None, str | None]:
         if u.scheme in ("http", "https") and netloc and "@" not in netloc and m:
             return m.group(1), f"{u.scheme}://{netloc}"
     return None, None
+
+
+def parse_invite(text) -> tuple[str | None, str | None]:
+    """A single-use invite link from the coach, `http(s)://host:port/join#code=pcsi_...`: (code, hub address of the
+    link). (None, None) when it isn't one. The code is never logged nor repeated anywhere."""
+    t = str(text or "").strip()
+    if "://" not in t:
+        return None, None
+    try:
+        u = urlsplit(t)
+        netloc = u.netloc
+    except ValueError:
+        return None, None
+    m = re.search(r"(?:^|&)code=(pcsi_[A-Za-z0-9_-]{43})(?:&|$)", unquote(u.fragment))
+    if u.scheme in ("http", "https") and netloc and "@" not in netloc and m:
+        return m.group(1), f"{u.scheme}://{netloc}"
+    return None, None
+
+
+INVITE_USED = "If you opened this link in a browser first, paste the app link it showed you."
+TOO_MANY = "Too many tries, try again later."
+
+
+def _no_secrets(text: str) -> str:
+    """A hub's text with anything that looks like a key or an invite code taken out."""
+    return re.sub(r"pcsi?_[A-Za-z0-9_-]{8,}", "…", str(text or ""))[:200]
+
+
+def redeem(url: str, code: str) -> str:
+    """Use an invite: POST /api/invites/redeem {"code"} with no key and no cookie. Returns the new key (made by the
+    hub now and given only this once). Raises HubError with the text for the player; never the code."""
+    import requests
+    try:
+        r = requests.post(url + "/api/invites/redeem", json={"code": code}, timeout=TIMEOUT, allow_redirects=False)
+    except requests.RequestException as e:
+        raise HubError(f"the team hub didn't answer ({e.__class__.__name__})", "network") from None
+    detail, error = "", ""
+    try:
+        d = r.json()
+        if isinstance(d, dict):
+            detail = _no_secrets(d.get("detail")) if isinstance(d.get("detail"), str) else ""
+            error = str(d.get("error") or "")
+    except ValueError:
+        d = None
+    if r.status_code == 200:
+        key = str((d or {}).get("key") or "") if isinstance(d, dict) else ""
+        if not KEY_RE.fullmatch(key):
+            raise HubError("The team hub's answer had no key. Ask your coach for a new link.", "http", 200)
+        log.info("team hub: invite used")
+        return key
+    log.info("team hub: invite not taken (%s %s)", r.status_code, error[:40])
+    if r.status_code == 429:
+        raise HubError(TOO_MANY, "wait", 429)
+    if r.status_code == 400 and error == "invalid_code":
+        raise HubError(((detail or "This invite link doesn't work.").rstrip() + " " + INVITE_USED).strip(), "http", 400)
+    if r.status_code == 409:
+        raise HubError(detail or "A key with that name already exists. Ask your coach.", "http", 409)
+    if r.status_code == 404:
+        raise HubError("This hub doesn't take invite links yet. Ask your coach for the sign-in link.", "http", 404)
+    raise HubError(f"the team hub answered {r.status_code}" + (f": {detail}" if detail else ""), "http", r.status_code)
 
 
 def mask(key: str | None) -> str:

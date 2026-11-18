@@ -112,7 +112,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   every 10 s while Apex runs unless the player uses the window, never while hidden.
 - **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, auto-record (second, so the OBS download and
   encoder test run while the player does the rest), team hub (one paste of the coach's sign-in link →
-  `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one), Google (optional once
+  `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite
+  link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once;
+  `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is
+  never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log), Google (optional once
   on the hub). Shown until name + auto-record + (hub or Google) are done, or hidden. Never switches comms on: consent
   stays in Settings. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
@@ -218,8 +221,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
-  built on the coach's PC. Players get it through Settings → Team link (a Google Drive "Anyone with the link"
-  file, re-checked every 6 hours, saved in the data folder). `drive.file` sign-in can't read a file someone else
+  built on the coach's PC. Players get it from the team hub when it has one (`pcs_recorder/weaponicons.py`:
+  `/api/db/weaponicons/current`, 404 = none; `/_blob/<asset>` downloaded with the key only when the asset id changes,
+  checked with `icons_valid`, a refused asset is not downloaded again; the Team link is then optional), else through
+  Settings → Team link (a Google Drive "Anyone with the link" file). Re-checked every 6 hours, saved in the data folder. `drive.file` sign-in can't read a file someone else
   shared, which is why it is a pasted link. No file = no weapon names, scan otherwise unchanged.
 - **Legend select screen**: `pcs_hud.Legends` recognises the squad roster at the top left before a game (ranked:
   rank badges left of the slots; other modes: no badges, roster 114 px further left). A screen seen for 8 s to

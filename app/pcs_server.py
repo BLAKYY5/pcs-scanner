@@ -244,11 +244,19 @@ class Backend:
             self.say(f'Version {u[0]} is available: press "Update" at the top right.')
 
     def sync_icons(self, min_age_s: float = 0, tell: bool = False) -> str:
-        """Fetch the weapon icons from the team link (Settings). Says something only when they changed, or
-        when the player just pasted the link (tell)."""
+        """Fetch the weapon icons: from the team hub when it has them (pcs_recorder.weaponicons; "hub:<status>"),
+        else from the team link (Settings), as before. Says something only when they changed, or when the player
+        just pasted the link (tell)."""
         if time.time() - getattr(self, "icons_checked", 0) < min_age_s:
             return "skipped"
         self.icons_checked = time.time()
+        from pcs_recorder import weaponicons
+        url = self.auto.s.hub_url if self.auto else ""
+        hs, htext = weaponicons.sync(url, core.ICONS_F, core.icons_valid)
+        if htext:
+            self.say(htext)
+        if hs in ("updated", "same") or (hs in ("error", "bad") and weaponicons.from_hub(url, core.ICONS_F)):
+            return "hub:" + hs                              # the hub's copy stays; the team link isn't needed
         status, text = core.fetch_icons()
         if text and (tell or status == "updated"):
             self.say(text)
@@ -728,6 +736,7 @@ class Backend:
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
                 "teamLink": core.SETTINGS.get("team_link", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
+                "iconsFromHub": self.icons_from_hub(),     # then the team link is optional
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "hub": self.hub_state(),
@@ -752,14 +761,52 @@ class Backend:
             a.rec.next_upload = 0                          # results waiting for the hub: try now
         return res
 
+    def icons_from_hub(self) -> bool:
+        from pcs_recorder import weaponicons
+        return weaponicons.from_hub(self.auto.s.hub_url if self.auto else "", core.ICONS_F)
+
+    def _icons_soon(self) -> None:
+        """The hub (or its key) changed: look for its weapon icons now, in the background."""
+        self._icons_thread = threading.Thread(target=self.sync_icons, args=(0, False), daemon=True)
+        self._icons_thread.start()
+
+    def _use_invite(self, url: str, code: str) -> None:
+        """Redeem a single-use invite and keep the key it gives and the link's address (replacing an old address:
+        the key works only on that hub). Raises hub.HubError with the player's text; never the code."""
+        from pcs_recorder import hub, settings as st
+        a = self.auto
+        key = hub.redeem(url, code)
+        hub.set_key(key)                                     # saved at once: the hub gives it only this once
+        if a.s.hub_url != url:
+            a.s.hub_url = url
+            hub.reset()
+        st.save(a.s)
+        a.rec.next_upload = 0
+
     def hub_join(self, link: str) -> dict:
-        """First-run setup: the sign-in link from the coach (hub address + key in one paste) is saved and tested at
-        once. The link's address replaces the one set (the player pasted the coach's link on purpose). The link is
-        never logged nor repeated in an answer or an error."""
+        """First-run setup: the sign-in link from the coach (hub address + key in one paste), or a single-use invite
+        link (`/join#code=`, redeemed for a key), is saved and tested at once. The link's address replaces the one
+        set (the player pasted the coach's link on purpose). The link is never logged nor repeated in an answer or
+        an error."""
         from pcs_recorder import hub
         a = self.auto
         if not a:
             raise RuntimeError("Auto-record isn't available in this build")
+        code, inv_url = hub.parse_invite(link)
+        if code:
+            try:
+                self._use_invite(inv_url, code)
+            except hub.HubError as e:
+                res = {"ok": False, "text": "Hub not reachable" if e.kind == "network" else str(e)}
+                if e.kind == "network":
+                    res["tailscale"] = tailscale_state(inv_url)
+                return res
+            res = self.hub_test()
+            if res.get("ok"):
+                self._icons_soon()
+            else:
+                res["tailscale"] = tailscale_state(a.s.hub_url)
+            return res
         key, url = hub.parse_key(link)
         if not key:
             raise ValueError("That isn't the link from your coach. Copy the whole link and paste it again.")
@@ -767,7 +814,9 @@ class Backend:
             raise ValueError("Paste the whole link from your coach: it has the hub address in it.")
         self._save_settings({"hub_url": url or a.s.hub_url, "hub_key": link})
         res = self.hub_test()
-        if not res.get("ok"):
+        if res.get("ok"):
+            self._icons_soon()
+        else:
             res["tailscale"] = tailscale_state(a.s.hub_url)
         return res
 
@@ -977,7 +1026,17 @@ class Backend:
         new_key, link_url, remove_key = None, None, False
         if "hub_key" in body:
             raw = body.pop("hub_key")
-            if raw is None:
+            code, inv_url = hub.parse_invite(raw) if raw is not None else (None, None)
+            if code:                                         # a single-use invite: redeemed now, key and address kept
+                if not self.auto:
+                    raise RuntimeError("Auto-record isn't available in this build")
+                try:
+                    self._use_invite(inv_url, code)
+                except hub.HubError as e:
+                    raise ValueError("Hub not reachable" if e.kind == "network" else str(e)) from None
+                body.pop("hub_url", None)                    # the invite's address wins over the field
+                self._icons_soon()
+            elif raw is None:
                 remove_key = True
             elif str(raw).strip():
                 new_key, link_url = hub.parse_key(raw)
@@ -1024,6 +1083,8 @@ class Backend:
             if a.s.hub_url != hub_before:
                 hub.reset()
                 a.rec.next_upload = 0
+            if a.s.hub_url and (new_key or a.s.hub_url != hub_before):
+                self._icons_soon()                           # the hub may have the weapon icons
             if getattr(a.s, "yt_enabled", False) and not yt_before:
                 a.s.yt_since = time.time()                 # only blocks recorded from now on
                 st.save(a.s)
