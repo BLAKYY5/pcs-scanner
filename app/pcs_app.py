@@ -29,7 +29,7 @@ def selftest(out):
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
-        import pcs_recorder.minimaps, pcs_recorder.weaponicons   # noqa: F401
+        import pcs_recorder.minimaps, pcs_recorder.squadpaths, pcs_recorder.weaponicons   # noqa: F401
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))

@@ -123,6 +123,7 @@ async function renderWatch() {
     <div class="wt-stage" id="wtStage"><canvas class="wt-ink" id="wtInk"></canvas><div class="wt-dot" id="wtDot" hidden></div></div>
     <div class="card wt-bar" id="wtControls"></div>
     <div class="wt-side">
+      <div id="wtMap"></div>
       <div class="wt-members" id="wtMembers"></div>
       <div class="wt-lists" id="wtLists"></div>
     </div>
@@ -205,6 +206,8 @@ function drawAll() {
   drawLists(st);
   drawPointer();
   layout();
+  // the large view's player on the map (minimap.js): a click there moves the coach's moment, or a player's own view
+  if (window.wtMapSetup) wtMapSetup($('#wtMap'), st, t => isCoach() ? control('seek', {t}) : ownSet(t, viewPlaying(WT.snap.state)));
 }
 
 function povKey(st) { return st.gameKey + '|' + st.povs.map(p => p.player + ':' + (p.video || '')).join(','); }
@@ -416,6 +419,7 @@ function syncTick() {
   const st = WT.snap && WT.snap.state; if (!st || page !== 'watch' || document.hidden) return;   // hidden: idle
   const T = viewTime(st), playing = viewPlaying(st), now = performance.now() / 1000;
   updateTime();
+  if (window.wtMapTick) wtMapTick(T);                       // this tick is 4 per second and stops while hidden
   for (const [name, x] of Object.entries(WT.yt)) {
     if (!x.ready) continue;
     const y = x.y, p = x.pov, big = name === st.focus;
