@@ -1148,10 +1148,11 @@ function renderSettings() {
       <div class="form">
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
         <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub', 'Coach'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select>
-          <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s Google account.'}</small></label>
+          <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s hub key.'}</small></label>
         <div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
+        <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>
         <label class="field wide"><span>Team link</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="Paste the Google Drive link from your coach">
           <small>Lets the scan name the weapons in the kill feed. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
       </div></section>
@@ -1238,7 +1239,7 @@ function renderSettings() {
       </div></section>` : '<div class="notice">Auto-record isn\'t available in this build.</div>'}
     <section class="card section"><h2>About</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · encoder ' + esc(r.encoder) : ''}</span>
-        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to Blakey if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
+        <span class="row">${r ? '<button class="btn small ghost" id="f-retest" title="Test the graphics card\'s encoders again, e.g. after a driver or graphics card change">Test encoder again</button><button class="btn small ghost" id="f-obslogs" title="The recorder\'s log files, to send to your coach if recording fails">Recorder logs</button>' : ''}<button class="btn small ghost" id="f-results">Open results folder</button><button class="btn small ghost" id="f-quit">Quit PCS Scanner</button></span></div></section>`;
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + gbHour(q.value) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
@@ -1303,7 +1304,7 @@ function askUnsaved(target) {
   $('[data-a="save"]', box).focus();
 }
 function settingsBody() {
-  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim()};
+  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim(), coach_email: $('#f-coach_email').value.trim()};
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
