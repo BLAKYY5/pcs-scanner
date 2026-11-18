@@ -258,6 +258,39 @@ def test_recorder_settings_and_start_with_windows():
     assert st.Settings().start_with_windows is True                  # on by default
 
 
+def test_bitrate_setting_per_encoder():
+    """Settings → Quality shows the encoder's bitrate (AV1 10, HEVC / H.264 12); saving the page unchanged keeps
+    it automatic, another value is the player's own."""
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    a.s = st.Settings(folder=str(TMP / "recs"), encoder="av1_texture_amf").clamp()
+    b = pcs_server.Backend(a)
+    b.set_start_with_windows = lambda on: None
+    st_save = st.save
+    st.save = lambda s: s.clamp()                   # no recorder.json written by this test
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        r = state["recorder"]
+        assert code == 200 and r["settings"]["bitrate_mbps"] == 10 and r["bitrateDefault"] == 10 and r["bitrateAuto"]
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 10, "keep_days": 5})
+        assert code == 200 and a.s.bitrate_auto and state["recorder"]["settings"]["bitrate_mbps"] == 10
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 15})
+        assert code == 200 and not a.s.bitrate_auto and state["recorder"]["bitrateAuto"] is False
+        a.s.encoder = "obs_nvenc_hevc_tex"                  # e.g. "Test encoder again" on a new card
+        a.s.clamp()
+        code, state, _ = call(srv, "/api/state")
+        assert state["recorder"]["settings"]["bitrate_mbps"] == 15 and state["recorder"]["bitrateDefault"] == 12
+        call(srv, "/api/settings", {"bitrate_mbps": 12})    # back to the recommendation: automatic again
+        assert a.s.bitrate_auto and a.s.bitrate_mbps == 12
+    finally:
+        srv.stop()
+        st.save = st_save
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "bitrateTip(r)" in js and "AV1 10, HEVC / H.264 12" in js and "12 is recommended." not in js
+
+
 def test_voice_app_setting():
     """Settings → Voice app: saved through the API; "other" needs a program name, never a path."""
     from pcs_recorder import settings as st

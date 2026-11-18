@@ -676,17 +676,72 @@ def test_settings_limits():
 def test_quality_setting():
     import json
     from pcs_recorder import obs as obsmod
-    assert settings.Settings(bitrate_mbps=4).clamp().bitrate_mbps == settings.MIN_MBPS == 8
-    assert settings.Settings(bitrate_mbps=500).clamp().bitrate_mbps == settings.MAX_MBPS
+    assert settings.Settings(bitrate_mbps=4, bitrate_auto=False).clamp().bitrate_mbps == settings.MIN_MBPS == 8
+    assert settings.Settings(bitrate_mbps=500, bitrate_auto=False).clamp().bitrate_mbps == settings.MAX_MBPS
     s = settings.Settings(folder=str(TMP / "q"))
     assert s.bitrate_mbps == 12 and 5 < s.gb_per_hour < 6
     obsmod.write_config(s, "av1_texture_amf", 2560, 1440)
     enc = json.loads((obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json").read_text())
-    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 12000 and enc["keyint_sec"] == 1, enc
+    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 10000 and enc["keyint_sec"] == 1, enc   # AV1: 10
     ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
     assert "RecEncoder=av1_texture_amf" in ini and "FPSInt=60" in ini and "BaseCX=2560" in ini
-    s.bitrate_mbps = 16
+    s.set_bitrate(16)
     assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
+
+
+def test_bitrate_per_encoder():
+    """Coach's decision (18 Nov 2026): AV1 records at 10 Mbit/s, HEVC and H.264 at 12. Players who never changed
+    the bitrate get it (a saved 12, the old default, follows the encoder); a value set by hand is kept."""
+    import json
+    from pcs_recorder import obs as obsmod
+    for enc in ("av1_texture_amf", "obs_nvenc_av1_tex", "jim_av1_nvenc", "obs_qsv11_av1"):
+        assert settings.default_mbps(enc) == 10, enc
+    for enc in ("h265_texture_amf", "h264_texture_amf", "obs_nvenc_hevc_tex", "jim_hevc_nvenc", "obs_nvenc_h264_tex",
+                "jim_nvenc", "obs_qsv11_hevc", "obs_qsv11_v2", ""):
+        assert settings.default_mbps(enc) == 12, enc
+    prof = obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json"
+    # a new player: the encoder test tries each candidate at its own bitrate, the setting follows the one picked
+    s = settings.Settings(folder=str(TMP / "br"))
+    for enc, mbps in (("av1_texture_amf", 10), ("h265_texture_amf", 12), ("obs_nvenc_h264_tex", 12)):
+        obsmod.write_config(s, enc, 1920, 1080)
+        assert json.loads(prof.read_text())["bitrate"] == mbps * 1000, enc
+        s.encoder = enc
+        assert s.clamp().bitrate_mbps == mbps and s.bitrate_auto, enc
+        assert obsmod.config_signature(s).startswith(f"{enc}|{mbps}|")
+    s.encoder = "av1_texture_amf"
+    assert s.clamp().bitrate_mbps == 10 and 4 < s.gb_per_hour < 5
+    # Settings page: the shown value comes back with every save (unchanged = still automatic)
+    s.set_bitrate(10)
+    assert s.bitrate_auto and s.bitrate_mbps == 10
+    s.set_bitrate(14)                                       # the player's own value: kept on any encoder
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 14
+    s.encoder = "h264_texture_amf"
+    assert s.clamp().bitrate_mbps == 14 and s.mbps_for("av1_texture_amf") == 14
+    s.encoder = "av1_texture_amf"
+    s.set_bitrate(12)                                       # 12 on AV1 is a choice too
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 12
+    s.set_bitrate(10)                                       # back to the recommendation: follows the encoder again
+    assert s.bitrate_auto
+    # existing recorder.json files (saved before this setting): only the old default moves
+    saved_file = settings.SETTINGS_FILE
+    try:
+        settings.SETTINGS_FILE = TMP / "br" / "recorder.json"
+        for enc, old, want, auto in (("av1_texture_amf", 12, 10, True), ("obs_nvenc_hevc_tex", 12, 12, True),
+                                     ("h264_texture_amf", 12, 12, True), ("av1_texture_amf", 16, 16, False),
+                                     ("av1_texture_amf", 8, 8, False), ("h264_texture_amf", 10, 10, False)):
+            settings.SETTINGS_FILE.write_text(json.dumps({"encoder": enc, "bitrate_mbps": old}), encoding="utf-8")
+            s = settings.load()
+            assert (s.bitrate_mbps, s.bitrate_auto) == (want, auto), (enc, old, s.bitrate_mbps, s.bitrate_auto)
+            on_disk = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+            assert on_disk["bitrate_mbps"] == want and on_disk["bitrate_auto"] is auto
+            s2 = settings.load()                            # loaded again: unchanged (the migration runs once)
+            assert (s2.bitrate_mbps, s2.bitrate_auto) == (want, auto)
+        # an AV1 player who moved to 12 by hand after this version keeps 12
+        settings.SETTINGS_FILE.write_text(json.dumps({"encoder": "av1_texture_amf", "bitrate_mbps": 12,
+                                                      "bitrate_auto": False}), encoding="utf-8")
+        assert settings.load().bitrate_mbps == 12
+    finally:
+        settings.SETTINGS_FILE = saved_file
 
 
 def test_obs_password_renewed_once_while_obs_closed():

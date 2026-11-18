@@ -738,6 +738,7 @@ class Backend:
         a = self.auto
         rec = None
         if a:
+            from pcs_recorder.settings import default_mbps
             used, n = a.rec.usage()
             s = a.s
             rec = {"enabled": s.enabled, "status": a.rec.status, "recording": a.rec.current is not None,
@@ -745,6 +746,7 @@ class Backend:
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
+                   "bitrateDefault": default_mbps(s.encoder), "bitrateAuto": bool(getattr(s, "bitrate_auto", True)),
                    "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
@@ -1080,7 +1082,10 @@ class Backend:
             hub_before = a.s.hub_url
             for k in REC_FIELDS:
                 if k in body:
-                    setattr(a.s, k, body[k])
+                    if k == "bitrate_mbps" and hasattr(a.s, "set_bitrate"):
+                        a.s.set_bitrate(body[k])           # the encoder's default unless the player picks another
+                    else:
+                        setattr(a.s, k, body[k])
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st

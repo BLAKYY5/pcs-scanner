@@ -172,7 +172,7 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
         "FPSType=1", "FPSInt=60", "AutoRemux=true", ""]), encoding="utf-8")
     # constant bitrate (predictable file sizes for the folder limit), keyframe every second
     # (the scanner seeks on keyframes). CBR and these keys are understood by AMD, NVIDIA and Intel encoders.
-    (prof / "recordEncoder.json").write_text(json.dumps(encoder_settings(encoder, s.bitrate_mbps)))
+    (prof / "recordEncoder.json").write_text(json.dumps(encoder_settings(encoder, s.mbps_for(encoder))))
     gl = CONFIG / "global.ini"
     gl.write_text("\n".join([
         "[General]", "FirstRun=true", "EnableAutoUpdates=false", "",
@@ -299,7 +299,7 @@ def window_apps() -> list[dict]:
 def config_signature(s: Settings) -> str:
     """What needs an OBS restart when it changes (OBS reads encoder settings only at start-up).
     The voice app is added only when it isn't Discord, so existing installs keep the same signature."""
-    sig = f"{s.encoder}|{s.bitrate_mbps}|{s.folder}|{','.join(s.tracks())}|{s.mic_device}"
+    sig = f"{s.encoder}|{s.mbps_for(s.encoder)}|{s.folder}|{','.join(s.tracks())}|{s.mic_device}"
     if s.voice_app != "discord":
         sig += "|voice=" + "+".join(s.voice_exes())
     return sig
