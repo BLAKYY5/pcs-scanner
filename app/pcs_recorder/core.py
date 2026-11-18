@@ -112,6 +112,7 @@ class Recorder:
         self.paused = False                      # a scan was stopped because Apex runs (goes on when it closes)
         self.resumed: set[str] = set()           # recordings whose scan was stopped for Apex (no new message)
         self.next_upload = 0.0
+        self.upload_in_thread, self.upload_thread = True, None    # tests may set False: uploads inside tick()
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.apex = False                        # Apex running at the last tick()
@@ -159,8 +160,7 @@ class Recorder:
             if self.scan_proc is None:
                 self._next_in_queue(apex)
             if not apex and self.scan_proc is None:
-                self._retry_uploads()
-                self._retry_hub()
+                self._kick_uploads()             # own thread: never holds the tick (a game start)
                 if self.youtube:
                     try:
                         self.youtube.tick()
@@ -459,6 +459,32 @@ class Recorder:
                 self._begin_scan(k, queued=True)
 
     # ---------------------------------------------------------- upload
+    def _kick_uploads(self) -> None:
+        """Results to the hub in their own thread, so an upload (a 50 MB part on a slow line) never holds the
+        recorder's tick: a game starting is seen and recorded at once, and the part in flight is stopped
+        (`Sender.stop`; the hub keeps what it got, the next try goes on from there)."""
+        if not self.upload_in_thread:
+            self._upload_round()
+            return
+        t = self.upload_thread
+        if t is not None and t.is_alive():
+            return
+        self.upload_thread = threading.Thread(target=self._upload_round, daemon=True, name="hub-upload")
+        self.upload_thread.start()
+
+    def _upload_round(self) -> None:
+        try:
+            self._retry_uploads()
+            self._retry_hub()
+        except Exception:
+            log.exception("upload round failed")
+
+    def wait_uploads(self, timeout: float = 30) -> None:
+        """Tests: wait for the upload thread started by tick()."""
+        t = self.upload_thread
+        if t is not None:
+            t.join(timeout)
+
     def _retry_uploads(self) -> None:
         if self.clock() < self.next_upload:          # after a failure, try again once a minute
             return
@@ -468,48 +494,58 @@ class Recorder:
             out = Path(e.path).with_suffix(".scan")
             files = result_files(out)
             try:
-                where = self.hub.upload(files)
+                where = self.hub.upload(files)       # no lock held: the recorder goes on meanwhile
             except Exception as ex:
                 log.info("results not sent, will retry: %s", ex)
-                self.next_upload = self.clock() + 60
-                if getattr(ex, "kind", "") == "paused":           # Apex started between two parts: goes on later
-                    return
-                reach = getattr(ex, "reach", "")
-                if reach:                                         # can't reach the hub: one Activity line, no pop-up
-                    from .hub import reason
-                    note = f"not sent yet: {reason(ex)}"
-                    if e.note != note:
-                        e.note = note
-                        retention.save_index(self.idx)
-                    if self.hub_told != reach:
-                        self.hub_told = reach
-                        say = getattr(self.ui, "activity", None)
-                        text = f"Results wait for the team hub: {ex}. They are sent by themselves when it works."
-                        say(text) if say else self.ui.notify("Results not sent yet", text)
-                    return
-                import re
-                note = f"not sent yet: {ex}"
-                # tell the player once per reason, not every minute (a new reason, e.g. "key refused", is told)
-                if re.sub(r"\d+", "", e.note) != re.sub(r"\d+", "", note):
-                    e.note = note
-                    retention.save_index(self.idx)
-                    self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon "
-                                   "as it works.", sticky=True, action=getattr(ex, "action", None))
+                with self.lock:
+                    self._upload_failed(e, ex)
                 return
-            hub_note = getattr(where, "hub_note", "")          # what the hub answered: "Sent to hub: 11 games"
-            e.status, e.note = "uploaded", hub_note
-            self.hub_told = ""
-            retention.save_index(self.idx)
-            hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
-            self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),
-                              "why": getattr(where, "hub_why", "") if hub_ok is False else "",
-                              "drive": {True: "sent", False: "failed"}.get(drive_ok, "")}
-            self._save_sent()
+            with self.lock:
+                self._upload_done(key, e, where)
             self.hub.report(self._report(key))
             to = " and ".join(where) if where else "the team"
-            later = " It goes to the hub by itself as soon as it works." if hub_ok is False else " Nothing else to do."
+            hub_note = getattr(where, "hub_note", "")
+            later = (" It goes to the hub by itself as soon as it works." if getattr(where, "hub_ok", None) is False
+                     else " Nothing else to do.")
             self.ui.notify("Results sent", f"{summary(e)}: sent to {to}." + (f" {hub_note}." if hub_note else "")
                            + later)
+
+    def _upload_failed(self, e, ex) -> None:
+        self.next_upload = self.clock() + 60
+        if getattr(ex, "kind", "") == "paused":               # Apex started during a part: goes on later
+            return
+        reach = getattr(ex, "reach", "")
+        if reach:                                             # can't reach the hub: one Activity line, no pop-up
+            from .hub import reason
+            note = f"not sent yet: {reason(ex)}"
+            if e.note != note:
+                e.note = note
+                retention.save_index(self.idx)
+            if self.hub_told != reach:
+                self.hub_told = reach
+                say = getattr(self.ui, "activity", None)
+                text = f"Results wait for the team hub: {ex}. They are sent by themselves when it works."
+                say(text) if say else self.ui.notify("Results not sent yet", text)
+            return
+        import re
+        note = f"not sent yet: {ex}"
+        # tell the player once per reason, not every minute (a new reason, e.g. "key refused", is told)
+        if re.sub(r"\d+", "", e.note) != re.sub(r"\d+", "", note):
+            e.note = note
+            retention.save_index(self.idx)
+            self.ui.notify("Results not sent yet", f"{ex}. They are kept and sent automatically as soon "
+                           "as it works.", sticky=True, action=getattr(ex, "action", None))
+
+    def _upload_done(self, key: str, e, where) -> None:
+        hub_note = getattr(where, "hub_note", "")              # what the hub answered: "Sent to hub: 11 games"
+        e.status, e.note = "uploaded", hub_note
+        self.hub_told = ""
+        retention.save_index(self.idx)
+        hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
+        self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),
+                          "why": getattr(where, "hub_why", "") if hub_ok is False else "",
+                          "drive": {True: "sent", False: "failed"}.get(drive_ok, "")}
+        self._save_sent()
 
     def _save_sent(self) -> None:
         try:
@@ -557,17 +593,19 @@ class Recorder:
                 from .hub import reason
                 why = reason(ex)
                 log.info("hub retry failed (%s): %s", why, ex)
-                if getattr(ex, "kind", "network") in ("network", "http"):
-                    self.hub_fails += 1
-                    self.hub_next = self.clock() + self.HUB_BACKOFF[min(self.hub_fails, len(self.HUB_BACKOFF)) - 1]
-                    self.hub_fail_url = self.s.hub_url
-                self._hub_why([k for k in pending if self.sent[k].get("hub") == "pending"], why)
+                with self.lock:
+                    if getattr(ex, "kind", "network") in ("network", "http"):
+                        self.hub_fails += 1
+                        self.hub_next = self.clock() + self.HUB_BACKOFF[min(self.hub_fails, len(self.HUB_BACKOFF)) - 1]
+                        self.hub_fail_url = self.s.hub_url
+                    self._hub_why([k for k in pending if self.sent[k].get("hub") == "pending"], why)
                 break
-            self.hub_fails, self.hub_next = 0, 0.0
-            self.sent[key].update(hub="sent", why="")
-            e.note = note or "Sent to hub"
-            retention.save_index(self.idx)
-            self._save_sent()
+            with self.lock:
+                self.hub_fails, self.hub_next = 0, 0.0
+                self.sent[key].update(hub="sent", why="")
+                e.note = note or "Sent to hub"
+                retention.save_index(self.idx)
+                self._save_sent()
             sent.append(key)
             self.hub.report(self._report(key))
         if sent:

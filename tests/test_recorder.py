@@ -815,7 +815,7 @@ def test_skip_and_offline_hub():
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
     assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
-    hub2.down = False; r2.next_upload = 0; r2.tick()
+    hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
 
@@ -852,6 +852,141 @@ def test_pause_never_stacks():
         if hub.uploads:
             break
     assert hub.uploads, "scan never finished after resume"
+
+
+def test_upload_part_never_delays_a_recording():
+    """A big file going to the hub in parts on a slow line: Apex starting starts the recording in the same tick
+    (the upload runs in its own thread), the part in flight stops at once, and once Apex closes the upload goes on
+    from what the hub already has, until the hub has the whole file."""
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import urlsplit, parse_qs
+    from pcs_recorder import hub as hubmod
+    from pcs_recorder.runtime import Sender
+    key = "pcs_" + "A" * 43
+    hubmod.set_key(key)
+    hubmod.reset()
+    old = (hubmod.PART_FILE, hubmod.PART_MAX)
+    hubmod.PART_FILE, hubmod.PART_MAX = 1024 * 1024, 16 * 1024 * 1024
+    PART = 16 * 1024 * 1024
+    st = {"data": b"", "size": 0, "reading": threading.Event(), "offsets": [], "cut": 0, "active": 0}
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def _send(self, code, obj):
+            raw = __import__("json").dumps(obj).encode()
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def _view(self):
+            return {"id": "up-" + "0" * 32, "received": len(st["data"]), "size": st["size"],
+                    "part_max": PART, "complete": len(st["data"]) == st["size"]}
+
+        def _go(self):
+            u = urlsplit(self.path)
+            n = int(self.headers.get("Content-Length") or 0)
+            if self.command == "PUT":                 # a slow line: 128 KB every 20 ms; a part kept when whole
+                off = int(parse_qs(u.query)["offset"][0])
+                st["offsets"].append(off)
+                if off != len(st["data"]):
+                    self.rfile.read(n)
+                    return self._send(409, dict(self._view(), error="offset_mismatch"))
+                got, left = b"", n
+                st["active"] += 1
+                while left:
+                    if len(st["data"]) >= PART and len(got) >= 1024 * 1024:
+                        st["reading"].set()               # the second part is on its way
+                    try:
+                        chunk = self.rfile.read(min(131072, left))
+                    except OSError:
+                        chunk = b""
+                    if not chunk:
+                        st["cut"] += 1
+                        st["active"] -= 1
+                        return                        # the app stopped the part: nothing of it kept
+                    got += chunk
+                    left -= len(chunk)
+                    time.sleep(0.02)
+                st["data"] += got
+                st["active"] -= 1
+                try:
+                    return self._send(200, self._view())
+                except OSError:
+                    return
+            body = self.rfile.read(n) if n else b""
+            if u.path == "/api/uploads" and self.command == "POST":
+                st["size"] = __import__("json").loads(body)["size"]
+                return self._send(200, self._view())
+            if u.path.startswith("/api/uploads/") and u.path.endswith("/finish"):
+                return self._send(200, {"scan_ids": [5], "imports": []})
+            if u.path.startswith("/api/uploads/"):
+                return self._send(200, self._view())
+            if u.path == "/api/scans":
+                return self._send(200, {"scan_ids": [4], "imports": [{"status": "imported", "games": 2}]})
+            return self._send(200, {"ok": True})
+
+        do_GET = do_POST = do_PUT = _go
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s = settings.load()
+        s.folder, s.enabled = str(TMP / f"vids-{time.time_ns()}"), True
+        s.hub_url = f"http://127.0.0.1:{srv.server_address[1]}"
+        v = make_file(s.folder_path, "Apex Legends_slow.mp4", UNIT)
+        out = v.with_suffix(".scan")
+        out.mkdir()
+        (out / (v.stem + ".scan.json")).write_text('{"games": [{"map": "SP"}]}')
+        (out / (v.stem + ".feed.json")).write_text("{}")
+        mic = out / (v.stem + ".mic.m4a")
+        mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI()
+        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
+        r.tick()                                                 # the upload starts in its own thread
+        assert st["reading"].wait(10), "the part never started"
+        apex["on"] = True
+        t0 = time.monotonic()
+        r.tick()                                                 # Apex starts while the part is on its way
+        took = time.monotonic() - t0
+        assert obs.rec and r.current is not None, "recording not started"
+        assert took < 1.0, f"the tick waited {took:.1f} s for the upload"
+        r.wait_uploads(1.0 - took)                               # the part in flight needs ~2 s more
+        assert not r.upload_thread.is_alive(), "the part in flight did not stop"
+        for _ in range(200):                                     # the hub reads what was already on the line
+            if not st["active"]:
+                break
+            time.sleep(0.05)
+        had = len(st["data"])
+        assert 0 < had < mic.stat().st_size and r.idx["k"].status == "scanned", (had, st)
+        apex["on"] = False
+        r._final_file = lambda p, wait_s=0: p
+        r.ui.answer = False                                      # no scan of the new recording in this test
+        r.tick()                                                 # game over: recording stops
+        r.next_upload = 0
+        for _ in range(40):
+            r.tick()
+            r.wait_uploads(30)
+            if r.idx["k"].status == "uploaded":
+                break
+        assert r.idx["k"].status == "uploaded", r.idx["k"].note
+        assert st["data"] == mic.read_bytes(), "the hub's copy differs"
+        assert st["offsets"].count(0) == 1, st["offsets"]                    # part 1 never sent again
+    finally:
+        hubmod.PART_FILE, hubmod.PART_MAX = old
+        hubmod.set_key(None)
+        hubmod.reset()
+        srv.shutdown()
+        srv.server_close()
 
 
 def test_mkv_duplicate_removed():
@@ -2280,11 +2415,11 @@ def test_hub_retried_when_only_drive_took_it():
     r._start = lambda: None                                                            # no recording in this test
     clock["t"] += 120; r.tick()
     assert len(hub.hub_calls) == 2                                                     # never while Apex runs
-    apex["on"] = False; r.tick()
+    apex["on"] = False; r.tick(); r.wait_uploads()
     assert len(hub.hub_calls) == 3 and r.hub_state("k0") == {"hub": "sent", "why": ""}
     assert r.idx["k0"].note == "Sent to hub: 2 games"
     assert any(t == "Sent to hub" and "2 games" in m for t, m, *_ in ui.notes), ui.notes
-    clock["t"] += 3600; r.tick(); r._retry_hub()
+    clock["t"] += 3600; r.tick(); r.wait_uploads(); r._retry_hub()
     assert len(hub.hub_calls) == 3                                                     # a 200 is never re-sent
     # after a restart the state is read back: still on the hub, nothing re-sent
     r2 = Recorder(r.s, FakeOBS(r.s.folder_path), hub, FakeUI(), fake_scan, is_apex_running=lambda: False)

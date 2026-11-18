@@ -3986,11 +3986,8 @@ def test_hub_uploads_resume():
         # Apex starts after the first part
         mic.write_bytes(os.urandom(int(3.5 * 1024 * 1024)))
         fake.seen.clear()
-        calls = {"n": 0}
-
         def apex():
-            calls["n"] += 1
-            return calls["n"] > 2                     # the start and one part, then Apex
+            return len(fake.puts()) >= 1              # Apex starts once the first part arrived
         try:
             hub.upload(fake.url, [scan, feed, mic], stop=apex)
             raise AssertionError("not paused")

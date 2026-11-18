@@ -576,6 +576,31 @@ def _json(r) -> dict:
         return {}
 
 
+class _Stopped(Exception):
+    """Raised from inside a part being sent: stops the request at once (not a network error)."""
+
+
+class _PartBody:
+    """One part's bytes, read by http.client in small blocks while it sends: `stop()` (Apex started) is asked at
+    most every 0.2 s and stops the request in flight, so a 50 MB part on a slow line never holds a game start."""
+
+    def __init__(self, data: bytes, stop=None):
+        self.data, self.pos, self.stop, self.asked = data, 0, stop, 0.0
+
+    def __len__(self) -> int:                       # requests sends Content-Length (no chunked encoding)
+        return len(self.data)
+
+    def read(self, n: int = -1) -> bytes:
+        if self.stop is not None and time.monotonic() - self.asked >= 0.2:
+            self.asked = time.monotonic()
+            if self.stop():
+                raise _Stopped()
+        n = len(self.data) - self.pos if n is None or n < 0 else n
+        out = self.data[self.pos:self.pos + n]
+        self.pos += len(out)
+        return out
+
+
 def send_in_parts(url: str, kind: str, f: Path, fields: dict | None = None, stop=None, tries: int = 3):
     """One file through /api/uploads: start (or carry on with the upload id kept from an earlier try), parts of at
     most 50 MB from where the hub is, finish. Returns the finish answer (= the one-shot route's answer), or None when
@@ -622,10 +647,12 @@ def send_in_parts(url: str, kind: str, f: Path, fields: dict | None = None, stop
                 if stop is not None and stop():
                     raise HubError(PAUSED, "paused")
                 fh.seek(received)
-                data = fh.read(min(part, size - received))
+                data = _PartBody(fh.read(min(part, size - received)), stop)
                 try:
                     r = request(url, "PUT", f"/api/uploads/{uid}?offset={received}", data=data, timeout=120,
                                 headers={"Content-Type": "application/octet-stream"})
+                except _Stopped:                     # Apex started during the part: the hub keeps what it got
+                    raise HubError(PAUSED, "paused") from None
                 except HubError as e:
                     if e.kind != "network" or fails + 1 >= tries:
                         raise                        # the id is kept: the next try goes on from the hub's count

@@ -162,7 +162,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   `.ts.net` / `.local` (`settings.hub_address`); Test switches an `http://` address the hub redirects to `https://`.
   Cloudflare refuses bodies over 100 MB: a file over 50 MB (mic tracks, review talk), or small files together over
   90 MB, goes through `/api/uploads` in parts of ≤ 50 MB (`hub.send_in_parts`), resumable after a lost answer or a
-  restart (ids in `hub-uploads.json`, never the key), paused between parts when Apex starts (`Sender.stop`); a hub
+  restart (ids in `hub-uploads.json`, never the key). Hub uploads run in their own thread (`Recorder._kick_uploads`),
+  never inside the tick: a game start is never delayed, and Apex starting stops the part in flight (`hub._PartBody`
+  asks `Sender.stop` while sending; the next try goes on from the hub's count); a hub
   without the route (404 without `not_found`, or 405) gets the one-shot request. Why the hub can't be reached
   (`hub.classify`, `reach` in the hub state): no internet (a name lookup of `www.msftconnecttest.com`, nothing sent),
   address wrong (name not found, bad certificate, a redirect that isn't to https), hub down (connection refused,
