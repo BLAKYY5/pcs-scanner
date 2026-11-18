@@ -11,18 +11,21 @@ with an upload mid-game. Old recordings are cleaned up after each session.
 """
 from __future__ import annotations
 
+import json
 import logging
 import subprocess
+from glob import escape as glob_escape
 import threading
 import time
 from pathlib import Path
 
-from . import crash, retention
+from . import crash, retention, stitch
 from .settings import Settings
 
 log = logging.getLogger("recorder")
 RECORDING_CHECK_S = 30          # after a recording starts, OBS must say it records (else a crash report)
 APEX_EXES = {"r5apex_dx12.exe", "r5apex.exe"}
+CRASH_LOOKBACK_S = 300          # a crash sign this long before Apex was seen closed counts for that recording
 
 
 def apex_running() -> bool:
@@ -128,6 +131,13 @@ class Recorder:
         self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
         self.silence_thread: threading.Thread | None = None
         self.cutter = None                       # audio tracks for the review (tests); default tracks.CUTTER
+        # short recordings and Apex crashes (stitch.py); the probes are replaced by fakes in tests
+        self.crash_probe = stitch.crash_signal       # (since, until) -> why Apex looks crashed, or ""
+        self.duration_probe = stitch.media_duration  # path -> seconds or None
+        self.end_probe = stitch.ended_in_game        # (path, seconds) -> in-game HUD at the end? None = can't tell
+        self.recycle = retention.to_recycle_bin
+        self.join_job: dict | None = None
+        self.js = stitch.load_state()
         # after a crash or restart: a "recording" is just finished; unfinished scans start again
         for k in sorted(self.idx, key=lambda k: self.idx[k].started):
             e = self.idx[k]
@@ -139,6 +149,7 @@ class Recorder:
             if e.nogame and not no_game(e):          # flagged by an older, less careful version: keep it
                 e.nogame = False
         retention.save_index(self.idx)
+        self._load_joins()
 
     # ---------------------------------------------------------- main loop step
     def tick(self) -> None:
@@ -156,6 +167,10 @@ class Recorder:
                 self._stop_and_offer_scan()
             elif apex and self.current is not None:
                 self._check_recording()
+            try:
+                self._join_tick(apex)
+            except Exception:
+                log.exception("short / crash check failed")
             self._manage_scan(apex)
             if self.scan_proc is None:
                 self._next_in_queue(apex)
@@ -195,6 +210,10 @@ class Recorder:
         self.status = "Recording Apex"
         self.rec_check_at = self.clock() + RECORDING_CHECK_S
         self.hub.report(self._report(key))
+        try:
+            self._restarted(key)
+        except Exception:
+            log.exception("restart check failed")
 
     def _check_recording(self) -> None:
         """Once, a little after the start: is OBS really recording? (A recording can "start" and never run: OBS
@@ -216,6 +235,7 @@ class Recorder:
     def _stop_and_offer_scan(self) -> None:
         key, self.current = self.current, None
         e = self.idx[key]
+        self.closed_at = self.clock()                # Apex was seen closed (before waiting for the file)
         stop_error = None
         try:
             path = self.obs.stop()
@@ -234,23 +254,335 @@ class Recorder:
         if e.path:
             self._write_events(key)
             self._start_silence_check(e.path, self.clock() - e.started)
-            self._queue_tracks(e.path)
         e.status = "recorded" if e.path else "failed"
         e.note = "" if e.path else "OBS didn't return a file"
         retention.save_index(self.idx)
         self.hub.report(self._report(key))
         self.status = "Waiting for Apex"
+        later = False
         if e.path:
-            mins = (self.clock() - e.started) / 60
-            size = retention.size_of(e) / 1e9
-            scan = self.ui.ask_scan(mins, size, self.s.auto_scan, self.s.scan_delay_s)
-            if scan:
-                self._begin_scan(key)
-            else:
-                e.status = "skipped"
-                retention.save_index(self.idx)
-                self.hub.report(self._report(key))
+            try:
+                later = self._after_recording(key)
+            except Exception:
+                log.exception("short / crash check failed: the recording is kept")
+                later = False
+        elif key in self.js["cont"]:                    # a continuation without a file: the parts stay as they are
+            for k in self.js["cont"].pop(key):
+                self._release(k)
+            stitch.save_state(self.js)
+        if e.path and not later:
+            self._queue_tracks(e.path)
+            self._offer_scan(key)
         self.cleanup()
+
+    def _offer_scan(self, key: str, minutes: float | None = None) -> None:
+        """The scan prompt after a session (Apex closed), or the queue when Apex runs again meanwhile."""
+        e = self.idx[key]
+        if self.apex:
+            if self.s.auto_scan:
+                e.status = "waiting"
+                if key not in self.queue:
+                    self.queue.append(key)
+                retention.save_index(self.idx)
+            return
+        mins = minutes if minutes is not None else (self.clock() - e.started) / 60
+        size = retention.size_of(e) / 1e9
+        scan = self.ui.ask_scan(mins, size, self.s.auto_scan, self.s.scan_delay_s)
+        if scan:
+            self._begin_scan(key)
+        else:
+            e.status = "skipped"
+            retention.save_index(self.idx)
+            self.hub.report(self._report(key))
+
+    # ---------------------------------------------------------- short sessions, Apex crashes (stitch.py)
+    def _activity(self, text: str) -> None:
+        """One line in Home → Activity, no corner message."""
+        say = getattr(self.ui, "activity", None)
+        if say:
+            say(text)
+        else:
+            log.info("%s", text)
+
+    def _after_recording(self, key: str) -> bool:
+        """Right after a session: True when the recording waits (a possible crash, too short) or is joined with the
+        recordings it continues, instead of the scan prompt now. A file that can't be read is never dropped."""
+        e = self.idx[key]
+        end = self.clock()
+        secs = end - e.started
+        chain = list(self.js["cont"].pop(key, None) or []) + [key]
+        chain = [k for k in chain if k in self.idx and self.idx[k].path]
+        dur = self.duration_probe(e.path)
+        closed = getattr(self, "closed_at", end)
+        proof = self.crash_probe(max(e.started, closed - CRASH_LOOKBACK_S), end + 60)
+        mid = None
+        if not proof and dur:
+            mid = self.end_probe(e.path, dur)
+        min_s = self.s.min_record_min * 60
+        short = (bool(min_s) and dur is not None and dur < min_s and secs < min_s + 60
+                 and key not in self.js["keep"])
+        log.info("recording %s: %s s, crash sign %r, ended in game %r", Path(e.path).name,
+                 f"{dur:.0f}" if dur else "?", proof, mid)
+        if proof or mid:
+            self._hold(key, chain, "crash", proof, mid, dur, end)
+            return True
+        if len(chain) > 1:
+            self._queue_join(chain)
+            return True
+        if short:
+            self._hold(key, chain, "short", "", mid, dur, end)
+            return True
+        stitch.save_state(self.js)
+        return False
+
+    def _hold(self, key, chain, kind, proof, mid, dur, end) -> None:
+        self.js["holds"][key] = {"chain": chain, "kind": kind, "proof": proof, "mid": mid, "dur": dur,
+                                 "end": end, "until": end + stitch.RESTART_S}
+        for k in chain:
+            self.idx[k].note = ("Waiting: Apex may restart" if kind == "crash"
+                                else f"Under {self.s.min_record_min} min: not kept unless Apex restarts")
+        retention.save_index(self.idx)
+        stitch.save_state(self.js)
+
+    def _restarted(self, key: str) -> None:
+        """Apex started again: does this recording continue one that ended abnormally a few minutes ago?"""
+        now = self.clock()
+        recent = [(h["end"], k) for k, h in self.js["holds"].items() if now - h["end"] <= stitch.RESTART_S]
+        if not recent:
+            return
+        _, hk = max(recent)
+        h = self.js["holds"].pop(hk)
+        chain = [k for k in h["chain"] if k in self.idx]
+        if h["kind"] == "short":                     # a crash sign may come late (Windows writes it after a while)
+            h["proof"] = (self.crash_probe(max(self.idx[hk].started, h["end"] - CRASH_LOOKBACK_S), now)
+                          if hk in self.idx else "")
+        if chain and (h["kind"] == "crash" or h["proof"]):
+            self.js["cont"][key] = chain
+            self.js["keep"] = sorted(set(self.js["keep"]) | set(chain) | {key})
+            for k in chain:
+                self.idx[k].note = "Joined with the next recording after Apex restarts"
+            retention.save_index(self.idx)
+            self._activity("Apex restarted after a crash: this recording will be joined with the one before.")
+        elif chain and h.get("mid") is None:         # couldn't read the end of the first: keep both as they are
+            self.js["keep"] = sorted(set(self.js["keep"]) | set(chain) | {key})
+            for k in chain:
+                self._release(k)
+        else:
+            if not all(self._drop_short(k, h.get("dur")) for k in chain):
+                self.js["holds"][hk] = dict(h, until=now)     # file busy: tried again once Apex closes
+        stitch.save_state(self.js)
+
+    def _release(self, key: str) -> None:
+        """A recording that waited is kept as it is: scanned like any other."""
+        e = self.idx.get(key)
+        if not e:
+            return
+        if key not in self.js["keep"]:
+            self.js["keep"].append(key)
+        e.note = ""
+        retention.save_index(self.idx)
+        self._queue_tracks(e.path)
+        self._offer_scan(key)
+
+    def _drop_short(self, key: str, dur: float | None = None) -> bool:
+        """A session too short to keep: its files (the app's own) to the Recycle Bin, one Activity line."""
+        e = self.idx.get(key)
+        if not e:
+            return True
+        mins = (dur or self.js["holds"].get(key, {}).get("dur") or 0) / 60
+        for f in retention.files_of(e):
+            try:
+                self.recycle(str(f))
+            except OSError as ex:
+                log.info("short recording not removed yet (%s): %s", f.name, ex)
+                return False
+        del self.idx[key]
+        retention.save_index(self.idx)
+        self.js["keep"] = [k for k in self.js["keep"] if k != key]
+        self._activity(f"Too short: not kept ({Path(e.path).name}"
+                       + (f", {mins:.0f} min" if mins >= 1 else ", under 1 min") + ")")
+        return True
+
+    def _queue_join(self, chain: list[str]) -> None:
+        if chain not in self.js["joins"]:
+            self.js["joins"].append(chain)
+        for k in chain:
+            self.idx[k].note = "Joining after Apex crash"
+        retention.save_index(self.idx)
+        stitch.save_state(self.js)
+
+    def _load_joins(self) -> None:
+        """At start: forget what refers to recordings that are gone; a continuation whose recording was cut by an
+        app restart is kept as it is; a join that was running starts again from the originals."""
+        js = self.js
+        js["holds"] = {k: h for k, h in js["holds"].items() if k in self.idx}
+        for key, chain in list(js["cont"].items()):
+            del js["cont"][key]
+            js["keep"] = sorted(set(js["keep"]) | set(chain) | {key})
+            for k in chain:
+                if k in self.idx:
+                    self.idx[k].note = ""
+        js["joins"] = [[k for k in c if k in self.idx] for c in js["joins"]]
+        js["joins"] = [c for c in js["joins"] if len(c) > 1]
+        for c in js["joins"]:
+            out, _ = stitch.join_paths(self.idx[c[0]].path)
+            for f in (out, out.with_suffix(".txt")):
+                try:
+                    f.unlink(missing_ok=True)                    # our own unfinished output
+                except OSError:
+                    pass
+        js["keep"] = [k for k in js["keep"] if k in self.idx]
+        stitch.save_state(js)
+
+    def waiting_keys(self) -> set[str]:
+        """Recordings held for a possible restart or waiting to be joined: not scanned, not cleaned up."""
+        out = set()
+        for k, h in self.js["holds"].items():
+            out |= {k, *h.get("chain", [])}
+        for c in list(self.js["cont"].values()) + self.js["joins"]:
+            out |= set(c)
+        return out
+
+    def _join_tick(self, apex: bool) -> None:
+        """Holds that ran out (no restart in time), then the joins: one at a time, never while Apex runs."""
+        now = self.clock()
+        if not apex:
+            for k, h in list(self.js["holds"].items()):
+                if now < h["until"] or k not in self.js["holds"]:
+                    continue
+                chain = [c for c in h["chain"] if c in self.idx]
+                if len(chain) > 1:
+                    del self.js["holds"][k]
+                    self._queue_join(chain)
+                elif h["kind"] == "crash" and (h["proof"] or not self._is_short(h)):
+                    del self.js["holds"][k]
+                    for c in chain:
+                        self._release(c)
+                elif all(self._drop_short(c) for c in chain):
+                    del self.js["holds"][k]
+                stitch.save_state(self.js)
+        job = self.join_job
+        if job is not None:
+            if apex:                                     # never while Apex runs: again from the start afterwards
+                try:
+                    job["proc"].kill()
+                    job["proc"].wait(timeout=10)
+                except Exception:
+                    pass
+                self._clean_join(job)
+                self.join_job = None
+                return
+            if job["proc"].poll() is None:
+                return
+            self.join_job = None
+            self._finish_join(job)
+            return
+        if apex or not self.js["joins"]:
+            return
+        chain = self.js["joins"][0]
+        parts = [self.idx[k].path for k in chain if k in self.idx]
+        durs = [self.duration_probe(p) for p in parts]
+        if len(parts) < 2 or None in durs:
+            self._join_failed(chain, "a part can't be read")
+            return
+        out, _ = stitch.join_paths(parts[0])
+        try:
+            proc = stitch.start_join(parts, out)
+        except OSError as ex:
+            self._join_failed(chain, f"ffmpeg didn't start: {ex}")
+            return
+        self.join_job = {"proc": proc, "chain": chain, "parts": parts, "durs": durs, "out": out}
+
+    def _is_short(self, h: dict) -> bool:
+        min_s = self.s.min_record_min * 60
+        return bool(min_s) and h.get("dur") is not None and h["dur"] < min_s
+
+    def _clean_join(self, job: dict) -> None:
+        out = job["out"]
+        for f in (out, out.with_suffix(".txt")):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            out.parent.rmdir()                           # our own folder, only when empty
+        except OSError:
+            pass
+
+    def _join_failed(self, chain: list[str], why: str) -> None:
+        if chain in self.js["joins"]:
+            self.js["joins"].remove(chain)
+        self.js["keep"] = sorted(set(self.js["keep"]) | set(chain))
+        stitch.save_state(self.js)
+        log.warning("recordings not joined: %s", why)
+        self._activity(f"Not joined after Apex crash ({why}): the recordings are kept as they are.")
+        for k in chain:
+            self._release(k)
+
+    def _finish_join(self, job: dict) -> None:
+        chain, parts, durs, out = job["chain"], job["parts"], job["durs"], job["out"]
+        ok, why = (job["proc"].returncode == 0, "ffmpeg stopped with an error")
+        if ok:
+            ok, why = stitch.check_joined(out, sum(durs))
+        if not ok:
+            self._clean_join(job)
+            self._join_failed(chain, why)
+            return
+        events = stitch.merged_events(parts, durs)
+        first = self.idx[chain[0]]
+        # the checked file first goes next to the recordings under a name no original's files can match, then the
+        # originals go to the Recycle Bin, then it takes the first recording's name (if that fails it keeps its own)
+        final = Path(parts[0]).with_name("Joined " + Path(parts[0]).stem + ".mp4")
+        try:
+            out.replace(final)
+        except OSError as ex:
+            self._clean_join(job)
+            self._join_failed(chain, f"the joined file couldn't be moved: {ex}")
+            return
+        self._clean_join(job)
+        removed, kept = [], []
+        for k in chain:                                   # originals to the Recycle Bin, only now
+            try:
+                for f in retention.files_of(self.idx[k]):
+                    self.recycle(str(f))
+                removed.append(k)
+            except OSError as ex:
+                log.warning("original not removed after joining (%s): %s", self.idx[k].path, ex)
+                kept.append(k)
+        plain = Path(parts[0]).with_suffix(".mp4")
+        if not plain.exists() and not any(plain.parent.glob(glob_escape(plain.stem) + ".*")):
+            try:
+                final.replace(plain)
+                final = plain
+            except OSError:
+                pass
+        for k in removed[1:] if removed and removed[0] == chain[0] else removed:
+            del self.idx[k]
+        for k in kept:                                    # a copy that couldn't be removed: not scanned again
+            if k != chain[0]:
+                self.idx[k].status, self.idx[k].note = "skipped", f"Joined into {final.name}"
+        if chain[0] in kept:                              # the first entry is still its own file: a new entry
+            key = f"{chain[0]}-joined"
+            self.idx[key] = retention.Entry(path=str(final), started=first.started, status="recorded")
+            self.idx[chain[0]].status, self.idx[chain[0]].note = "skipped", f"Joined into {final.name}"
+        else:
+            key = chain[0]
+            first.path, first.status = str(final), "recorded"
+        self.idx[key].note = f"Joined after Apex crash ({len(chain)} parts)"
+        retention.save_index(self.idx)
+        if events is not None:
+            try:
+                final.with_suffix(".events.json").write_text(json.dumps(events, indent=1), encoding="utf-8")
+            except OSError as ex:
+                log.warning("events not saved: %s", ex)
+        self.js["joins"] = [c for c in self.js["joins"] if c != chain]
+        self.js["keep"] = sorted((set(self.js["keep"]) - set(chain)) | {key})
+        stitch.save_state(self.js)
+        mins = sum(durs) / 60
+        self._activity(f"Joined after Apex crash: {final.name} ({len(chain)} recordings, {mins:.0f} min)")
+        self._queue_tracks(str(final))
+        self.hub.report(self._report(key))
+        self._offer_scan(key, mins)
 
     def _final_file(self, path: str, wait_s: float | None = None, poll: float = 3) -> str:
         """OBS records to .mkv and copies it into an .mp4 afterwards (2 min for a 2-hour session on a hard disk).
@@ -423,6 +755,8 @@ class Recorder:
         with self.lock:
             e = self.idx.get(key)
             if not e or not e.path or key in (self.current, self.scan_key) or key in self.queue:
+                return False
+            if key in self.waiting_keys():               # waits for a possible restart or to be joined
                 return False
             mkv, mp4 = Path(e.path).with_suffix(".mkv"), Path(e.path).with_suffix(".mp4")
             if mkv.exists() and mp4.exists():
@@ -720,7 +1054,7 @@ class Recorder:
             for e in self.idx.values():              # .mkv originals left by an earlier version or a locked file
                 if e.path.lower().endswith(".mp4"):
                     drop_original(Path(e.path))
-            protect = {k for k in (self.current, self.scan_key) if k}
+            protect = {k for k in (self.current, self.scan_key) if k} | self.waiting_keys()
             if self.youtube:
                 protect |= self.youtube.protected()       # blocks still going to YouTube
             removed = retention.enforce(self.idx, self.s.keep_days, self.s.max_gb, protect,

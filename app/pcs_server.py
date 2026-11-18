@@ -39,28 +39,16 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
-              "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h")
+              "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h",
+              "min_record_min")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 MAX_BODY = 4 << 20                  # largest request body the page may send (bytes)
 
 
 def to_recycle_bin(path: str) -> None:
     """Windows Recycle Bin (can be restored); elsewhere a normal delete."""
-    if os.name != "nt":
-        os.remove(path)
-        return
-    import ctypes
-    from ctypes import wintypes
-
-    class SHFILEOPSTRUCTW(ctypes.Structure):
-        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", ctypes.c_wchar_p),
-                    ("pTo", ctypes.c_wchar_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
-                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
-    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_NOERRORUI = 3, 0x40, 0x10, 0x4, 0x400
-    op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
-                         FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
-    if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) != 0 or op.fAnyOperationsAborted:
-        raise OSError("couldn't move it to the Recycle Bin")
+    from pcs_recorder.retention import to_recycle_bin as recycle
+    recycle(path)
 
 
 def audio_tracks(video: str) -> list[dict]:

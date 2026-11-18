@@ -98,6 +98,28 @@ def files_of(entry: Entry) -> list[Path]:
     return [f for f in p.parent.glob(p.stem + "*") if f.is_file()]
 
 
+def to_recycle_bin(path: str) -> None:
+    """Windows Recycle Bin (can be restored); elsewhere a normal delete. Raises OSError when it didn't happen."""
+    import os
+    if os.name != "nt":
+        os.remove(path)
+        return
+    import ctypes
+    from ctypes import wintypes
+
+    class SHFILEOPSTRUCTW(ctypes.Structure):
+        _fields_ = [("hwnd", wintypes.HWND), ("wFunc", ctypes.c_uint), ("pFrom", ctypes.c_wchar_p),
+                    ("pTo", ctypes.c_wchar_p), ("fFlags", ctypes.c_ushort), ("fAnyOperationsAborted", wintypes.BOOL),
+                    ("hNameMappings", ctypes.c_void_p), ("lpszProgressTitle", ctypes.c_wchar_p)]
+    FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_SILENT, FOF_NOERRORUI = 3, 0x40, 0x10, 0x4, 0x400
+    op = SHFILEOPSTRUCTW(None, FO_DELETE, os.path.abspath(path) + "\0", None,
+                         FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI, False, None, None)
+    if ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op)) != 0 or op.fAnyOperationsAborted:
+        raise OSError("couldn't move it to the Recycle Bin")
+    if os.path.exists(path):
+        raise OSError("still there after the Recycle Bin")
+
+
 def size_of(entry: Entry) -> int:
     return sum(f.stat().st_size for f in files_of(entry))
 
