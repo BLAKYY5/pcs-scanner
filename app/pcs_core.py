@@ -424,6 +424,52 @@ def cleanup_staged():
         try: os.remove(p)
         except OSError: pass
 
+BUNDLE_MARKERS = ('pcs_maps.json', 'pcs_fonts.json', 'build.json', os.path.join('web', 'index.html'))
+
+def clean_old_unpacked(tmp=None, current=None, min_age_s=600, now=None):
+    """The exe unpacks itself (~600 MB) to a temporary folder (_MEI + digits) at every start and removes it when it
+    ends; a crash, a forced stop or Windows shutting down leaves it on C:. At start, the app removes such leftovers,
+    and only its own: a folder named like that, holding this app's files (BUNDLE_MARKERS and Python's DLL), not the one
+    this process runs from, unpacked more than min_age_s ago (not one being unpacked right now), and not in use: a
+    running copy of the app keeps Python's DLL loaded, which Windows refuses to delete, so that DLL goes first and a
+    refusal leaves the folder untouched. Returns [(folder, bytes)] removed."""
+    import re, shutil, tempfile
+    tmp = tmp or tempfile.gettempdir()
+    current = os.path.normcase(os.path.abspath(current if current is not None else getattr(sys, '_MEIPASS', '') or '?'))
+    now = now if now is not None else time.time()
+    out = []
+    try: names = os.listdir(tmp)
+    except OSError: return out
+    for name in names:
+        p = os.path.join(tmp, name)
+        ours = re.fullmatch(r'_MEI\d+\.pcs-old', name)       # renamed by an earlier start, removal unfinished
+        if not (ours or re.fullmatch(r'_MEI\d+', name)) or not os.path.isdir(p) or os.path.islink(p): continue
+        if os.path.normcase(os.path.abspath(p)) == current: continue
+        if not ours:
+            try:
+                st = os.stat(p)
+                if now - getattr(st, 'st_birthtime', st.st_ctime) < min_age_s: continue
+                if not all(os.path.isfile(os.path.join(p, m)) for m in BUNDLE_MARKERS): continue    # not this app's
+                dlls = [f for f in os.listdir(p) if re.fullmatch(r'python3\d*\.dll', f, re.I)]
+                if not dlls: continue
+                json.load(open(os.path.join(p, 'build.json'), encoding='utf-8-sig'))['version']
+            except Exception: continue
+            try:
+                for f in dlls: os.remove(os.path.join(p, f))       # in use by a running copy: refused, folder kept
+            except OSError: continue
+            try: os.rename(p, p + '.pcs-old'); p += '.pcs-old'
+            except OSError: pass
+        size = 0
+        for root, _, files in os.walk(p):
+            for f in files:
+                try: size += os.path.getsize(os.path.join(root, f))
+                except OSError: pass
+        shutil.rmtree(p, ignore_errors=True)
+        if not os.path.exists(p): out.append((p, size))
+    if out:
+        logging.info('removed %d leftover unpacked copies of the app (%.0f MB)', len(out), sum(s for _, s in out) / 2 ** 20)
+    return out
+
 # ---------------- scanning ----------------
 def run_scan(files, log, out=OUT):
     import pcs_scan

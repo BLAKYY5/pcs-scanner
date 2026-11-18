@@ -108,6 +108,7 @@ async function poll() {
     const prev = S; S = await api('/api/state');
     renderTop();
     if (page === 'home') renderHome(prev);
+    if (page === 'settings') syncHubBackup();                          // last copy line only: the form stays as typed
     if (page === 'recordings' && (!prev || JSON.stringify(prev.scans) !== JSON.stringify(S.scans) ||
         (prev.recorder && S.recorder && prev.recorder.status !== S.recorder.status))) loadLibrary();
   } catch (e) { S = null; renderTop(); }
@@ -1174,7 +1175,7 @@ function renderSettings() {
       <div class="form">
         <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Empty = results go to Google Drive only.</small></label>
         <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in link your coach sent. Don't share it.</small></div>
-      </div></section>
+      </div>${S.hubBackup ? hubBackupHTML(S.hubBackup) : ''}</section>
     <section class="card section"><h2>Start-up</h2>
       ${switchHTML('f-start_with_windows', s.start_with_windows, 'Start with Windows', 'PCS Scanner waits in the tray (bottom right) from the moment you log in. Recommended: you never have to think about it.')}
       ${switchHTML('f-enabled', r.enabled, 'Auto-record', 'Records the Apex window while the game runs, then offers to scan the session. Your mic and voice app are recorded only if you switch them on below, after your team agreed.')}
@@ -1266,6 +1267,7 @@ function renderSettings() {
   $('#save').onclick = saveSettings;
   wireHotkeys();
   wireHubKey();
+  wireHubBackup();
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
   settingsBase = settingsSnap();
   // the microphone list arrives later: it joins the starting point unless something was changed meanwhile
@@ -1323,6 +1325,7 @@ function settingsBody() {
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
+    const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }
   }
   return body;
 }
@@ -1330,6 +1333,42 @@ async function saveSettings() {
   const body = settingsBody();
   try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast('Settings saved.'); if (page === 'settings') renderSettings(); renderTop(); return true; }
   catch (e) { toast('Not saved: ' + e.message, true); return false; }
+}
+
+/* ------------------------------------------------------------------ hub backup copy (Settings, coach's hub key only) */
+function hubBackupLast(b) {
+  if (b.running) return '<span class="hubmsg">Copying…</span>';
+  const l = b.last || {}, when = l.at ? new Date(l.at).toLocaleString([], {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}) : '';
+  if (!l.at) return `<span class="hubmsg">${b.folder ? 'No copy yet' : 'Off'}</span>`;
+  if (l.ok) return `<span class="hubmsg good">${esc(l.result)} ${esc(when)} · ${esc(l.file)} · ${fmtGB(l.bytes)}</span>`;
+  const g = b.lastGood || {};
+  return `<span class="hubmsg bad">Failed ${esc(when)}: ${esc(l.error)}</span>` +
+    (g.at ? `<small class="faint">Last good copy: ${esc(g.file)}</small>` : '');
+}
+function hubBackupHTML(b) {
+  return `<h3>Hub backup copy</h3>
+    <p class="muted" style="margin:-6px 0 0">Once a day (after 4:00, only while Apex is closed), the hub's nightly backup is copied to this PC.</p>
+    <div class="form">
+      <label class="field wide"><span>Folder</span><input id="f-hub_backup_dir" type="text" value="${esc(b.folder)}" placeholder="E:\\PCS Hub backups" spellcheck="false">
+        <small>Empty = off. Not on C:. Only files named pcs-hub-&lt;date&gt;.zip are ever deleted here.</small></label>
+      <label class="field"><span>Keep (copies)</span><input id="f-hub_backup_keep" type="number" min="1" max="365" value="${b.keep}"></label>
+      <div class="field wide hubfield"><span>Last copy</span><div class="row"><span id="hb-last">${hubBackupLast(b)}</span>
+        <button class="btn small" id="hb-copy" ${b.running || !b.folder ? 'disabled' : ''}>Copy now</button></div></div>
+    </div>`;
+}
+function syncHubBackup() {
+  const el = $('#hb-last'), b = S && S.hubBackup; if (!el || !b) return;
+  const html = hubBackupLast(b); if (el.innerHTML !== html) el.innerHTML = html;
+  const c = $('#hb-copy'); if (c) c.disabled = b.running || !b.folder;
+}
+function wireHubBackup() {
+  const c = $('#hb-copy'); if (!c) return;
+  c.onclick = async () => {
+    if (settingsDirty()) { toast('Save your changes first.', true); return; }
+    c.disabled = true;
+    try { const r = await api('/api/hubbackup/copy', {}); S.hubBackup = r.hubBackup; syncHubBackup(); toast('Copying the hub backup…'); }
+    catch (e) { toast(e.message, true); c.disabled = false; }
+  };
 }
 
 /* ------------------------------------------------------------------ team hub: key (Settings) and Team page */

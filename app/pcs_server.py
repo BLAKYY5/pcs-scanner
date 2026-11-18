@@ -16,6 +16,7 @@ import mimetypes
 import os
 import re
 import secrets
+import subprocess
 import threading
 import time
 import traceback
@@ -648,6 +649,23 @@ class Backend:
             pass
         return None
 
+    def _run_scan(self, proc, every_s: float = 3) -> int | None:
+        """Wait for a scan; None when Apex started meanwhile: the scan is then stopped (not kept paused in memory
+        during the game) and the scanner goes on from its finished chunks next time."""
+        from pcs_recorder.core import apex_running, stop_tree
+        while True:
+            try:
+                return proc.wait(timeout=every_s)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                apex = apex_running()
+            except Exception:
+                apex = False
+            if apex:
+                stop_tree(proc)
+                return None
+
     def _scan_worker(self) -> None:
         with self.scan_lock:
             if self._worker_running:
@@ -671,7 +689,14 @@ class Backend:
                     p = self.scan_queue.pop(0)
                     self.scan_now, self.scan_started = p, time.time()
                 self.say(f"Scanning {Path(p).name}…")
-                code = scan_process(p, core.OUT).wait()
+                code = self._run_scan(scan_process(p, core.OUT))
+                if code is None:                         # Apex started: stopped, goes on from there when it closes
+                    with self.scan_lock:
+                        self.scan_queue.insert(0, p)
+                        self.scan_now = None
+                    self.say(f"Scan of {Path(p).name} paused while Apex runs: it goes on when Apex closes.")
+                    told = True
+                    continue
                 if code != 0:
                     self.say(f"Scan of {Path(p).name} failed (code {code}). Details: {Path(core.OUT) / 'scan.log'}")
                     continue
@@ -734,6 +759,7 @@ class Backend:
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "hub": self.hub_state(),
+                "hubBackup": self.hubbackup.public() if a and a.s.hub_url else None,   # coach's hub key only
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
@@ -826,6 +852,37 @@ class Backend:
         """The Map panel's picture and transform for a map (pcs_recorder.minimaps): downloaded once with the key."""
         from pcs_recorder import minimaps
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
+
+    # ------------------------------------------------------------- hub backup copy (coach's hub key only)
+    @property
+    def hubbackup(self):
+        """pcs_recorder.hubbackup.HubBackup: the hub's nightly zip, copied once a day to a folder on this PC."""
+        if getattr(self, "_hubbackup", None) is None:
+            from pcs_recorder import hubbackup
+            self._hubbackup = hubbackup.HubBackup(lambda: self.auto.s.hub_url if self.auto else "",
+                                                  self._backup_busy, self.say)
+        return self._hubbackup
+
+    def _backup_busy(self) -> str | None:
+        """Never while Apex runs, a recording or a scan is going on, or review talk records."""
+        a = self.auto
+        if a and (a.rec.current is not None or a.rec.scan_proc is not None):
+            return "the auto-recorder is busy"
+        if self.scan_now:
+            return "a scan is running"
+        t = self.talk
+        if t is not None and getattr(t, "active", False):
+            return "review talk is recording"
+        try:
+            if self._apex_running():
+                return "Apex is running"
+        except Exception:
+            pass
+        return None
+
+    def hub_backup_tick(self) -> None:
+        if self.auto and self.auto.s.hub_url:
+            self.hubbackup.tick()
 
     # ------------------------------------------------------------- watch together (team hub sessions)
     @property
@@ -986,6 +1043,13 @@ class Backend:
                 new_key, link_url = hub.parse_key(raw)
                 if not new_key:
                     raise ValueError("That isn't a hub key. Paste the key or the sign-in link from your coach.")
+        # hub backup copy (coach's hub key only): checked before anything is saved
+        bk = {k: body.pop(k) for k in ("hub_backup_dir", "hub_backup_keep") if k in body}
+        if bk and not (self.auto and self.hubbackup.is_coach()):
+            bk = {}                                          # not the coach's key: the block isn't shown, ignored
+        if bk:
+            from pcs_recorder import hubbackup
+            bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
         if "team_link" in body:
@@ -1032,6 +1096,8 @@ class Backend:
                 st.save(a.s)
             if (a.s.start_with_windows,) != before:
                 self.set_start_with_windows(a.s.start_with_windows)
+            if bk:
+                self.hubbackup.set(*bk)
             removed = a.rec.cleanup()
             if removed:
                 self.say(f"{len(removed)} old recording(s) removed to stay within your limits.")
@@ -1289,6 +1355,10 @@ class Server:
                         return self._json(b.hub_join(str(body.get("link") or "")) | {"hub": b.hub_state()})
                     if path == "/api/hub/open":
                         return self._json(b.open_hub(body.get("path") or "/"))
+                    if path == "/api/hubbackup/copy":
+                        if not b.auto or not b.auto.s.hub_url:
+                            raise RuntimeError("No team hub address set (Settings → Team hub)")
+                        return self._json(b.hubbackup.copy_now() | {"hubBackup": b.hubbackup.public()})
                     if path == "/api/autorecord":
                         b.set_autorecord(bool(body.get("enabled")))
                         return self._json(b.state())
