@@ -420,6 +420,202 @@ def test_eec_results():
         pass
 
 
+def _eec_rec(folder, name, started, end, games):
+    """A recording with a scan, for the EEC drop tests."""
+    import json
+    v = folder / f"Apex Legends_{name}.mp4"
+    v.write_bytes(b"x")
+    os.utime(v, (end, end))
+    v.with_suffix(".scan").mkdir()
+    (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps({"games": games}))
+    return retention.Entry(path=str(v), started=started, status="scanned")
+
+
+def _eec_export(t0, pcs_pois, other_pois=("THERMAL STATION (8)", "CITY HALL (1)")):
+    """A November-style export: one pick per team and map (WE then ED, two games each), map_pick_id on every row."""
+    maps = ["mp_rr_desertlands_hu", "mp_rr_desertlands_hu", "mp_rr_district", "mp_rr_district"]
+    matches = []
+    for i, mn in enumerate(maps):
+        def row(team, player, place, kills, pid):
+            return {"team_name": team, "player_name": player, "team_placement": place, "kills": kills,
+                    "map_pick_id": str(pid)}
+        m = 0 if i < 2 else 1
+        matches.append({"map_name": mn, "match_start": str(int(t0 + 1500 + i * 1800)), "data": [
+            row("PCS", "a", 2, 3, 500 + m), row("PCS", "b", 2, 1, 500 + m), row("Other", "c", 1, 2, 600 + m)]})
+    draft = [{"team": "PCS", "poi": pcs_pois[0], "pick_num": 4, "seed": 2},
+             {"team": "PCS", "poi": pcs_pois[1], "pick_num": 25, "seed": 2},
+             {"team": "Other", "poi": other_pois[0], "pick_num": 1, "seed": 1},
+             {"team": "Other", "poi": other_pois[1], "pick_num": 22, "seed": 1}]
+    return {"matches": matches[::-1], "draft": draft}       # file order isn't play order
+
+
+def _scrim_game(t, mp, poi, jump=60.0):
+    return {"map": mp, "mode": "scrim", "tStart": t, "drop": {"spots": [{"poi": poi, "kind": "ours"}]},
+            "landing": {"poi": poi, "exitAtExact": t + jump}}
+
+
+def test_eec_drops_confirm_scrims():
+    """EEC drops (draft joined by map_pick_id): EEC wins for display, ours kept when it differs; a block whose games
+    fit the lobby by map, time and drop is labelled scrims from EEC, with the reason kept."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 8 * 3600
+    lobby = eec.from_export(_eec_export(t0, ("STAGING (3)", "CITY HALL (1)")), "lobbies_4_abc123_scores.json")
+    assert [g["map"] for g in lobby["games"]] == ["WE", "WE", "ED", "ED"]          # sorted by start
+    assert lobby["drops"] == "export, pick id"
+    assert [g["drops"]["pcs"] for g in lobby["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
+    assert lobby["games"][0]["drops"]["other"] == "Thermal Station"
+    res = eec.results(lobby, "PCS")
+    assert [g["drop"] for g in res["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
+    assert eec.compare_drop("WE", "Staging", "we-staging")[0] == "same"
+    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] in ("near", None)
+    assert eec.compare_drop("WE", "Staging", "we-thermal")[0] == "different"
+    assert eec.compare_drop("WE", "Skyhook West", "we-staging")[0] is None          # not in our map table: no verdict
+    assert eec.compare_drop("WE", "", "we-staging")[0] is None
+
+    folder = TMP / f"eecdrops-{time.time_ns()}"
+    folder.mkdir()
+    # 4 games 30 min apart; the third one landed somewhere else than EEC says (EEC wins, ours kept)
+    # game 2 has no drop screen read (mode unknown): EEC still counts it
+    games = [_scrim_game(1440, "WE", "we-staging"), _scrim_game(3240, "WE", "we-staging"),
+             _scrim_game(5040, "ED", "ed-old-town"), _scrim_game(6840, "ED", "ed-city-hall")]
+    games[1].update(mode="unknown", drop=None)
+    idx = {"s": _eec_rec(folder, "s", t0, t0 + 8000, games)}
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    got = up.add_results(lobby)
+    assert got["block"] == ["s"] and got["check"]["verdict"] == "match", got["check"]
+    chk = got["check"]
+    assert [(x["eecGame"], x["check"]) for x in chk["games"]] == [(1, "same"), (2, "same"), (3, "different"), (4, "same")]
+    assert chk["why"] == "EEC drops agree with where we landed in 3 of 4 game(s)"
+    g3 = chk["games"][2]
+    assert (g3["eecDrop"], g3["ourDrop"], g3["ourFrom"]) == ("City Hall", "Old Town", "landing")
+    # label: scrims from EEC (even a block with no drop screen read would be)
+    lab = labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk)
+    assert lab == {"label": "scrims", "source": "eec", "why": chk["why"]}, lab
+    q = up.queue()[0]
+    assert q["label"] == "scrims" and q["label_source"] == "eec" and q["eec_check"]["verdict"] == "match"
+    # description: EEC's drop, ours in brackets where it differs
+    title, desc, n = youtube.describe(s, idx, ["s"], [0.0], results=res, kind="scrims", check=chk)
+    assert "Game 1 · World's Edge · Staging · 2nd" in desc, desc
+    assert "Game 3 · E-District · City Hall (scan: Old Town) · 2nd" in desc, desc
+    # a block with no drop screen at all: the scan says nothing, EEC says scrims
+    bare = [dict(g, mode="unknown", drop=None) for g in games]
+    idx2 = {"b": _eec_rec(folder, "b", t0, t0 + 8000, bare)}
+    chk2 = youtube.check_of(idx2, ["b"], res)
+    assert chk2["verdict"] == "match"
+    assert labels.of_block([idx2["b"].path], [youtube.scan_of(idx2["b"])]) == (None, False)
+    assert labels.of_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2) == ("scrims", False)
+    # a label set by hand still wins
+    labels.set_label(idx2["b"].path, "ranked")
+    assert labels.explain_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2)["source"] == "hand"
+    labels.FILE.unlink(missing_ok=True)
+
+
+def test_eec_drops_refuse_tournament():
+    """A tournament the same evening, played while the lobby's games ran (times fit) but from other drops, is not
+    that scrim: the lobby goes to the block whose drops agree; the tournament keeps its scan label and says why."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 10 * 3600
+    lobby = eec.from_export(_eec_export(t0, ("STAGING (3)", "CITY HALL (1)")), "lobbies_4_abc123_scores.json")
+    res = eec.results(lobby, "PCS")
+    folder = TMP / f"eectour-{time.time_ns()}"
+    folder.mkdir()
+    # tournament block: 2 WE games, jumps 10 min before the EEC games 1 and 2, landed at Thermal Station
+    tour = _eec_rec(folder, "t", t0, t0 + 1500, [_scrim_game(800, "WE", "we-thermal"), _scrim_game(1340, "WE", "we-thermal")])
+    # the scrim block, 15 min later
+    scrim = _eec_rec(folder, "s", t0 + 2400, t0 + 9000,
+                     [_scrim_game(1440 - 2400 + 1800, "WE", "we-staging"), _scrim_game(5040 - 2400, "ED", "ed-city-hall")])
+    idx = {"t": tour, "s": scrim}
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False,
+                          yt_gap_min=10)
+    assert youtube.blocks(idx, 10) == [["t"], ["s"]]
+    chk_t = youtube.check_of(idx, ["t"], res)
+    assert chk_t["verdict"] == "mismatch" and "differ" in chk_t["why"], chk_t
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    got = up.add_results(lobby)
+    assert got["block"] == ["s"] and got["check"]["verdict"] == "match", got     # the tournament block was passed over
+    assert up.state["t"]["eec_rejected"][0]["url"] == res["url"]
+    assert "eec_res" not in up.state["t"] and up.results_of("t") is None
+    lab = labels.explain_block([tour.path], [youtube.scan_of(tour)], chk_t)
+    assert lab["label"] == "scrims" and lab["source"] == "scan" and "not the EEC lobby" in lab["why"], lab
+    # results attached to the tournament block by an older version: no longer used for it (title, scrims-only)
+    up.state["t"]["eec_res"] = res
+    assert up.usable(["t"]) == (None, chk_t) and up.results_of("t") is None
+    q = {b["id"]: b for b in up.queue()}
+    assert q["t"]["res"] is None and q["t"]["eec_check"]["verdict"] == "mismatch" and q["s"]["label_source"] == "eec"
+    # only the tournament in the recordings: the lobby is refused, with the reason
+    rec.idx = {"t": tour}
+    up2 = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    up2.state = {}
+    try:
+        up2.add_results(lobby)
+        raise AssertionError("tournament got the scrim lobby")
+    except RuntimeError as e:
+        assert "doesn't match your games" in str(e), e
+    # times that don't fit at all (a block in the lobby's window, games an hour off): not that lobby either
+    off = _eec_rec(folder, "o", t0 - 1500, t0 + 1000, [_scrim_game(10, "WE", "we-staging")])
+    assert youtube.check_of({"o": off}, ["o"], res)["verdict"] == "mismatch"
+
+
+def test_eec_drops_missing_fallback():
+    """No EEC drops (an export without a draft, an old Loot Book document) or nothing to compare: the old behaviour
+    (lobby by time, label from the scan)."""
+    from pcs_recorder import eec, labels, youtube
+    youtube.STATE_FILE.unlink(missing_ok=True)
+    labels.FILE.unlink(missing_ok=True)
+    t0 = time.time() - 12 * 3600
+    export = _eec_export(t0, ("STAGING (3)", "CITY HALL (1)"))
+    export.pop("draft")
+    lobby = eec.from_export(export, "lobbies_4_abc123_scores.json")
+    assert lobby["drops"] == "" and all(not g["drops"] for g in lobby["games"])
+    res = eec.results(lobby, "PCS")
+    assert all(g["drop"] == "" for g in res["games"])
+    folder = TMP / f"eecnone-{time.time_ns()}"
+    folder.mkdir()
+    # landed somewhere else than the (unknown) drop: no verdict without EEC drops
+    games = [_scrim_game(1440, "WE", "we-thermal"), _scrim_game(5040, "ED", "ed-old-town")]
+    idx = {"s": _eec_rec(folder, "s", t0, t0 + 8000, games)}
+    chk = youtube.check_of(idx, ["s"], res)
+    assert chk["verdict"] == "unknown" and chk["why"] == "the EEC results have no drops (game times fit)", chk
+    assert labels.of_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk) == ("scrims", False)
+    lab = labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], chk)
+    assert lab["source"] == "scan" and lab["why"].startswith("the scrim drop screen was read"), lab
+
+    class Rec:
+        current = None
+    rec = Rec()
+    rec.idx = idx
+    s = settings.Settings(player="Xno", yt_team="PCS", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+    up = youtube.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+    assert up.add_results(lobby)["block"] == ["s"] and up.results_of("s")["pts"] == res["pts"]
+    title, desc, n = youtube.describe(s, idx, ["s"], [0.0], results=res, kind="scrims", check=chk)
+    assert "Game 1 · World's Edge · Thermal · 2nd" in desc, desc            # our drop screen, as before
+    # an old Loot Book document (no draft): its drops are not used
+    doc = {"url": "u", "games": [{"start": t0 + 1500, "map": "WE",
+                                  "rows": [["PCS", "a", "", 2, 3, 0, 0, 0, 0, 0, 0, 0, 0, "Thermal Station"]]}]}
+    assert eec.from_hub_doc(doc)["games"][0]["drops"] == {}
+    doc["draft"] = [{"team": "PCS"}]
+    assert eec.from_hub_doc(doc)["games"][0]["drops"] == {"pcs": "Thermal Station"}
+    # no EEC results at all: labels as before
+    assert youtube.check_of(idx, ["s"], None) is None
+    assert labels.explain_block([idx["s"].path], [youtube.scan_of(idx["s"])], None)["label"] == "scrims"
+    assert labels.explain(idx["s"].path, youtube.scan_of(idx["s"]))["source"] == "scan"
+
+
 def test_night_uploads_and_shutdown():
     """Night mode: uploads only at night when idle; PC turned off only after a night upload with nothing left."""
     import datetime as dt
@@ -676,17 +872,72 @@ def test_settings_limits():
 def test_quality_setting():
     import json
     from pcs_recorder import obs as obsmod
-    assert settings.Settings(bitrate_mbps=4).clamp().bitrate_mbps == settings.MIN_MBPS == 8
-    assert settings.Settings(bitrate_mbps=500).clamp().bitrate_mbps == settings.MAX_MBPS
+    assert settings.Settings(bitrate_mbps=4, bitrate_auto=False).clamp().bitrate_mbps == settings.MIN_MBPS == 8
+    assert settings.Settings(bitrate_mbps=500, bitrate_auto=False).clamp().bitrate_mbps == settings.MAX_MBPS
     s = settings.Settings(folder=str(TMP / "q"))
     assert s.bitrate_mbps == 12 and 5 < s.gb_per_hour < 6
     obsmod.write_config(s, "av1_texture_amf", 2560, 1440)
     enc = json.loads((obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json").read_text())
-    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 12000 and enc["keyint_sec"] == 1, enc
+    assert enc["rate_control"] == "CBR" and enc["bitrate"] == 10000 and enc["keyint_sec"] == 1, enc   # AV1: 10
     ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
     assert "RecEncoder=av1_texture_amf" in ini and "FPSInt=60" in ini and "BaseCX=2560" in ini
-    s.bitrate_mbps = 16
+    s.set_bitrate(16)
     assert obsmod.config_signature(s) != obsmod.config_signature(settings.Settings(folder=s.folder))
+
+
+def test_bitrate_per_encoder():
+    """Coach's decision (18 Nov 2026): AV1 records at 10 Mbit/s, HEVC and H.264 at 12. Players who never changed
+    the bitrate get it (a saved 12, the old default, follows the encoder); a value set by hand is kept."""
+    import json
+    from pcs_recorder import obs as obsmod
+    for enc in ("av1_texture_amf", "obs_nvenc_av1_tex", "jim_av1_nvenc", "obs_qsv11_av1"):
+        assert settings.default_mbps(enc) == 10, enc
+    for enc in ("h265_texture_amf", "h264_texture_amf", "obs_nvenc_hevc_tex", "jim_hevc_nvenc", "obs_nvenc_h264_tex",
+                "jim_nvenc", "obs_qsv11_hevc", "obs_qsv11_v2", ""):
+        assert settings.default_mbps(enc) == 12, enc
+    prof = obsmod.CONFIG / "basic" / "profiles" / "PCS" / "recordEncoder.json"
+    # a new player: the encoder test tries each candidate at its own bitrate, the setting follows the one picked
+    s = settings.Settings(folder=str(TMP / "br"))
+    for enc, mbps in (("av1_texture_amf", 10), ("h265_texture_amf", 12), ("obs_nvenc_h264_tex", 12)):
+        obsmod.write_config(s, enc, 1920, 1080)
+        assert json.loads(prof.read_text())["bitrate"] == mbps * 1000, enc
+        s.encoder = enc
+        assert s.clamp().bitrate_mbps == mbps and s.bitrate_auto, enc
+        assert obsmod.config_signature(s).startswith(f"{enc}|{mbps}|")
+    s.encoder = "av1_texture_amf"
+    assert s.clamp().bitrate_mbps == 10 and 4 < s.gb_per_hour < 5
+    # Settings page: the shown value comes back with every save (unchanged = still automatic)
+    s.set_bitrate(10)
+    assert s.bitrate_auto and s.bitrate_mbps == 10
+    s.set_bitrate(14)                                       # the player's own value: kept on any encoder
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 14
+    s.encoder = "h264_texture_amf"
+    assert s.clamp().bitrate_mbps == 14 and s.mbps_for("av1_texture_amf") == 14
+    s.encoder = "av1_texture_amf"
+    s.set_bitrate(12)                                       # 12 on AV1 is a choice too
+    assert not s.bitrate_auto and s.clamp().bitrate_mbps == 12
+    s.set_bitrate(10)                                       # back to the recommendation: follows the encoder again
+    assert s.bitrate_auto
+    # existing recorder.json files (saved before this setting): only the old default moves
+    saved_file = settings.SETTINGS_FILE
+    try:
+        settings.SETTINGS_FILE = TMP / "br" / "recorder.json"
+        for enc, old, want, auto in (("av1_texture_amf", 12, 10, True), ("obs_nvenc_hevc_tex", 12, 12, True),
+                                     ("h264_texture_amf", 12, 12, True), ("av1_texture_amf", 16, 16, False),
+                                     ("av1_texture_amf", 8, 8, False), ("h264_texture_amf", 10, 10, False)):
+            settings.SETTINGS_FILE.write_text(json.dumps({"encoder": enc, "bitrate_mbps": old}), encoding="utf-8")
+            s = settings.load()
+            assert (s.bitrate_mbps, s.bitrate_auto) == (want, auto), (enc, old, s.bitrate_mbps, s.bitrate_auto)
+            on_disk = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+            assert on_disk["bitrate_mbps"] == want and on_disk["bitrate_auto"] is auto
+            s2 = settings.load()                            # loaded again: unchanged (the migration runs once)
+            assert (s2.bitrate_mbps, s2.bitrate_auto) == (want, auto)
+        # an AV1 player who moved to 12 by hand after this version keeps 12
+        settings.SETTINGS_FILE.write_text(json.dumps({"encoder": "av1_texture_amf", "bitrate_mbps": 12,
+                                                      "bitrate_auto": False}), encoding="utf-8")
+        assert settings.load().bitrate_mbps == 12
+    finally:
+        settings.SETTINGS_FILE = saved_file
 
 
 def test_obs_password_renewed_once_while_obs_closed():
@@ -1586,6 +1837,170 @@ def test_game_end_time():
     assert SCAN.game_ends(lone, [], None, None)[0]["tEndGame"] == 5.0         # nothing read: ends where it starts
 
 
+def _ring_frame(cur, nxt, decoy=None, seed=3):
+    """A synthetic full-map frame (2560 x 1440): blotchy map art in the map square, red tint outside the current ring
+    with a dark line on it, a see-through white disc for the next ring, optionally a purple disc (another map
+    feature). Circles in screen px (x, y, r). No game picture: numbers only."""
+    import numpy as np
+    from scipy import ndimage
+    rng = np.random.default_rng(seed)
+    a = np.full((1440, 2560, 3), 30, np.float32)
+    h, w = 1340, 1353
+    blot = ndimage.gaussian_filter(rng.random((h, w)), 20)
+    blot = (blot - blot.min()) / (np.ptp(blot) + 1e-9)
+    navy, tan = np.array([25, 45, 60], np.float32), np.array([190, 150, 85], np.float32)
+    m = (blot > 0.55)[..., None]
+    art = np.where(m, tan, navy) + rng.normal(0, 6, (h, w, 3))
+    for k in range(40):                        # white labels / icons
+        y, x = rng.integers(20, h - 30), rng.integers(20, w - 120)
+        art[y:y + 14, x:x + 90:6] = 235
+    a[0:h, 604:604 + w] = art
+    Y, X = np.mgrid[0:1440, 0:2560]
+    if nxt:
+        d = np.hypot(X - nxt[0], Y - nxt[1]) < nxt[2]
+        a[d] = a[d] * 0.85 + 255 * 0.15
+    if decoy:
+        d = np.hypot(X - decoy[0], Y - decoy[1]) < decoy[2]
+        a[d] = a[d] * 0.7 + np.array([150, 60, 230]) * 0.3
+    if cur:
+        dist = np.hypot(X - cur[0], Y - cur[1])
+        out = (dist > cur[2])[..., None] & (X < 604 + w)[..., None] & (X >= 604)[..., None] & (Y < h)[..., None]
+        a = np.where(out, a * 0.55 + np.array([200, 70, 50], np.float32) * 0.45, a)
+        line = (np.abs(dist - cur[2]) < 2.5) & (X >= 604) & (X < 604 + w) & (Y < h)
+        a[line] *= 0.3
+    return np.clip(a, 0, 255).astype(np.uint8)
+
+
+def test_ring_circles_on_full_map():
+    """The ring reader finds the current ring (red tint outside) and the next ring (white see-through disc) on the
+    full map, in map % through the map transform, and refuses a coloured disc of another map feature."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ring
+    M = pcs_ring.M_DEFAULT
+    pct = lambda x, y, r: (x * M[0, 0] + M[2, 0], y * M[1, 1] + M[2, 1], r * M[0, 0])
+    cur, nxt = (1500, 740, 410), (1580, 900, 200)
+    r = pcs_ring.read(_ring_frame(cur, nxt, decoy=(1000, 400, 130)))
+    for key, want in (("cur", cur), ("next", nxt)):
+        got, exp = r[key], pct(*want)
+        assert got, (key, r)
+        assert abs(got["cx"] - exp[0]) < 0.5 and abs(got["cy"] - exp[1]) < 0.5 and abs(got["r"] - exp[2]) < 0.5, (key, got, exp)
+    # first ring stage: no current ring on the map yet, the next ring alone (bigger than half the map, partly off it)
+    r = pcs_ring.read(_ring_frame(None, (1350, 650, 560), decoy=(800, 1100, 150), seed=5))
+    exp = pct(1350, 650, 560)
+    assert r["cur"] is None and r["next"], r
+    assert abs(r["next"]["cx"] - exp[0]) < 0.5 and abs(r["next"]["r"] - exp[2]) < 0.5, (r, exp)
+    # nothing drawn: nothing read (the purple disc is not a ring)
+    r = pcs_ring.read(_ring_frame(None, None, decoy=(1300, 700, 200), seed=7))
+    assert r == {"cur": None, "next": None}, r
+    # a zoomed map is skipped
+    assert pcs_ring.read(_ring_frame(cur, nxt), np.array([[0.05, 0], [0, 0.05], [-20, 0]])) is None
+    # 4:3 stretched: the unzoomed map has the stretched layout's scale (scanner ST_MAP_M0); it is read, not skipped
+    M43 = np.array([[100 / 1264, 0], [0, 100 / 1264], [-648 * 100 / 1264, -40 * 100 / 1264]])
+    r = pcs_ring.read(_ring_frame(cur, nxt, decoy=(1000, 400, 130)), M43)
+    assert r and r["cur"] and r["next"], r
+    assert abs(r["cur"]["r"] - cur[2] * M43[0, 0]) < 0.5 and abs(r["next"]["r"] - nxt[2] * M43[0, 0]) < 0.5, r
+
+
+def test_ring_ends_and_speed():
+    """Per game: map-frame reads grouped by ring stage, the end circle of each ring (next ring shown during the round,
+    or the current circle during the next round's wait), and the closing speed = radius drop / closing time."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_ring, pcs_hud
+    ring = [{'round': 1, 'kind': 'wait', 'endsAt': 175.0, 'firstSeen': 100.0, 'firstV': 75},
+            {'round': 1, 'kind': 'closing', 'endsAt': 440.0, 'firstSeen': 184.0, 'firstV': 256},
+            {'round': 2, 'kind': 'wait', 'endsAt': 565.0, 'firstSeen': 445.0, 'firstV': 120},
+            {'round': 2, 'kind': 'closing', 'endsAt': 665.0, 'firstSeen': 570.0, 'firstV': 95}]
+    c = lambda cx, cy, r: {'cx': cx, 'cy': cy, 'r': r}
+    reads = [(150.0, 'ED', {'cur': None, 'next': c(50.0, 50.0, 30.0)}),
+             (151.0, 'ED', {'cur': None, 'next': c(50.1, 49.9, 30.1)}),
+             (152.0, 'ED', {'cur': None, 'next': c(70.0, 20.0, 5.0)}),            # a misread: outvoted
+             (500.0, 'ED', {'cur': c(50.05, 50.0, 30.05), 'next': c(55.0, 52.0, 15.0)}),
+             (501.0, 'ED', {'cur': c(50.0, 50.05, 30.0), 'next': c(55.1, 52.0, 15.1)}),
+             (600.0, 'ED', {'cur': c(52.0, 51.0, 22.0), 'next': c(55.0, 52.05, 15.0)}),
+             (605.0, 'ED', {'cur': c(52.4, 51.2, 21.0), 'next': None}),          # closing: 0.2 % a second
+             (610.0, 'ED', {'cur': c(52.8, 51.4, 20.0), 'next': None}),
+             (2500.0, 'ED', {'cur': c(1, 1, 1), 'next': None})]                    # the next game's: left out
+    games = [{'map': 'ED', 'tStart': 100.0, 'ring': ring}, {'map': 'ED', 'tStart': 2000.0, 'ring': []}]
+    pcs_ring.attach(games, reads)
+    g = games[0]
+    st = [(e['stage'], e['phase']) for e in g['ringCircles']]
+    assert st == [(1, 'wait'), (2, 'wait'), (2, 'closing')], st
+    w1 = g['ringCircles'][0]
+    assert 'r' not in w1 and 'mapR' not in w1 and w1['next']['r'] == 30.05 and abs(w1['conf'] - 2 / 3) < 0.01, w1
+    w2 = g['ringCircles'][1]          # the review player's map reads {t, mapX, mapY, mapR}
+    assert (w2['t'], w2['mapX'], w2['mapY'], w2['mapR'], w2['round']) == (500.0, w2['cx'], w2['cy'], w2['r'], 2), w2
+    ends = {e['ring']: e for e in g['ringEnds']}
+    assert ends[1]['from'] == ['current', 'next'] and ends[1]['agree'] and abs(ends[1]['r'] - 30.0) < 0.1, ends[1]
+    assert abs(ends[2]['r'] - 15.0) < 0.1 and ends[2]['from'] == ['next'], ends[2]
+    u = pcs_ring.units_per_pct('ED')
+    assert u == pcs_hud.CAL['ED'][0] and ends[2]['rUnits'] == round(ends[2]['r'] * u), (u, ends[2])
+    sp = {s['method']: s for s in g['ringSpeed']}
+    assert abs(sp['closing']['unitsPerS'] - 0.2 * u) < 0.5 and sp['closing']['ring'] == 2, sp
+    sp = [sp['ends']]
+    assert len(sp) == 1 and sp[0]['ring'] == 2 and sp[0]['seconds'] == 100.0, sp
+    assert abs(sp[0]['unitsPerS'] - (ends[1]['rUnits'] - ends[2]['rUnits']) / 100.0) < 0.2, sp
+    assert [e['t'] for e in games[1]['ringCircles']] == [2500.0], games[1]
+
+
+def _card_frame(cards, dy=0):
+    """Bottom-left squad cards (synthetic, rows as measured at 1440p): per card a white name at x 184, then a white
+    health bar (alive) or a lime status line (dead). cards: list of (name row, 'alive' | 'dead', frame RGB, letters)."""
+    import numpy as np
+    a = np.full((1440, 2560, 3), 40, np.uint8)
+    for y, state, col, n in cards:
+        y += dy
+        a[y - 12:y + 50, 70:110] = col                         # coloured frame next to the portrait
+        for k in range(n):                                     # name: letters 3 px wide, 6 px apart
+            a[y:y + 18, 184 + 9 * k:187 + 9 * k] = 235
+        if state == 'alive':
+            a[y + 27:y + 31, 186:330] = (150, 60, 230)         # shield
+            a[y + 33:y + 43, 185:300] = 240                    # health
+        elif state == 'dead':
+            for k in range(22):
+                a[y + 27:y + 44, 186 + 9 * k:190 + 9 * k] = (160, 196, 64)
+    return a
+
+
+def test_respawn_cards_and_events():
+    """Squad cards: alive (bar) and dead (lime status line) are told apart; a teammate dead for a while and then alive
+    again in the same game is a respawn; the player's own death = spectating, back in his own view = respawned."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_respawn as P
+    teal, orange = (40, 200, 200), (240, 150, 30)
+    cs = P.read_cards(_card_frame([(1058, 'alive', teal, 1), (1146, 'dead', orange, 10)]))    # a one-letter name too
+    assert [c['state'] for c in cs] == ['alive', 'dead'] and abs(cs[0]['y'] - 1058) <= 3 and abs(cs[1]['y'] - 1146) <= 3, cs
+    assert P.hue_name(cs[0]['hue']) == 'teal'
+    rows = P.slot_rows([1058, 1059, 1146, 1147, 1146, 1058, 1240])          # the two rows read most (Wildcard: 1035 / 1149)
+    assert rows == [1058.0, 1146.0] and P.slot_of(1150, rows) == 1 and P.slot_of(1100, rows) is None, rows
+    assert P.read_cards(_card_frame([])) == []
+    # the spectator layout puts the cards 85 px higher: read too, but such frames are dropped by own_view
+    assert [c['state'] for c in P.read_cards(_card_frame([(1058, 'dead', teal, 4)], dy=-85))] == ['dead']
+    A = lambda: {'y': 1146, 'state': 'alive', 'hue': 35}
+    D = lambda: {'y': 1146, 'state': 'dead', 'hue': 80}
+    T0 = {'y': 1058, 'state': 'alive', 'hue': 180}
+    reads = [(t, [dict(T0), D()], False) for t in range(100, 130)]
+    reads += [(130, [dict(T0), A()], False)]                     # one odd read: not a respawn yet
+    reads += [(t, [dict(T0), D()], False) for t in range(131, 140)]
+    reads += [(t, [dict(T0), A()], None) for t in range(140, 150)]   # no ring read on these frames: nearest sample
+    reads += [(t, [dict(T0), D()], True) for t in range(150, 160)]   # spectating: someone else's cards
+    reads += [(t, [dict(T0), A()], True) for t in range(160, 170)]
+    samples = [[float(t), 0, 60.0, t >= 150, 0, 0, 0, 0.0, False, False] for t in range(100, 170, 2)]
+    games = [{'tStart': 90.0}, {'tStart': 1000.0}]
+    P.attach(games, reads, samples)
+    r = games[0]['respawns']
+    assert len(r) == 1 and r[0]['t'] == 140 and r[0]['who'] == 'teammate' and r[0]['slot'] == 2, r
+    assert r[0]['color'] == 'orange' and r[0]['deadSince'] == 100 and r[0]['lastDeadRead'] == 139, r
+    # own death and respawn: spectator layout from 200 to 230, own view again at 236, then a fall from the dropship
+    S = [[float(t), 0, 60.0, False, 0, 0, 3000, 0.0] for t in range(150, 200, 2)]
+    S += [[float(t), 0, 60.0, True, None, None, None, None] for t in range(200, 232, 2)]
+    S += [[float(t), 0, 60.0, False, 0, 0, 9000 - t, 1200.0 if t < 250 else 300.0] for t in range(236, 300, 2)]
+    S += [[float(t), 0, 60.0, True, None, None, None, None] for t in range(300, 320, 2)]   # dies again: game over
+    deaths, own = P.own_deaths(S, 100, 1000)
+    assert deaths == [200.0, 300.0], deaths
+    assert own == [{'t': 236.0, 'who': 'self', 'how': 'dropship', 'deadSince': 200.0}], own
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
@@ -2159,6 +2574,222 @@ def test_audio_tracks_cut_after_recording():
     part.write_bytes(b"half")
     assert tracks.clean_parts([folder]) == 1 and not part.exists()
     assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
+
+
+# ------------------------------------------------------------------ crash reports to the team hub
+
+def _crash_setup(hub_url="http://hub.test:8420", on=True, key=True):
+    """The crash reporter attached to a scratch settings object, with a fake key and a send() that records."""
+    from pcs_recorder import crash, hub
+    s = settings.Settings(hub_url=hub_url, crash_reports=on, encoder="jim_nvenc")
+    s.obs_password = "Obs-Pw-" + "q7" * 6
+    log_f = TMP / f"app-{time.time_ns()}.log"
+    log_f.write_text("".join(f"2026-11-17 20:00:00 INFO recorder: line {i} " + "x" * 600 + "\n" for i in range(500)),
+                     encoding="utf-8")
+    crash.R.__init__()
+    crash.R.attach(s, "1.10.99", "1.10.98", str(log_f))
+    crash.R.sync = True
+    sent = []
+    crash.R.send = lambda rep: (sent.append(rep), True)[1]
+    hub.S.loaded, hub.S.key = True, ("pcs_" + "T3st" * 10 + "abc") if key else None
+    return crash, s, sent
+
+
+def _crash_teardown():
+    from pcs_recorder import crash, hub
+    crash.R.__init__()
+    hub.S.loaded, hub.S.key = False, None
+
+
+def test_crash_redaction():
+    """Keys, tokens, passwords, e-mails, the Windows user / PC name and user folders never leave the PC."""
+    crash, s, sent = _crash_setup()
+    try:
+        key = "pcs_" + "T3st" * 10 + "abc"
+        old = os.environ.get("USERNAME"), os.environ.get("COMPUTERNAME")
+        os.environ["USERNAME"], os.environ["COMPUTERNAME"] = "Jeanne Testeur", "JEANNE-GAMINGPC"
+        try:
+            sec = crash.own_secrets(s)
+        finally:
+            for k, v in zip(("USERNAME", "COMPUTERNAME"), old):
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+        dirty = [f"hub key {key}", f"obs pw {s.obs_password}", "Authorization: Bearer abcdefghijklmnop1234",
+                 "C:\\Users\\Jeanne Testeur\\Videos\\PCS Recordings\\a.mp4", "c:/users/someone/AppData/Local/x",
+                 "mail player.one@example.org now", "token=ya29.a0Abc_def-ghi", "refresh 1//0gAbCdEfGhIjKlMnOpQrStUv",
+                 "obsws connect password='hunter22'", '{"hub_key": "zzz", "client_secret": "GOCSPX-abcdef"}',
+                 "http://hub:8420/login?next=/#key=" + key, "machine JEANNE-GAMINGPC user jeanne testeur",
+                 "D:\\OneDrive - Jeanne Testeur\\Videos"]
+        out = "\n".join(crash.clean_lines(dirty, sec))
+        for bad in (key, s.obs_password, "abcdefghijklmnop1234", "Jeanne", "jeanne", "someone", "player.one@example.org",
+                    "ya29.a0Abc", "1//0gAbCd", "hunter22", "zzz", "GOCSPX-abcdef", "GAMINGPC"):
+            assert bad not in out, (bad, out)
+        assert "Users\\<user>\\Videos" in out and "<email>" in out, out
+        plain = "2026-11-17 20:00:01 INFO recorder: encoder jim_av1_nvenc 12 Mb/s, capture window, hotkey ctrl+alt+m"
+        assert crash.redact(plain) == plain
+        t0 = time.time()
+        crash.clean_lines(["y" * 100000] * 200, sec)                  # long lines are cut first: stays fast
+        assert time.time() - t0 < 2
+    finally:
+        _crash_teardown()
+
+
+def test_crash_report_contents_and_limits():
+    """A report: kind, error, versions, Windows, GPU, context, the last 200 log lines (each cut), small in all."""
+    import json
+    crash, s, sent = _crash_setup()
+    crash._sysinfo["gpu"] = "NVIDIA GeForce RTX 3060 Ti"
+    try:
+        assert crash.report("record_start", "OBS didn't answer on port 4466", "Traceback ...",
+                            [("OBS log", ["12:00:00.000: line"] * 500)], {"minutes": 1.5})
+        rep = sent[0]
+        assert rep["kind"] == "record_start" and rep["error"] == "OBS didn't answer on port 4466"
+        assert rep["app"] == "1.10.99" and rep["scanner"] == "1.10.98" and rep["gpu"].startswith("NVIDIA")
+        assert rep["windows"] and len(rep["log"]) == crash.LOG_LINES and "line 499" in rep["log"][-1]
+        assert all(len(x) <= crash.MAX_LINE for x in rep["log"])
+        assert len(rep["attachments"][0]["lines"]) == crash.ATTACH_LINES
+        assert rep["context"]["encoder"] == "jim_nvenc" and rep["context"]["minutes"] == 1.5
+        assert "capture_apps" in rep["context"]
+        assert len(json.dumps(rep).encode()) < 200 * 1024                  # the hub takes up to 256 KB
+        assert crash.report("bogus", "x") and sent[-1]["kind"] == "other"
+    finally:
+        crash._sysinfo.clear()
+        _crash_teardown()
+
+
+def test_crash_reports_only_on_the_hub_and_when_on():
+    for kw in ({"hub_url": ""}, {"on": False}, {"key": False}):
+        crash, s, sent = _crash_setup(**kw)
+        try:
+            assert not crash.report("unhandled", "ValueError: x") and sent == [], kw
+        finally:
+            _crash_teardown()
+    from pcs_recorder import crash
+    assert not crash.report("unhandled", "not attached")                     # never set up: nothing, no error
+    assert settings.Settings().crash_reports is True                         # on by default (used only on the hub)
+
+
+def test_crash_throttle_and_retry():
+    """The same error once per 30 min, 10 a day; a hub that can't be reached gets them later."""
+    crash, s, sent = _crash_setup()
+    try:
+        assert crash.report("unhandled", "KeyError: 12")
+        assert not crash.report("unhandled", "KeyError: 13")               # same error (numbers don't count)
+        for i in range(12):
+            crash.report("scan_failed", f"error {chr(65 + i)}")
+        assert len(sent) == crash.PER_DAY, len(sent)
+        crash.R.__init__(); crash.R.attach(s, "1", "", None); crash.R.sync = True
+        crash.R.send = lambda rep: None                                    # hub not reachable
+        assert not crash.report("record_stop", "OBS didn't stop") and len(crash.R.pending) == 1
+        got = []
+        crash.R.send = lambda rep: (got.append(rep), True)[1]
+        crash.R.tick()
+        assert len(got) == 1 and crash.R.pending == []
+    finally:
+        _crash_teardown()
+
+
+def test_crash_reports_from_the_recorder():
+    """Recording that doesn't start / runs without OBS recording / gives no file, and a failed scan, are reported."""
+    import subprocess
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        s.folder_path.mkdir(parents=True, exist_ok=True)
+        apex = {"on": False}
+        clock = {"t": time.time()}
+        obs = FakeOBS(s.folder_path)
+
+        def bad_start():
+            raise RuntimeError("OBS didn't answer on port 4466")
+        obs.start = bad_start
+        r = Recorder(s, obs, FakeHub(), FakeUI(False), fake_scan, is_apex_running=lambda: apex["on"],
+                     clock=lambda: clock["t"])
+        r._final_file = lambda p, wait_s=0: p
+        apex["on"] = True; r.tick()
+        assert sent[-1]["kind"] == "record_start" and "4466" in sent[-1]["error"], sent
+        # starts, but OBS never says it records: reported once, 30 s later
+        obs.start = lambda: None
+        obs.elapsed = lambda: None
+        crash.R.sent.clear()
+        r.tick(); n = len(sent)
+        clock["t"] += 31; r.tick(); r.tick()
+        assert len(sent) == n + 1 and "isn't recording" in sent[-1]["error"], sent[-1]
+        # Apex closes, OBS gives no file
+        obs.stop = lambda: None
+        apex["on"] = False; r.tick()
+        assert sent[-1]["kind"] == "record_stop" and "OBS wasn't recording" in sent[-1]["error"], sent[-1]
+        # a scan that fails
+        e = retention.Entry(path=str(make_file(s.folder_path, "Apex Legends_x.mp4", UNIT)), started=clock["t"],
+                            status="recorded")
+        r.idx["rec-x"] = e
+        (s.folder_path / "Apex Legends_x.scan").mkdir()
+        (s.folder_path / "Apex Legends_x.scan" / "scan.log").write_text("Traceback\nValueError: bad frame\n")
+        r.start_scan = lambda v, o: subprocess.Popen([sys.executable, "-c", "import sys; sys.exit(2)"])
+        r._begin_scan("rec-x")
+        for _ in range(40):
+            r.tick(); time.sleep(0.1)
+            if r.scan_proc is None:
+                break
+        rep = sent[-1]
+        assert rep["kind"] == "scan_failed" and "exit code 2" in rep["error"], rep
+        assert rep["attachments"][0]["name"] == "scan.log" and "ValueError: bad frame" in rep["attachments"][0]["lines"]
+        assert rep["context"]["exit_code"] == 2
+    finally:
+        _crash_teardown()
+
+
+def test_failed_recording_never_deletes_other_files():
+    """A recording without a file (path "") is older than the keep limit: retention removes the entry only, never the
+    files of the folder the app runs in (Path("") is the working folder; its glob matched every file there)."""
+    work = TMP / f"workdir-{time.time_ns()}"
+    work.mkdir()
+    keep = [make_file(work, n, 10) for n in ("PCS-Scanner.exe", "notes.txt", ".gitignore")]
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        idx = {"f": retention.Entry(path="", started=time.time() - 30 * 86400, status="failed"),
+               "g": retention.Entry(path="relative.mp4", started=time.time() - 30 * 86400, status="failed")}
+        assert retention.files_of(idx["f"]) == [] and retention.files_of(idx["g"]) == []
+        removed = retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert all(p.exists() for p in keep), [p.name for p in work.iterdir()]
+        assert [n for n, _ in removed] == [""] and idx == {}                # entries gone, no file deleted
+        idx = {"new": retention.Entry(path="", started=time.time() - 3600, status="failed")}
+        retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert "new" in idx                                                 # a fresh failure stays listed
+    finally:
+        os.chdir(old_cwd)
+
+
+def test_crash_obs_crash_files():
+    """A new OBS crash file is reported once (on first run: those of the last 7 days, at most 3)."""
+    from pcs_recorder import obs as obsmod
+    crash, s, sent = _crash_setup()
+    try:
+        crashes = obsmod.CONFIG / "crashes"
+        crashes.mkdir(parents=True, exist_ok=True)
+        old = crashes / "Crash 2026-10-01 10-00-00.txt"
+        old.write_text("Unhandled exception: c0000005\nDate/Time: 2026-10-01\n")
+        os.utime(old, (time.time() - 30 * 86400,) * 2)
+        new = crashes / "Crash 2026-11-17 20-00-00.txt"
+        new.write_text("Unhandled exception: c0000005\nFault address: 7FF8 (c:\\users\\someone\\obs.dll)\n")
+        crash.STATE_FILE.unlink(missing_ok=True)
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 1
+        assert sent[-1]["kind"] == "obs_crash" and "c0000005" in sent[-1]["error"]
+        assert "someone" not in str(sent[-1])
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 0                              # not again
+        newer = crashes / "Crash 2026-11-17 21-00-00.txt"
+        newer.write_text("Unhandled exception: 80000003\n")
+        os.utime(newer, (time.time() + 5,) * 2)
+        crash.check_obs_crashes.last = 0
+        assert crash.check_obs_crashes() == 1
+    finally:
+        _crash_teardown()
 
 
 def _scanner():

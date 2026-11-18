@@ -3,6 +3,7 @@ Run:  python tests/test_ui.py
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -252,10 +253,46 @@ def test_recorder_settings_and_start_with_windows():
         assert calls == [False] and b.auto.rec.cleaned == 2
         call(srv, "/api/settings", {"start_with_windows": True})
         assert calls == [False, True]
+        code, state, _ = call(srv, "/api/settings", {"crash_reports": False})    # Settings > Team hub switch
+        assert code == 200 and b.auto.s.crash_reports is False
+        assert state["recorder"]["settings"]["crash_reports"] is False
         srv.stop()
     finally:
         st.save = st_save
     assert st.Settings().start_with_windows is True                  # on by default
+
+
+def test_bitrate_setting_per_encoder():
+    """Settings → Quality shows the encoder's bitrate (AV1 10, HEVC / H.264 12); saving the page unchanged keeps
+    it automatic, another value is the player's own."""
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    a.s = st.Settings(folder=str(TMP / "recs"), encoder="av1_texture_amf").clamp()
+    b = pcs_server.Backend(a)
+    b.set_start_with_windows = lambda on: None
+    st_save = st.save
+    st.save = lambda s: s.clamp()                   # no recorder.json written by this test
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        r = state["recorder"]
+        assert code == 200 and r["settings"]["bitrate_mbps"] == 10 and r["bitrateDefault"] == 10 and r["bitrateAuto"]
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 10, "keep_days": 5})
+        assert code == 200 and a.s.bitrate_auto and state["recorder"]["settings"]["bitrate_mbps"] == 10
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 15})
+        assert code == 200 and not a.s.bitrate_auto and state["recorder"]["bitrateAuto"] is False
+        a.s.encoder = "obs_nvenc_hevc_tex"                  # e.g. "Test encoder again" on a new card
+        a.s.clamp()
+        code, state, _ = call(srv, "/api/state")
+        assert state["recorder"]["settings"]["bitrate_mbps"] == 15 and state["recorder"]["bitrateDefault"] == 12
+        call(srv, "/api/settings", {"bitrate_mbps": 12})    # back to the recommendation: automatic again
+        assert a.s.bitrate_auto and a.s.bitrate_mbps == 12
+    finally:
+        srv.stop()
+        st.save = st_save
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "bitrateTip(r)" in js and "AV1 10, HEVC / H.264 12" in js and "12 is recommended." not in js
 
 
 def test_voice_app_setting():
@@ -468,39 +505,96 @@ def test_delete_and_sound_levels():
 
 
 def test_coach_role():
-    """Coach only for the coach's Google account; importing recordings by hand is the coach's."""
-    b = pcs_server.Backend()
-    srv = pcs_server.Server(b)
-    srv.start()
-    real_build, real_drive = dict(core.BUILD), core.drive_service
-    core.BUILD["coach"] = "coach@example.com"
-    who = {"email": "player@example.com"}
-
-    class Svc:
-        def about(self):
-            class A:
-                def get(self, fields):
-                    class X:
-                        def execute(self):
-                            return {"user": {"emailAddress": who["email"]}}
-                    return X()
-            return A()
-    core.drive_service = lambda interactive=True: Svc()
+    """Coach only for the coach's hub key (the hub's /api/me says coach); importing recordings by hand is the coach's.
+    No coach address is built into the app."""
+    assert "coach" not in core.BUILD
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup(PLAYER_KEY)
     try:
         code, r, _ = call(srv, "/api/settings", {"role": "Coach", "player": "Xno"})
         assert code == 403 and "coach" in r["error"].lower()
         assert core.SETTINGS["player"] == "Xno" and core.SETTINGS.get("role") != "Coach"   # the rest was saved
         assert call(srv, "/api/library/add", {"paths": []})[0] == 403
-        who["email"] = "Coach@Example.com"
+        hub.set_key(GOOD_KEY)
         code, st, _ = call(srv, "/api/settings", {"role": "Coach"})
-        assert code == 200 and st["coach"] is True and st["role"] == "Coach"
+        assert code == 200 and st["coach"] is True and st["role"] == "Coach", st
         assert call(srv, "/api/library/add", {"paths": []})[0] == 200
         code, st, _ = call(srv, "/api/settings", {"role": "IGL"})
         assert st["coach"] is False
+        hub.set_key(None)                                    # no key: never the coach
+        assert call(srv, "/api/settings", {"role": "Coach"})[0] == 403
     finally:
-        core.BUILD.clear(); core.BUILD.update(real_build); core.drive_service = real_drive
         core.SETTINGS["role"] = ""
+        _backup_done(srv, fake)
+
+
+def test_coach_email_from_settings():
+    """The scans folder on Drive is shared with the coach's address the player typed in Settings, once per address;
+    without one nothing is shared."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    calls = {"share": [], "folders": []}
+
+    class Svc:
+        def files(self):
+            class F:
+                def list(self, **kw):
+                    return _X({"files": [{"id": f} for f in calls["folders"]]})
+
+                def create(self, body, fields):
+                    calls["folders"].append("F1")
+                    return _X({"id": "F1"})
+            return F()
+
+        def permissions(self):
+            class P:
+                def create(self, fileId, sendNotificationEmail, body):
+                    calls["share"].append((fileId, body["emailAddress"]))
+                    return _X({})
+            return P()
+
+    class _X:
+        def __init__(self, v):
+            self.v = v
+
+        def execute(self):
+            return self.v
+    try:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == []          # no address: not shared
+        code, r, _ = call(srv, "/api/settings", {"coach_email": "not an address"})
+        assert code == 500 and "address" in r["error"]
+        code, st, _ = call(srv, "/api/settings", {"coach_email": " coach@example.com "})
+        assert code == 200 and st["coachEmail"] == "coach@example.com"
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == [("F1", "coach@example.com")]
+        core.scans_folder(Svc())
+        assert len(calls["share"]) == 1                                           # once per address
+        call(srv, "/api/settings", {"coach_email": "new.coach@example.com"})
+        core.scans_folder(Svc())
+        assert calls["share"][-1] == ("F1", "new.coach@example.com") and len(calls["share"]) == 2
+    finally:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        core.save_settings()
         srv.stop()
+
+
+def test_no_personal_email_in_app():
+    """No personal address in what the exe is built from (a security review found the coach's address in the exe):
+    app/, scanner/ and the build workflow. Only obviously fake examples are allowed."""
+    root = Path(__file__).resolve().parent.parent
+    allowed = ("example.com", "example.org", "example.net", "users.noreply.github.com")
+    found = []
+    files = [p for d in ("app", "scanner") for p in (root / d).rglob("*")
+             if p.is_file() and p.suffix.lower() in (".py", ".js", ".html", ".css", ".json", ".txt", ".md", ".yml")]
+    files += list((root / ".github").rglob("*.yml"))
+    for p in files:
+        for m in re.finditer(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})",
+                             p.read_text(encoding="utf-8", errors="replace")):
+            if not m.group(1).lower().endswith(allowed):
+                found.append(f"{p.relative_to(root)}:{m.group(1)}")      # domain only: never print the address
+    assert not found, "personal email address in: " + ", ".join(found)
+    wf = (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
 def test_team_link_weapon_icons():
@@ -1185,6 +1279,271 @@ def test_hub_join_from_setup():
         srv.stop()
         fake.stop()
         st.save = st_save
+        _fresh_hub()
+
+
+INVITE = "pcsi_" + "Q" * 20 + "-_" + "Z" * 21                   # obviously fake invite code (43 chars after pcsi_)
+
+
+def _icons_file(n):
+    import io
+    import numpy as np
+    b = io.BytesIO()
+    np.savez_compressed(b, **{f"gun{i}": np.full((20, 50), 10 * i, np.uint8) for i in range(n)})
+    return b.getvalue()
+
+
+class InviteHub:
+    """A hub with invites and weapon icons (hub PR #12), on localhost. `redeem` = what /api/invites/redeem answers:
+    "ok" (GOOD_KEY for Tester), "invalid", "taken", "limit". `icons` = None (404) or (asset, bytes). Every request is
+    kept (method, path, Authorization, body)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.redeem, self.icons, self.seen, self.blob_calls = "ok", None, [], 0
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, obj, headers=None, ctype="application/json"):
+                data = obj if isinstance(obj, bytes) else json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                body = self.rfile.read(n) if n else b""
+                auth = self.headers.get("Authorization", "")
+                hub.seen.append((self.command, self.path, auth, body, self.headers.get("Cookie", "")))
+                p = self.path
+                if p == "/api/ping":
+                    return self._send(200, {"version": "0.6.0"})
+                if p == "/api/invites/redeem" and self.command == "POST":
+                    if auth:
+                        return self._send(400, {"detail": "no key here", "error": "bad_request"})
+                    try:
+                        code = json.loads(body).get("code")
+                    except ValueError:
+                        code = None
+                    if hub.redeem == "limit":
+                        return self._send(429, {"detail": "Too many", "error": "too_many_attempts"}, {"Retry-After": "600"})
+                    if hub.redeem == "invalid" or code != INVITE:
+                        return self._send(400, {"detail": "This invite link is not valid (used, expired or revoked).",
+                                                "error": "invalid_code"})
+                    if hub.redeem == "taken":
+                        return self._send(409, {"detail": "A key named Tester exists already: ask your coach.",
+                                                "error": "name_taken"})
+                    return self._send(200, {"key": GOOD_KEY, "name": "Tester", "role": "player", "hub": "http://elsewhere:8420"},
+                                      {"Cache-Control": "no-store"})
+                if auth != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if p == "/api/me":
+                    return self._send(200, {"name": "Tester", "role": "player", "via": "header",
+                                            "can_edit_lootbook": True, "coach_only_collections": []})
+                if p == "/api/db/weaponicons/current":
+                    if not hub.icons:
+                        return self._send(404, {"detail": "Not Found", "error": "not_found"})
+                    asset, data = hub.icons
+                    return self._send(200, {"id": "current", "version": 1, "data": {
+                        "asset": asset, "bytes": len(data or b""), "sha256": "x", "count": 3, "source": "test"}})
+                if p.startswith("/_blob/"):
+                    hub.blob_calls += 1
+                    if hub.icons and p[7:] == hub.icons[0] and hub.icons[1] is not None:
+                        return self._send(200, hub.icons[1], ctype="application/octet-stream")
+                    return self._send(200, b"<svg/>", ctype="image/svg+xml")
+                return self._send(404, {"detail": "Not Found"})
+
+            do_GET = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_hub_invite_link_parsing():
+    from pcs_recorder import hub
+    assert hub.parse_invite(f"http://100.64.1.2:8420/join#code={INVITE}") == (INVITE, "http://100.64.1.2:8420")
+    assert hub.parse_invite(f"  https://hub.example.ts.net/join#code={INVITE}&x=1\n") == (INVITE, "https://hub.example.ts.net")
+    assert hub.parse_invite(f"http://pcs-hub:8420/join#code={INVITE.replace('_', '%5F')}")[0] == INVITE
+    for bad in ("", INVITE, f"http://h/join?code={INVITE}", f"ftp://h/join#code={INVITE}",    # code in the query: no
+                f"http://user@h/join#code={INVITE}", f"http://h/join#code={INVITE}X", f"http://h/login#key={GOOD_KEY}"):
+        assert hub.parse_invite(bad) == (None, None), bad
+    assert hub.parse_key(f"http://h:8420/join#code={INVITE}") == (None, None)       # not mistaken for a key
+    assert INVITE not in core.redact(f"x {INVITE} y") and GOOD_KEY not in core.redact(GOOD_KEY)
+
+
+def test_hub_join_with_invite():
+    """Home → Join the team hub with a single-use invite link: the code goes to the hub only in the request body (no
+    key, no cookie), the key it gives is saved (encrypted) with the link's address, then tested. A used / wrong code,
+    a taken name and too many tries say so; the link and code never appear in an answer, an address or app.log.
+    Settings → Key takes the invite link too."""
+    import logging
+    from pcs_recorder import settings as st
+    hub = _fresh_hub()
+    fake = InviteHub()
+    b = pcs_server.Backend(_Auto(str(TMP / "invrecs")))
+    b.auto.s.hub_url = "http://old-hub:8420"
+    st_save = st.save
+    st.save = lambda s: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    link = f"{fake.url}/join#code={INVITE}"
+    answers = []
+    urllib3_level = logging.getLogger("urllib3").level
+    logging.getLogger("urllib3").setLevel(logging.DEBUG)          # even the HTTP library's own lines: no code
+    try:
+        # used (or opened in a browser first): the hub's words + what to do; nothing saved
+        fake.redeem = "invalid"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert code == 200 and not r["ok"] and "not valid" in r["text"] and hub.INVITE_USED in r["text"], r
+        assert hub.get_key() is None and b.auto.s.hub_url == "http://old-hub:8420" and "tailscale" not in r
+        # a key with that name exists
+        fake.redeem = "taken"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert not r["ok"] and r["text"] == "A key named Tester exists already: ask your coach." and hub.get_key() is None, r
+        # too many tries
+        fake.redeem = "limit"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert not r["ok"] and r["text"] == "Too many tries, try again later." and hub.get_key() is None, r
+        # works: key saved encrypted, the link's address (not the hub's "hub" field) replaces the old one, tested
+        fake.redeem = "ok"
+        code, raw, _ = call(srv, "/api/hub/join", {"link": link}, raw=True)
+        answers.append(raw)
+        r = json.loads(raw)
+        assert code == 200 and r["ok"] and r["text"] == "Connected as Tester (player)", r
+        assert hub.get_key() == GOOD_KEY and b.auto.s.hub_url == fake.url and r["hub"]["key"] == "pcs_…AAAA"
+        assert GOOD_KEY.encode() not in hub.KEY_FILE.read_bytes()
+        redeems = [s for s in fake.seen if s[1] == "/api/invites/redeem"]
+        assert len(redeems) == 4 and all(m == "POST" and a == "" and c == "" for m, _, a, _, c in redeems)
+        assert all(json.loads(body) == {"code": INVITE} for *_, body, _ in redeems)
+        assert not any(INVITE in p or INVITE in a or (INVITE.encode() in body and p != "/api/invites/redeem")
+                       for _, p, a, body, _ in fake.seen)
+        # Settings → Key: an invite link pasted there (with the Test button's address field) is redeemed the same way
+        hub.set_key(None)
+        b.auto.s.hub_url = ""
+        fake.redeem = "invalid"
+        code, raw, _ = call(srv, "/api/settings", {"hub_url": "", "hub_key": link}, raw=True)
+        answers.append(raw)
+        assert code == 500 and hub.INVITE_USED in json.loads(raw)["error"] and hub.get_key() is None
+        fake.redeem = "ok"
+        code, raw, _ = call(srv, "/api/settings", {"hub_url": "http://typed:1", "hub_key": link}, raw=True)
+        answers.append(raw)
+        assert code == 200 and hub.get_key() == GOOD_KEY and b.auto.s.hub_url == fake.url
+        assert json.loads(raw)["hub"]["key"] == "pcs_…AAAA"
+        answers.append(call(srv, "/api/state", raw=True)[1])
+        # a hub that can't be reached: no key, Tailscale advice as for sign-in links
+        hub.set_key(None)
+        code, r, _ = call(srv, "/api/hub/join", {"link": f"http://127.0.0.1:9/join#code={INVITE}"})
+        assert not r["ok"] and r["text"] == "Hub not reachable" and r["tailscale"] == "" and hub.get_key() is None, r
+        for a in answers:
+            assert INVITE.encode() not in a and GOOD_KEY.encode() not in a and b"/join#" not in a, a
+        for h in logging.getLogger().handlers:
+            h.flush()
+        log = Path(core.LOG_F).read_text(encoding="utf-8", errors="replace")
+        assert "invite used" in log and INVITE not in log and "#code=" not in log and GOOD_KEY not in log
+    finally:
+        logging.getLogger("urllib3").setLevel(urllib3_level)
+        t = getattr(b, "_icons_thread", None)
+        if t:
+            t.join(15)                                               # the icons check started by the join
+        srv.stop()
+        fake.stop()
+        st.save = st_save
+        _fresh_hub()
+
+
+def test_weapon_icons_from_hub():
+    """The weapon icons come from the hub when it has them: downloaded once per asset id with the key, checked with
+    the app's own icons check (a bad file is refused, kept off this PC and not downloaded again), the team link not
+    needed then. No icons on the hub (404): the team link still works as before."""
+    from pcs_recorder import weaponicons
+    hub = _fresh_hub()
+    fake = InviteHub()
+    auto = _Auto(str(TMP / "iconrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    real_get = core.http_get
+    drive = {"data": _icons_file(2), "calls": 0}
+
+    def fake_drive(url, limit):
+        drive["calls"] += 1
+        return drive["data"]
+    core.http_get = fake_drive
+    Path(core.ICONS_F).unlink(missing_ok=True)
+    weaponicons.STATE_F.unlink(missing_ok=True)
+    fid = "1AbCdEfGhIjKlMnOpQrStUvWxYz012345"
+    try:
+        # no key: the hub isn't asked; no team link either: nothing
+        assert b.sync_icons() == "none" and not fake.seen
+        hub.set_key(GOOD_KEY)
+        # none on the hub yet (404): the team link is used as before
+        core.SETTINGS["team_link"] = f"https://drive.google.com/file/d/{fid}/view"
+        assert b.sync_icons() == "updated" and drive["calls"] == 1 and not b.icons_from_hub()
+        assert Path(core.ICONS_F).read_bytes() == drive["data"] and fake.blob_calls == 0
+        # the coach uploads the icons to the hub: downloaded once, the team link isn't asked any more
+        one = _icons_file(3)
+        fake.icons = ("a" * 32, one)
+        n = len(b.messages)
+        assert b.sync_icons() == "hub:updated" and Path(core.ICONS_F).read_bytes() == one and fake.blob_calls == 1
+        assert any("from the team hub" in m["text"] for m in list(b.messages)[n:])
+        assert b.icons_from_hub() and b.state()["iconsFromHub"] is True and drive["calls"] == 1
+        blobs = [s for s in fake.seen if s[1].startswith("/_blob/")]
+        assert all(a == "Bearer " + GOOD_KEY for _, _, a, _, _ in blobs) and not any(GOOD_KEY in s[1] for s in fake.seen)
+        for _ in range(3):                                          # same asset id: never downloaded again
+            assert b.sync_icons() == "hub:same"
+        assert fake.blob_calls == 1 and drive["calls"] == 1
+        # a new upload (new asset id): downloaded again
+        two = _icons_file(5)
+        fake.icons = ("b" * 32, two)
+        assert b.sync_icons() == "hub:updated" and Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 2
+        # a bad file on the hub: refused, the good copy stays, said once, not downloaded again
+        fake.icons = ("c" * 32, b"PK\x03\x04 not icons")
+        n = len(b.messages)
+        b.sync_icons()
+        assert Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 3
+        assert sum("isn't usable" in m["text"] for m in list(b.messages)[n:]) == 1
+        b.sync_icons()
+        assert fake.blob_calls == 3 and sum("isn't usable" in m["text"] for m in list(b.messages)[n:]) == 1
+        assert not list(Path(core.ICONS_F).parent.glob("*.part"))
+        # the hub answers a placeholder drawing for a lost file: refused the same way
+        fake.icons = ("d" * 32, None)
+        b.sync_icons()
+        assert Path(core.ICONS_F).read_bytes() == two and fake.blob_calls == 4
+        # hub unreachable after icons came from it: the hub's copy stays (team link not used)
+        fake.icons = ("e" * 32, one)
+        assert b.sync_icons() == "hub:updated"
+        calls = drive["calls"]
+        fake.stop()
+        assert b.sync_icons() == "hub:error" and Path(core.ICONS_F).read_bytes() == one and drive["calls"] == calls
+        # page words: the team link becomes optional with the hub's icons
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        for text in ("iconsFromHub", "Team link${S.iconsFromHub ? ' (optional)'", "no team link needed",
+                     "Not needed: the team hub gives the weapon icons", "invite link"):
+            assert text in js, text
+    finally:
+        core.http_get = real_get
+        core.SETTINGS["team_link"] = ""
+        Path(core.ICONS_F).unlink(missing_ok=True)
+        weaponicons.STATE_F.unlink(missing_ok=True)
         _fresh_hub()
 
 
@@ -1958,8 +2317,10 @@ def test_audio_track_never_blocks_the_review():
     def slow_cut(video, outs):                        # stands in for ffmpeg on a 3-hour recording
         cuts.append([n for n, _ in outs])
         gate.wait(10)
-        for _, out in outs:
-            out.write_bytes(b"m4a-track-" + out.name.encode())
+        for _, out in outs:                           # written whole, then renamed, like the real cut (.part)
+            tmp = out.with_name(out.name + ".tmp")
+            tmp.write_bytes(b"m4a-track-" + out.name.encode())
+            os.replace(tmp, out)
     c = tracks.Cutter(is_apex_running=lambda: apex[0], cut=slow_cut, count=lambda video: 3, wait_s=0.05)
     b = pcs_server.Backend()
     b.cutter = c
@@ -2059,6 +2420,75 @@ def test_review_kill_feed_our_squad():
     for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
                  "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
         assert text in js, text
+
+
+RESPAWN_GAME = {"map": "ED", "mode": "ranked", "tStart": 100.0, "tEndGame": 900.0, "drop": None, "ring": [], "landing": None,
+                "select": {"tFirst": 80.0, "tLast": 100.0, "ranked": True,
+                           "squad": [{"slot": 1, "legend": "wraith", "self": False, "hue": 77},
+                                     {"slot": 2, "legend": "crypto", "self": True, "hue": 39},
+                                     {"slot": 3, "legend": "bangalore", "self": False, "hue": 179}]},
+                # scanner PR #52: a teammate named by the card colour, one whose colour matches no slot, the player
+                "respawns": [{"t": 400.0, "who": "teammate", "slot": 1, "hue": 80, "color": "yellow", "how": "card",
+                              "deadSince": 328.0, "lastDeadRead": 395.0},
+                             {"t": 500.0, "who": "teammate", "slot": 2, "hue": 300, "color": "purple", "how": "card",
+                              "deadSince": 470.0},
+                             {"t": 650.5, "who": "self", "how": "dropship", "deadSince": 560.0}],
+                "ownDeaths": [560.0],
+                "samples": []}
+
+
+def test_review_respawns_like_kills():
+    """Respawns from the scan (PR #52) reach the review page, and the page shows each one like a kill: a marker on the
+    kill feed lane and a line in the events, its own colour, '<who> respawned', a click seeks there."""
+    folder = TMP / "respawn-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.17-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}              # a game scanned before PR #52
+    (rec.with_suffix(".scan")).mkdir(exist_ok=True)
+    (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [RESPAWN_GAME, old]}))
+    feed = {"lines": [{"t": 380.0, "jpg": "", "event": "kill", "killer": {"side": "squad", "hue": 39}, "victim": {"side": "other"}}]}
+    (rec.with_suffix(".scan") / (rec.stem + ".feed.json")).write_text(json.dumps(feed))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = call(srv, "/api/library")[1][0]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert d["games"][0]["respawns"] == RESPAWN_GAME["respawns"]                     # passed through untouched
+        assert d["games"][1]["respawns"] is None                                           # older scan: just missing
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+        assert "respawned`" in js and "Respawned</span>" in js and ".tick.respawn" in css
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            end = time.time() + 15
+            while time.time() < end and not page.js("!!(window.RV && RV.ev && document.querySelector('#laneF .tick'))"):
+                time.sleep(0.2)
+            ev = page.js("RV.ev.filter(e => e.k === 'respawn').map(e => [e.t, e.title, e.sub, e.g])")
+            assert ev == [[400, "Wraith respawned", "back after 1:12", 0], [500, "Teammate respawned", "back after 0:30", 0],
+                          [650.5, "You respawned", "back after 1:30 · dropship", 0]], ev
+            # on the kill feed lane beside the kill tick, not on the start / rings lane
+            assert page.js("[...document.querySelectorAll('#laneF .tick.respawn')].map(x => +x.dataset.t)") == [400, 500, 650.5]
+            assert page.js("document.querySelectorAll('#laneF .tick:not(.respawn)').length") == 1
+            assert page.js("document.querySelectorAll('#laneE [data-t=\"400\"]').length") == 0
+            assert "respawns" in page.js("document.querySelector('#laneF .lane-label').textContent")
+            # in the events list, in order with the kill, own style; a click seeks the video there
+            rows = page.js("[...document.querySelectorAll('#rvBody .ev')].map(x => [x.classList.contains('respawn'), x.querySelector('b').textContent])")
+            assert [r for r in rows if r[0]] == [[True, "Wraith respawned"], [True, "Teammate respawned"], [True, "You respawned"]], rows
+            names = [r[1] for r in rows]
+            assert "You killed" in names and names.index("You killed") < names.index("Wraith respawned"), \
+                (names, page.js("JSON.stringify([RV.d.feed, RV.d.feedSides, RV.d.games[0].select])"))
+            page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
+            page.js("document.querySelector('#rvBody .ev.respawn').click(); document.querySelector('#laneF .tick.respawn[data-t=\"650.5\"]').click(); 1")
+            assert page.js("__seeks") == [400, 650.5], page.js("__seeks")
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
 
 
 class MinimapHub:
@@ -2205,6 +2635,161 @@ def test_minimap_transform_and_page():
     # nothing of EA's in the app: no picture files next to the page
     assert not [f for f in web.rglob("*") if f.suffix.lower() in (".jpg", ".jpeg", ".img")]
 
+
+class SquadHub:
+    """A hub with two players' scans of one game (gameKey g-1): `timings` documents and the scan files, as any key
+    reads them (hub 0.5). `calls` lists the paths asked; `down` makes it answer nothing."""
+    REC_ME, REC_MOE = "Apex Legends_2026.11.17-20.00", "Apex Legends_2026.11.17-19.58"
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.calls, self.down = [], False
+        me_scan = {"games": [{"landing": {"exitAtExact": 100.0}, "samples": [[101, 0, None, False, 10, 20, 0, 0]]}]}
+        # Moe jumped 220 s into his recording: game time = t - 220. A spectating row, a row before the jump, a gap.
+        moe_scan = {"games": [
+            {"landing": {"exitAtExact": 40.0}, "samples": [[41, 0, None, False, 1, 1, 0, 0]]},                       # an earlier game
+            {"landing": {"exitAtExact": 220.0, "x": 1000.4, "y": -2000.6}, "tEndGame": 400.0,
+             "samples": [[150, 0, None, False, 5, 5, 0, 0], [221, 0, None, False, 1000, -2000, 0, 0], [222, 0, None, False, 1010, -2010, 0, 0],
+                      [223, 0, None, True, 0, 0, 0, 0], [240, 0, None, False, 1100, -2100, 0, 0], [500, 0, None, False, 9, 9, 0, 0]]}]}
+        self.files = {"7": me_scan, "9": moe_scan}
+        self.timings = [
+            {"id": "tm-a", "data": {"gameKey": "g-1", "uploadedBy": "Blakey", "map": "SP", "recording": {"file": self.REC_ME, "jumpAt": 100.0}}},
+            {"id": "tm-b", "data": {"gameKey": "g-1", "uploadedBy": "Moe", "map": "SP", "recording": {"file": self.REC_MOE, "jumpAt": 220.0}}},
+            {"id": "tm-c", "data": {"gameKey": "g-2", "uploadedBy": "Moe", "map": "WE", "recording": {"file": "x", "jumpAt": 5.0}}},
+            {"id": "tm-d", "data": {"title": "a Loot Book document by hand"}}]
+        self.scans = [{"id": 9, "uploader": "moe", "name": self.REC_MOE + ".scan.json", "kind": "scan", "recording": self.REC_MOE},
+                      {"id": 8, "uploader": "moe", "name": self.REC_MOE + ".feed.json", "kind": "feed", "recording": self.REC_MOE},
+                      {"id": 7, "uploader": "Blakey", "name": self.REC_ME + ".scan.json", "kind": "scan", "recording": self.REC_ME}]
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _send(self, code, data):
+                data = json.dumps(data).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                hub.calls.append(self.path)
+                if hub.down:
+                    return self._send(503, {"detail": "down"})
+                if self.headers.get("Authorization", "") != "Bearer " + GOOD_KEY:
+                    return self._send(401, {"detail": "This key is not valid.", "error": "bad_key"})
+                if self.path == "/api/db/timings":
+                    return self._send(200, hub.timings)
+                if self.path.startswith("/api/scans?"):
+                    return self._send(200, hub.scans)
+                parts = self.path.split("/")
+                if len(parts) == 5 and parts[:3] == ["", "api", "scans"] and parts[4] == "file" and parts[3] in hub.files:
+                    return self._send(200, hub.files[parts[3]])
+                return self._send(404, {"detail": "Not Found"})
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_squad_paths_from_the_hub():
+    """Map panel Squad switch / Watch together map: teammates' paths of the same game, read from what the hub already
+    gives any key (timings + scan files), lined up in game time (0 = the jump), our own recording left out; kept in the
+    data folder so they show offline; no key: nothing asked."""
+    from pcs_recorder import squadpaths
+    hub = _fresh_hub()
+    fake = SquadHub()
+    folder = TMP / "squad"
+    folder.mkdir(exist_ok=True)
+    rec = folder / (SquadHub.REC_ME + ".mp4")
+    rec.write_bytes(b"x" * 10)
+    auto = _Auto(str(TMP / "squadrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["name"] == rec.name)
+    srv = pcs_server.Server(b)
+    srv.start()
+    data = Path(os.environ["PCS_DATA_DIR"]) / "squad-cache"
+    try:
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100")[1]
+        assert r == {"available": False, "text": "Squad paths need the team hub"} and not fake.calls, r
+        assert call(srv, f"/api/squadpaths?id={vid}&jump=100", token=False)[0] == 403
+        hub.set_key(GOOD_KEY)
+        # review player: our game found by recording name + jump; only Moe comes back (not our own recording)
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100.8")[1]
+        assert r["available"] and r["gameKey"] == "g-1" and r["map"] == "SP" and not r["offline"], r
+        assert [p["player"] for p in r["players"]] == ["Moe"], r
+        moe = r["players"][0]
+        # game time, not while spectating, nothing before the jump or after the game, a gap (None) after 17 s unread
+        assert moe["path"] == [[1.0, 1000, -2000], [2.0, 1010, -2010], None, [20.0, 1100, -2100]], moe
+        assert moe["land"] == [1000, -2001] and moe["recording"] == SquadHub.REC_MOE
+        assert "/api/scans/9/file" in fake.calls and "/api/scans/7/file" not in fake.calls
+        assert not any(GOOD_KEY in c for c in fake.calls)
+        # a jump that isn't on the hub: said so
+        assert call(srv, f"/api/squadpaths?id={vid}&jump=300")[1]["text"] == "This game isn't on the hub yet"
+        assert call(srv, "/api/squadpaths?id=nope&jump=1")[0] >= 400
+        # Watch together: the whole game by its key, both players
+        r = call(srv, "/api/squadpaths?gameKey=g-1")[1]
+        assert [p["player"] for p in r["players"]] == ["Blakey", "Moe"] and r["players"][0]["path"] == [[1.0, 10, 20]], r
+        # kept: asked again = no new request; the hub down = the copies, marked offline
+        n = len(fake.calls)
+        call(srv, "/api/squadpaths?gameKey=g-1")
+        assert len(fake.calls) == n
+        fake.down = True
+        lists = json.loads((data / "lists.json").read_text())
+        lists["at"] -= squadpaths.LIST_TTL + 1
+        (data / "lists.json").write_text(json.dumps(lists))
+        r = call(srv, f"/api/squadpaths?id={vid}&jump=100")[1]
+        assert r["available"] and r["offline"] and r["players"][0]["path"][0] == [1.0, 1000, -2000], r
+        assert GOOD_KEY not in "".join(f.read_text() for f in data.iterdir())
+        # no hub address: needs the hub
+        auto.s.hub_url = ""
+        assert call(srv, "/api/squadpaths?gameKey=g-1")[1]["available"] is False
+    finally:
+        srv.stop()
+        fake.stop()
+        _fresh_hub()
+        shutil.rmtree(data, ignore_errors=True)
+
+
+def test_squad_paths_from_a_scan():
+    """Only the positions a path needs are kept from a scan file: per game with a jump, in game time, thinned out."""
+    from pcs_recorder import squadpaths
+    seen = [[100 + i, 0, None, False, i, -i, 0, 0] for i in range(squadpaths.MAX_POINTS + 500)]
+    out = squadpaths.paths_of_scan({"games": [{"landing": {}}, {"landing": {"exitAt": 100}, "samples": seen + [[1, 0, None, False, None, 3, 0, 0], "x"]}]})
+    assert len(out) == 1 and out[0]["jump"] == 100 and out[0]["land"] is None
+    assert len(out[0]["path"]) == squadpaths.MAX_POINTS and out[0]["path"][0] == [0.0, 0, 0]
+    assert squadpaths.slug("Moe X!") == "moe-x" and squadpaths.slug("") == "unknown"
+
+
+def test_minimap_layers_and_quiet_drawing():
+    """Map panel: rings (when the scan has `ringCircles`), kill feed and coach notes placed on the path, teammates'
+    paths, Watch together's map; drawn at most 4 times a second, nothing while the window is hidden, no loop."""
+    web = Path(pcs_server.WEB)
+    js = (web / "minimap.js").read_text(encoding="utf-8")
+    for text in ("ringCircles", "/api/squadpaths?id=", "/api/squadpaths?gameKey=", "MM_EVERY_MS = 250", "document.hidden",
+                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">Squad</button>", "pcs-map-squad",
+                 "No teammate\\'s recording of this game on the hub", "Squad paths need the team hub",
+                 "function wtMapSetup", "function wtMapTick", "pcs-wt-map", "Click the path or a mark to go there"):
+        assert text in js, text
+    assert "requestAnimationFrame" not in js and "setInterval" not in js
+    assert "ringCircles" in pcs_server.GAME_FIELDS                                   # passed to the page when the scan has it
+    ses = (web / "session.js").read_text(encoding="utf-8")
+    assert 'id="wtMap"' in ses and "wtMapSetup($('#wtMap'), st," in ses
+    tick = ses[ses.index("function syncTick"):]
+    tick = tick[:tick.index("\n}\n")] if "\n}\n" in tick else tick[:tick.index("\r\n}\r\n")]
+    assert "document.hidden" in tick.split("wtMapTick")[0] and "wtMapTick(T)" in tick   # the map follows the hidden-safe tick
+    css = (web / "minimap.css").read_text(encoding="utf-8")
+    assert ".mm-k.note" in css and ".wt-map" in css and "@keyframes" not in css and "animation" not in css
 
 def _edge():
     for base in (os.environ.get("ProgramFiles(x86)", ""), os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "")):

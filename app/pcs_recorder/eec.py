@@ -1,16 +1,31 @@
-"""Scrim results from EEC, for the YouTube description: standing out of the lobby, points, kills, per game.
+"""Scrim results from EEC, for the YouTube description: standing out of the lobby, points, kills, drops, per game.
 
 Two sources, both of data a person fetched from EEC by hand (EEC's terms forbid bots and scrapers, so this
 app never reads the EEC site itself):
 - the lobby's export file, from the lobby page's Download button (lobbies_<num>_<code>_scores.json);
-- the team hub, when the coach already imported that export into the Loot Book (collection "scrims").
+- the team hub, when the coach already imported that export (collection "scrims").
 
 Points use ALGS scoring, like the Loot Book: placement points plus one per kill.
+
+Drops. The export's `draft` holds one POI pick per team and map; each player row carries `map_pick_id` (the same id
+on every game the team played with that pick). A team's picks sorted by pick number belong to its ids sorted (as the
+hub does it, hub/eec.py). Without ids: one pick per game when the counts say so, else one per map in play order. A
+hub document has drops only when the hub imported it with the fixed drops (`draft` in the document): the old Loot
+Book split put most November drops on the wrong game, so those are not used.
+
+Coach's rule (18 Nov 2026): EEC is right about 95 % of the time. Where EEC's drop and where our scan says we landed
+disagree, EEC wins for display and our value is kept next to it (never hidden). EEC drops also confirm that a block is
+that EEC scrim (`check_block`): a scanned game is compared with the EEC game on the same map that started within
+15 minutes of it; the block is that scrim when more compared games agree than differ, and is not that scrim when more
+differ (e.g. a tournament the same evening) or when none of its games was played at the lobby's game times. Nothing
+to compare (no drops, no landing) = the old behaviour (times only).
 """
 from __future__ import annotations
 
 import json
 import re
+import sys
+import unicodedata
 from pathlib import Path
 
 ALGS_PTS = [12, 9, 7, 5, 4, 3, 3, 2, 2, 2, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0]
@@ -30,26 +45,104 @@ def eec_map(name: str) -> str:
     return name or ""
 
 
+def _int(v) -> int:
+    try:
+        return int(float(v or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _key(team) -> str:
+    return str(team or "").strip().lower()
+
+
+def poi_name(n) -> str:
+    """'SKYHOOK WEST (2)' -> 'Skyhook West' (as the hub and the Loot Book show it)."""
+    n = re.sub(r"\s*\(\d+\)\s*$", "", str(n or "")).strip().lower()
+    return " ".join(w if w in ("a", "of") else w[:1].upper() + w[1:] for w in n.split())
+
+
+def export_drops(matches: list[dict], draft: list) -> tuple[dict, str]:
+    """{(game index, team key): drop name} and how they were found: "pick id", "order" or "" (none)."""
+    ids: dict[str, dict[int, list[int]]] = {}       # team -> {map_pick_id: [game index]}
+    maps: list[str] = []
+    for gi, g in enumerate(matches):
+        if (g.get("map_name") or "") not in maps:
+            maps.append(g.get("map_name") or "")
+        for r in g.get("data") or []:
+            pid = _int(r.get("map_pick_id")) if isinstance(r, dict) else 0
+            if pid:
+                games = ids.setdefault(_key(r.get("team_name")), {}).setdefault(pid, [])
+                if gi not in games:
+                    games.append(gi)
+    picks: dict[str, list[dict]] = {}
+    for d in draft or []:
+        if isinstance(d, dict) and d.get("team") and d.get("poi"):
+            picks.setdefault(_key(d["team"]), []).append(d)
+    played = {_key(r.get("team_name")) for g in matches for r in g.get("data") or [] if isinstance(r, dict)}
+    out: dict[tuple[int, str], str] = {}
+    how = set()
+    for team, ps in picks.items():
+        if team not in played:
+            continue                                       # drafted, never in the games
+        ps = sorted(ps, key=lambda d: (_int(d.get("pick_num")), _int(d.get("seed"))))
+        have = sorted(ids.get(team, {}).items())
+        if have:
+            if len(have) != len(ps):
+                continue                                   # a team that missed a map: not guessed here
+            pairs = [(games, p) for (_pid, games), p in zip(have, ps)]
+            how.add("pick id")
+        elif len(ps) == len(matches):
+            pairs = [([gi], p) for gi, p in enumerate(ps)]
+            how.add("order")
+        else:
+            pairs = [([gi for gi, g in enumerate(matches) if (g.get("map_name") or "") == mn], p)
+                     for mn, p in zip(maps, ps)]
+            how.add("order")
+        for games, p in pairs:
+            for gi in games:
+                out[(gi, team)] = poi_name(p.get("poi"))
+    return out, ("pick id" if how == {"pick id"} else ("order" if how else ""))
+
+
 def from_export(data: dict, filename: str = "") -> dict:
-    """EEC Download file -> {"url", "games": [{"start", "map", "rows": [[team, player, place, kills], ...]}]}."""
+    """EEC Download file -> {"url", "drops" (how they were found, "" = none), "games": [{"start", "map",
+    "rows": [[team, player, place, kills], ...], "drops": {team key: drop}}]}, games in play order."""
     if not isinstance(data, dict) or not isinstance(data.get("matches"), list) or not data["matches"]:
         raise ValueError("This isn't an EEC lobby export (lobbies_..._scores.json from the lobby's Download button)")
     m = FILE_RE.search(filename or "")
     url = f"https://eternalesports.club/lobbies/{m.group(1)}/{m.group(2)}" if m else ""
+    matches = [g for g in data["matches"] if isinstance(g, dict)]
+    if all(_int(g.get("match_start")) for g in matches):
+        matches.sort(key=lambda g: _int(g.get("match_start")))
+    drops, how = export_drops(matches, data.get("draft") if isinstance(data.get("draft"), list) else [])
     games = []
-    for g in data["matches"]:
+    for gi, g in enumerate(matches):
         rows = [[r.get("team_name", ""), r.get("player_name", ""), int(r.get("team_placement") or 0),
-                 int(r.get("kills") or 0)] for r in g.get("data") or []]
-        games.append({"start": float(g.get("match_start") or 0), "map": eec_map(g.get("map_name", "")), "rows": rows})
-    return {"url": url, "games": games}
+                 int(r.get("kills") or 0)] for r in g.get("data") or [] if isinstance(r, dict)]
+        games.append({"start": float(g.get("match_start") or 0), "map": eec_map(g.get("map_name", "")), "rows": rows,
+                      "drops": {t: d for (i, t), d in drops.items() if i == gi}})
+    return {"url": url, "games": games, "drops": f"export, {how}" if how else ""}
 
 
 def from_hub_doc(doc: dict) -> dict:
-    """A Loot Book "scrims" document (rows: [team, player, legend, place, kills, ...])."""
-    games = [{"start": float(g.get("start") or 0), "map": g.get("map", ""),
-              "rows": [[r[0], r[1], int(r[3] or 0), int(r[4] or 0)] for r in g.get("rows", [])]}
-             for g in doc.get("games", [])]
-    return {"url": doc.get("url", ""), "games": games}
+    """A hub / Loot Book "scrims" document (rows: [team, player, legend, place, kills, ..., drop (13)]).
+    Drops only from documents the hub imported with the fixed drops (`draft` present)."""
+    fixed = bool(doc.get("draft"))
+    games = []
+    for g in doc.get("games", []):
+        rows = [r for r in g.get("rows", []) if isinstance(r, list) and len(r) > 4]
+        drops: dict[str, str] = {}
+        if fixed:
+            for t in g.get("teams") or []:
+                if isinstance(t, dict) and t.get("drop"):
+                    drops[_key(t.get("team"))] = t["drop"]
+            for r in rows:
+                if len(r) > 13 and r[13]:
+                    drops.setdefault(_key(r[0]), r[13])
+        games.append({"start": float(g.get("start") or 0), "map": g.get("map", ""),
+                      "rows": [[r[0], r[1], int(r[3] or 0), int(r[4] or 0)] for r in rows], "drops": drops})
+    return {"url": doc.get("url", ""), "games": games, "drops": "hub" if fixed else ""}
 
 
 def results(lobby: dict, team: str) -> dict | None:
@@ -70,7 +163,7 @@ def results(lobby: dict, team: str) -> dict | None:
             a["best"] = min(a["best"], t["place"] or 99)
             if name.strip().lower() == want:
                 ours.append({"game": i, "start": g["start"], "map": g["map"], "place": t["place"], "kills": t["kills"],
-                             "pts": pts, "teams": len(teams)})
+                             "pts": pts, "teams": len(teams), "drop": (g.get("drops") or {}).get(_key(name), "")})
     me = next((n for n in totals if n.strip().lower() == want), None)
     if not me:
         return None
@@ -81,7 +174,7 @@ def results(lobby: dict, team: str) -> dict | None:
     tied = sum(1 for t in totals.values() if t["pts"] == mine) > 1
     return {"url": lobby.get("url", ""), "team": me, "standing": standing, "tied": tied, "teams": len(order),
             "pts": totals[me]["pts"], "kills": totals[me]["kills"], "games": ours,
-            "leader": {"team": order[0], "pts": totals[order[0]]["pts"]}}
+            "leader": {"team": order[0], "pts": totals[order[0]]["pts"]}, "drops": lobby.get("drops", "")}
 
 
 def read_file(path: str) -> dict:
@@ -105,7 +198,14 @@ def match_game(res: dict, abs_time: float, index: int) -> dict | None:
 
 def from_hub(hub_url: str, team: str, start: float, end: float) -> dict | None:
     """Ask the team hub for an imported lobby that was played during this block (with the player's key)."""
+    found = hub_candidates(hub_url, team, start, end)
+    return found[0] if found else None
+
+
+def hub_candidates(hub_url: str, team: str, start: float, end: float) -> list[dict]:
+    """Our results in every lobby on the hub played during this block (the caller checks the drops)."""
     from . import hub
+    out = []
     for d in hub.get_json(hub_url, "/api/db/scrims"):
         doc = d.get("data", d)
         lobby = from_hub_doc(doc)
@@ -113,5 +213,123 @@ def from_hub(hub_url: str, team: str, start: float, end: float) -> dict | None:
         if starts and start - 1800 <= min(starts) <= end + 600:
             res = results(lobby, team)
             if res:
-                return res
-    return None
+                out.append(res)
+    return out
+
+
+# ---------------------------------------------------------------- EEC drop vs our scan
+
+TIME_FIT_S = 15 * 60          # a scanned game and an EEC game are the same game: same map, started this close
+_POIS: dict | None = None
+
+
+def norm(s) -> str:
+    """'Mirage à Trois' -> 'mirageatrois'."""
+    s = unicodedata.normalize("NFKD", str(s or "")).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]", "", s.lower())
+
+
+def pois() -> dict:
+    """{map: {poi id: name}} from the scanner's pcs_maps.json (next to the exe, or scanner/ from source)."""
+    global _POIS
+    if _POIS is None:
+        _POIS = {}
+        here = Path(__file__).resolve()
+        for f in (Path(getattr(sys, "_MEIPASS", "") or here.parent) / "pcs_maps.json",
+                  here.parents[2] / "scanner" / "pcs_maps.json"):
+            try:
+                d = json.loads(f.read_text(encoding="utf-8"))
+                _POIS = {m: {p["id"]: p.get("name") or p["id"] for p in v.get("pois", [])} for m, v in d.items()}
+                break
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+    return _POIS
+
+
+def poi_label(mp: str | None, poi_id: str | None) -> str:
+    """'we-mirage' -> its name in the map table ('Mirage à Trois'), else the id's words."""
+    if not poi_id:
+        return ""
+    name = pois().get(mp or "", {}).get(poi_id)
+    if name:
+        return name
+    words = poi_id.split("-")[1:] or poi_id.split("-")
+    return " ".join(w.capitalize() for w in words)
+
+
+def our_spot(g: dict) -> tuple[str | None, str]:
+    """Where the scan says we went: (POI id, "landing" | "drop screen"), or (None, "")."""
+    ld = g.get("landing") or {}
+    if ld.get("poi"):
+        return ld["poi"], "landing"
+    spot = next((x for x in (g.get("drop") or {}).get("spots", []) if x.get("kind") == "ours" and x.get("poi")), None)
+    return (spot["poi"], "drop screen") if spot else (None, "")
+
+
+def compare_drop(mp: str | None, eec_drop: str, poi_id: str | None) -> tuple[str | None, str]:
+    """('same' | 'near' | 'different' | None, why). None = can't be compared. 'near' = one name holds the other
+    (EEC 'Canal' and our 'Canal Plaza')."""
+    if not eec_drop:
+        return None, "no EEC drop for this game"
+    if not poi_id:
+        return None, "the scan has no landing place"
+    a = norm(eec_drop)
+    names = [norm(n) for n in pois().get(mp or "", {}).values()]
+    if names and not any(a == n or a in n or n in a for n in names):
+        return None, f"EEC drop {eec_drop} isn't in our map table"
+    ours = poi_label(mp, poi_id)
+    b = norm(ours)
+    if a == b:
+        return "same", f"EEC drop {eec_drop} = our landing"
+    if a and b and (a in b or b in a):
+        return "near", f"EEC drop {eec_drop} ~ our landing {ours}"
+    return "different", f"EEC drop {eec_drop}, our scan says {ours}"
+
+
+def check_block(res: dict | None, games: list[dict]) -> dict:
+    """Our scanned games of a block against an EEC result (`results()`).
+    games: [{"rec": recording key, "i": game index in the recording, "at": clock time the game started (the jump when
+    seen), "map", "game": the scan's game}].
+    Returns {"verdict": "match" | "mismatch" | "unknown", "why", "lobby", "games": [one per compared game: rec, i,
+    eecGame, map, eecDrop, ourPoi, ourDrop, ourFrom, check, why]}. "unknown" = nothing to decide on: old behaviour."""
+    out = {"verdict": "unknown", "why": "", "lobby": (res or {}).get("url", ""), "games": []}
+    if not res:
+        out["why"] = "no EEC results"
+        return out
+    eg = [g for g in res.get("games", []) if g.get("start")]
+    timed = [g for g in games if g.get("at")]
+    if not timed:
+        out["why"] = "no scanned games"
+        return out
+    if not eg:
+        out["why"] = "the EEC results have no game times"
+        return out
+    used: set = set()
+    for g in sorted(timed, key=lambda x: x["at"]):
+        cand = [e for e in eg if e["game"] not in used and abs(e["start"] - g["at"]) < TIME_FIT_S
+                and (g.get("map") in (None, "", "?") or not e.get("map") or g["map"] == e["map"])]
+        if not cand:
+            continue
+        e = min(cand, key=lambda e: abs(e["start"] - g["at"]))
+        used.add(e["game"])
+        poi, src = our_spot(g.get("game") or {})
+        check, why = compare_drop(e.get("map"), e.get("drop", ""), poi)
+        out["games"].append({"rec": g.get("rec"), "i": g.get("i"), "eecGame": e["game"], "map": e.get("map"),
+                             "eecDrop": e.get("drop", ""), "ourPoi": poi, "ourDrop": poi_label(e.get("map"), poi),
+                             "ourFrom": src, "check": check, "why": why})
+    agree = sum(1 for x in out["games"] if x["check"] in ("same", "near"))
+    differ = sum(1 for x in out["games"] if x["check"] == "different")
+    if not out["games"]:
+        out["verdict"], out["why"] = "mismatch", "no game of this block was played at the EEC lobby's game times"
+    elif agree > differ:
+        out["verdict"] = "match"
+        out["why"] = f"EEC drops agree with where we landed in {agree} of {agree + differ} game(s)"
+    elif differ > agree:
+        out["verdict"] = "mismatch"
+        out["why"] = f"EEC drops differ from where we landed in {differ} of {agree + differ} game(s)"
+    elif not any(x["eecDrop"] for x in out["games"]):
+        out["why"] = "the EEC results have no drops (game times fit)"
+    else:
+        out["why"] = (f"EEC drops agree in {agree} and differ in {differ} game(s) (game times fit)" if agree
+                      else "no drop could be compared (game times fit)")
+    return out

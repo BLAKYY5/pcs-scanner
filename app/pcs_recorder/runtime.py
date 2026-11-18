@@ -15,6 +15,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
 
+from . import crash
 from . import hub as hubmod
 from . import obs as obsmod
 from . import settings as st
@@ -629,7 +630,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     en = tk.BooleanVar(value=s.enabled)
     row("Auto-record Apex", ttk.Checkbutton(f, variable=en), "records while Apex runs")
     hub = tk.StringVar(value=s.hub_url)
-    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from Blakey; empty = Drive only")
+    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = Drive only")
     folder = tk.StringVar(value=s.folder)
     fr = ttk.Frame(f)
     ttk.Entry(fr, textvariable=folder, width=28).pack(side="left")
@@ -669,7 +670,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     def save():
         s.enabled, s.hub_url, s.folder = en.get(), hub.get(), folder.get()
         s.keep_days, s.max_gb = int(kd.get() or 7), int(mg.get() or 100)
-        s.bitrate_mbps = int(br.get() or 12)
+        s.set_bitrate(int(br.get() or s.bitrate_mbps))
         s.game_audio, s.auto_scan, s.capture = ga.get(), au.get(), cap.get()
         st.save(s)
         w.destroy()
@@ -736,8 +737,11 @@ class AutoRecorder:
                 if self.s.enabled:
                     try:
                         self.rec.tick()
-                    except Exception:
+                    except Exception as e:
                         log.exception("tick failed")
+                        crash.report_exception("unhandled", e)
+                    if not self.rec.apex:
+                        crash.tick()                 # crash reports not delivered yet, new OBS crash files
                 time.sleep(3)
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()

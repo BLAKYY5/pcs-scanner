@@ -33,6 +33,7 @@ UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
+              "crash_reports",
               "mic_audio", "mic_device", "send_mic", "share_tracks", "transcript_consent", "share_asked",
               "transcript_asked",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
@@ -150,7 +151,8 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
-               "select", "banner", "squadsLeft", "own", "feedStats")
+               "select", "banner", "squadsLeft", "own", "feedStats",
+               "ringCircles", "respawns")   # scanner PR #52: respawns [{t, who: teammate | self, hue, deadSince, how}], shown like kills
 
 
 def _same_sig(a, b) -> bool:
@@ -247,11 +249,19 @@ class Backend:
             self.say(f'Version {u[0]} is available: press "Update" at the top right.')
 
     def sync_icons(self, min_age_s: float = 0, tell: bool = False) -> str:
-        """Fetch the weapon icons from the team link (Settings). Says something only when they changed, or
-        when the player just pasted the link (tell)."""
+        """Fetch the weapon icons: from the team hub when it has them (pcs_recorder.weaponicons; "hub:<status>"),
+        else from the team link (Settings), as before. Says something only when they changed, or when the player
+        just pasted the link (tell)."""
         if time.time() - getattr(self, "icons_checked", 0) < min_age_s:
             return "skipped"
         self.icons_checked = time.time()
+        from pcs_recorder import weaponicons
+        url = self.auto.s.hub_url if self.auto else ""
+        hs, htext = weaponicons.sync(url, core.ICONS_F, core.icons_valid)
+        if htext:
+            self.say(htext)
+        if hs in ("updated", "same") or (hs in ("error", "bad") and weaponicons.from_hub(url, core.ICONS_F)):
+            return "hub:" + hs                              # the hub's copy stays; the team link isn't needed
         status, text = core.fetch_icons()
         if text and (tell or status == "updated"):
             self.say(text)
@@ -468,6 +478,7 @@ class Backend:
             elif p in self.scan_queue:
                 status = "waiting"
             yt = None
+            chk = None
             if norm in rec_index and self.auto and getattr(self.auto.rec, "youtube", None):
                 up = self.auto.rec.youtube
                 b = up.block_of(rec_index[norm][0])
@@ -476,12 +487,23 @@ class Backend:
                 r = up.results_of(rec_index[norm][0])
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
-            label, by_hand = labels.of(p, full)
+                try:
+                    chk = up.check_of_key(rec_index[norm][0])
+                except Exception:
+                    chk = None
+                if chk:
+                    yt["eecCheck"] = {"verdict": chk["verdict"], "why": chk["why"]}
+            lab = labels.explain(p, full, chk)
+            label, by_hand = lab["label"], lab["source"] == "hand"
             rec = recorded_at(p, full)
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         # "Recorded" = when the recording started, not when the file was last written
                         "recorded": rec if rec is not None else st.st_mtime,
-                        "label": label, "label_by_hand": by_hand,
+                        "label": label, "label_by_hand": by_hand, "label_source": lab["source"], "label_why": lab["why"],
+                        # EEC drop per game where EEC's results were compared with this recording's games
+                        "eecGames": [{k: x.get(k) for k in ("i", "eecGame", "eecDrop", "ourDrop", "ourFrom", "check", "why")}
+                                     for x in (chk or {}).get("games", []) if norm in rec_index and x.get("rec") == rec_index[norm][0]]
+                                    if chk and chk["verdict"] != "mismatch" else [],
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
                         # on the team hub? {"hub": "sent" | "pending" | "", "why": "Hub not reachable" | "Key refused"…}
@@ -743,6 +765,7 @@ class Backend:
         a = self.auto
         rec = None
         if a:
+            from pcs_recorder.settings import default_mbps
             used, n = a.rec.usage()
             s = a.s
             rec = {"enabled": s.enabled, "status": a.rec.status, "recording": a.rec.current is not None,
@@ -750,6 +773,7 @@ class Backend:
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
+                   "bitrateDefault": default_mbps(s.encoder), "bitrateAuto": bool(getattr(s, "bitrate_auto", True)),
                    "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
@@ -758,8 +782,9 @@ class Backend:
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
-                "teamLink": core.SETTINGS.get("team_link", ""),
+                "teamLink": core.SETTINGS.get("team_link", ""), "coachEmail": core.SETTINGS.get("coach_email", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
+                "iconsFromHub": self.icons_from_hub(),     # then the team link is optional
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "hub": self.hub_state(),
@@ -786,14 +811,52 @@ class Backend:
             a.rec.next_upload = 0                          # results waiting for the hub: try now
         return res
 
+    def icons_from_hub(self) -> bool:
+        from pcs_recorder import weaponicons
+        return weaponicons.from_hub(self.auto.s.hub_url if self.auto else "", core.ICONS_F)
+
+    def _icons_soon(self) -> None:
+        """The hub (or its key) changed: look for its weapon icons now, in the background."""
+        self._icons_thread = threading.Thread(target=self.sync_icons, args=(0, False), daemon=True)
+        self._icons_thread.start()
+
+    def _use_invite(self, url: str, code: str) -> None:
+        """Redeem a single-use invite and keep the key it gives and the link's address (replacing an old address:
+        the key works only on that hub). Raises hub.HubError with the player's text; never the code."""
+        from pcs_recorder import hub, settings as st
+        a = self.auto
+        key = hub.redeem(url, code)
+        hub.set_key(key)                                     # saved at once: the hub gives it only this once
+        if a.s.hub_url != url:
+            a.s.hub_url = url
+            hub.reset()
+        st.save(a.s)
+        a.rec.next_upload = 0
+
     def hub_join(self, link: str) -> dict:
-        """First-run setup: the sign-in link from the coach (hub address + key in one paste) is saved and tested at
-        once. The link's address replaces the one set (the player pasted the coach's link on purpose). The link is
-        never logged nor repeated in an answer or an error."""
+        """First-run setup: the sign-in link from the coach (hub address + key in one paste), or a single-use invite
+        link (`/join#code=`, redeemed for a key), is saved and tested at once. The link's address replaces the one
+        set (the player pasted the coach's link on purpose). The link is never logged nor repeated in an answer or
+        an error."""
         from pcs_recorder import hub
         a = self.auto
         if not a:
             raise RuntimeError("Auto-record isn't available in this build")
+        code, inv_url = hub.parse_invite(link)
+        if code:
+            try:
+                self._use_invite(inv_url, code)
+            except hub.HubError as e:
+                res = {"ok": False, "text": "Hub not reachable" if e.kind == "network" else str(e)}
+                if e.kind == "network":
+                    res["tailscale"] = tailscale_state(inv_url)
+                return res
+            res = self.hub_test()
+            if res.get("ok"):
+                self._icons_soon()
+            else:
+                res["tailscale"] = tailscale_state(a.s.hub_url)
+            return res
         key, url = hub.parse_key(link)
         if not key:
             raise ValueError("That isn't the link from your coach. Copy the whole link and paste it again.")
@@ -801,7 +864,9 @@ class Backend:
             raise ValueError("Paste the whole link from your coach: it has the hub address in it.")
         self._save_settings({"hub_url": url or a.s.hub_url, "hub_key": link})
         res = self.hub_test()
-        if not res.get("ok"):
+        if res.get("ok"):
+            self._icons_soon()
+        else:
             res["tailscale"] = tailscale_state(a.s.hub_url)
         return res
 
@@ -857,6 +922,21 @@ class Backend:
         """The Map panel's picture and transform for a map (pcs_recorder.minimaps): downloaded once with the key."""
         from pcs_recorder import minimaps
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
+
+    def squad_paths(self, q: dict) -> dict:
+        """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
+        from pcs_recorder import squadpaths
+        url, one = (self.auto.s.hub_url if self.auto else ""), (lambda k: (q.get(k) or [""])[0])
+        if one("gameKey"):
+            return squadpaths.get(url, game_key=one("gameKey")[:60])
+        it = self.find(one("id"))
+        if not it:
+            raise RuntimeError("Recording not found")
+        try:
+            jump = float(one("jump"))
+        except ValueError:
+            jump = None
+        return squadpaths.get(url, recording=Path(it["path"]).stem, jump=jump)
 
     # ------------------------------------------------------------- hub backup copy (coach's hub key only)
     @property
@@ -993,24 +1073,20 @@ class Backend:
 
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
-        """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
-        checked against the Google account this app is signed in with, not just the menu choice."""
+        """The Coach role is only for the coach's hub key: the team hub says which key is the coach's (`/api/me`),
+        checked here, not just the menu choice. No address or account name is built into the app."""
         self.coach = False
-        if core.SETTINGS.get("role") != "Coach":
+        if core.SETTINGS.get("role") != "Coach" or not self.auto:
             return False
-        want = (core.BUILD.get("coach") or "").strip().lower()
         try:
-            svc = core.drive_service(interactive=False)
-            email = svc.about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"] if svc else ""
+            self.coach = self.hubbackup.role(ask=True) == "coach"
         except Exception:
-            email = ""
-        self.coach = bool(want) and email.strip().lower() == want
+            self.coach = False
         return self.coach
 
     def require_coach(self) -> None:
         if not getattr(self, "coach", False):
-            raise PermissionError("Only the coach can do this (Settings → Role: Coach, signed in with the coach's "
-                                  "Google account).")
+            raise PermissionError("Only the coach can do this (Settings → Role: Coach, with the coach's hub key).")
 
     def save_settings(self, body: dict) -> None:
         body = dict(body)
@@ -1042,7 +1118,17 @@ class Backend:
         new_key, link_url, remove_key = None, None, False
         if "hub_key" in body:
             raw = body.pop("hub_key")
-            if raw is None:
+            code, inv_url = hub.parse_invite(raw) if raw is not None else (None, None)
+            if code:                                         # a single-use invite: redeemed now, key and address kept
+                if not self.auto:
+                    raise RuntimeError("Auto-record isn't available in this build")
+                try:
+                    self._use_invite(inv_url, code)
+                except hub.HubError as e:
+                    raise ValueError("Hub not reachable" if e.kind == "network" else str(e)) from None
+                body.pop("hub_url", None)                    # the invite's address wins over the field
+                self._icons_soon()
+            elif raw is None:
                 remove_key = True
             elif str(raw).strip():
                 new_key, link_url = hub.parse_key(raw)
@@ -1057,6 +1143,11 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "coach_email" in body:
+            mail = str(body["coach_email"] or "").strip()
+            if mail and not core.valid_email(mail):
+                raise ValueError("The coach's Google address doesn't look right. Check it and try again.")
+            core.SETTINGS["coach_email"] = mail
         if "team_link" in body:
             link = str(body["team_link"]).strip()
             if link and not core.drive_link_id(link):
@@ -1072,8 +1163,8 @@ class Backend:
             if body["role"] == "Coach" and not self.check_coach():
                 core.SETTINGS["role"] = before
                 core.save_settings()
-                raise PermissionError("Coach is reserved for the coach's Google account. Sign in with it first "
-                                      "(Settings → Google Drive), then choose Coach again.")
+                raise PermissionError("Coach is reserved for the coach's hub key. Add it first "
+                                      "(Settings → Team hub), then choose Coach again.")
             if body["role"] != "Coach":
                 self.coach = False
         core.save_settings()
@@ -1086,7 +1177,10 @@ class Backend:
             share_before = (a.s.share_tracks, a.s.transcript_consent)
             for k in REC_FIELDS:
                 if k in body:
-                    setattr(a.s, k, body[k])
+                    if k == "bitrate_mbps" and hasattr(a.s, "set_bitrate"):
+                        a.s.set_bitrate(body[k])           # the encoder's default unless the player picks another
+                    else:
+                        setattr(a.s, k, body[k])
             if "share_tracks" in body and a.s.share_tracks != share_before[0]:
                 a.s.share_asked = True                       # answered in Settings: the setup step stops asking
             if "transcript_consent" in body and a.s.transcript_consent != share_before[1]:
@@ -1101,6 +1195,8 @@ class Backend:
             if a.s.hub_url != hub_before:
                 hub.reset()
                 a.rec.next_upload = 0
+            if a.s.hub_url and (new_key or a.s.hub_url != hub_before):
+                self._icons_soon()                           # the hub may have the weapon icons
             if getattr(a.s, "yt_enabled", False) and not yt_before:
                 a.s.yt_since = time.time()                 # only blocks recorded from now on
                 st.save(a.s)
@@ -1345,6 +1441,8 @@ class Server:
                         return self._file(*pic) if pic else self._json({"error": "not found"}, 404)
                     if path.startswith("/api/minimap/"):
                         return self._json(b.minimap(path.split("/")[3]))
+                    if path == "/api/squadpaths":                # teammates' paths on the map (minimap.js)
+                        return self._json(b.squad_paths(q))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
                         return self._video(None, str(b.watch.audio(path.split("/")[2])))
                     if path.startswith("/audio/"):

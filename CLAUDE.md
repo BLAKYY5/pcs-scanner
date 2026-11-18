@@ -101,6 +101,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
+- **EEC drops** (`eec.py`, coach's rule 18 Nov 2026: "EEC is correct 95% of the time"): drops come from the export's
+  `draft` joined to each row's `map_pick_id` (as hub/eec.py), or from hub documents imported with the fixed drops
+  (`draft` present; old Loot Book drops are not used). `eec.check_block` compares a block's scanned games with the
+  lobby: same map, jump within 15 min of EEC's match start, EEC drop vs our landing POI (`same` / `near` /
+  `different`; a drop not in our map table is not compared). More agree = `match`: label scrims, source `eec`. More
+  differ, or no game at the lobby's times = `mismatch`: the lobby is not attached to that block (e.g. a tournament
+  the same evening), the label comes from the scan alone, the reason is kept (`eec_rejected`, `label_why`). Nothing
+  to compare = old behaviour. Display: EEC's drop wins, ours is shown next to it when different ("scan: ...").
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
   Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
@@ -113,7 +121,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
 - **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, "Your choices", team hub (one paste of the
-  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one),
+  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log),
   Google (optional once on the hub). Choices (coach's decisions 18 Nov 2026), each applied at once by
   `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
   start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
@@ -157,8 +165,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).
-- **Coach role**: unlocked when the signed-in Google account matches the build's coach address (a CI variable,
-  never in the repo). Coach-only: importing recordings by hand.
+- **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
+  No coach address or account name is built into the exe (a security review found one in `build.json`; removed
+  18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
+  player types in Settings (`coach_email`, once per address: `shared_with`). Coach-only: importing recordings by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file
@@ -209,6 +219,13 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   each app downloads them with the key into the data folder (`minimaps/`), never in this repo. No hub / no key: "Minimap
   needs the team hub"; no picture (Olympus) or map `?`: "No minimap for this map yet". Drawn on changes only (time,
   view, size), never in an animation loop. Key M = map (mute moved to U).
+  Also on the map: ring circles when the scan has `games[].ringCircles` ({t, x, y, r} world, or {t, mapX, mapY, mapR} in
+  map %, or [t, x, y, r]; passed through `GAME_FIELDS`; the last one bright, the one before faint), our squad's kill
+  feed lines (so far) and the coach's notes, both placed where the player was at that moment, and with the Squad switch
+  the teammates' paths (`pcs_recorder/squadpaths.py`, `/api/squadpaths`): only from what the hub already gives any key
+  (`/api/db/timings` gameKey + `recording.jumpAt`, `/api/scans` + `/api/scans/<id>/file` samples), in game time, cached
+  in `squad-cache/` for offline. Watch together shows the large view's player on the same map (`wtMapSetup` /
+  `wtMapTick` from `session.js`'s 4-per-second tick). Redraws: at most 4 per second, none while the window is hidden.
 - **Hub backup copy** (`pcs_recorder/hubbackup.py`, coach's hub key only, hub 0.5.4 `GET`/`HEAD /api/backup/latest`):
   a second copy of the hub's nightly zip (`pcs-hub-<yyyymmdd>.zip`) on the coach's main PC (coach's decision, 17 Nov
   2026: "Yes, also on E:"). Settings → Team hub shows "Hub backup copy" only when `/api/me` says coach (asked at most
@@ -256,8 +273,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
-  built on the coach's PC. Players get it through Settings → Team link (a Google Drive "Anyone with the link"
-  file, re-checked every 6 hours, saved in the data folder). `drive.file` sign-in can't read a file someone else
+  built on the coach's PC. Players get it from the team hub when it has one (`pcs_recorder/weaponicons.py`:
+  `/api/db/weaponicons/current`, 404 = none; `/_blob/<asset>` downloaded with the key only when the asset id changes,
+  checked with `icons_valid`, a refused asset is not downloaded again; the Team link is then optional), else through
+  Settings → Team link (a Google Drive "Anyone with the link" file). Re-checked every 6 hours, saved in the data folder. `drive.file` sign-in can't read a file someone else
   shared, which is why it is a pasted link. No file = no weapon names, scan otherwise unchanged.
 - **Legend select screen**: `pcs_hud.Legends` recognises the squad roster at the top left before a game (ranked:
   rank badges left of the slots; other modes: no badges, roster 114 px further left). A screen seen for 8 s to
@@ -296,6 +315,37 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   totals right in 15 of 15 games (5 rest on a single read). A misread units or tens digit that comes out higher
   would still pass the single-read rule: it relies on the digit test (no misread seen in ~9,000 reads).
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
+- **Ring circles** (`pcs_ring.py`): on the unzoomed full map the area outside the current ring is red-tinted with a
+  dark line on the ring; the next ring is a see-through white disc (everything under it moved towards white by one
+  fraction, 0.14..0.26 measured, alike in R, G, B). Edges that fit each look vote for a centre then a radius (Hough),
+  a local search sits on the edge, and a circle counts only when most of its visible arc shows the contrast. Refused:
+  a current ring whose outside is not red-tinted all around (cyan / purple discs of other map features, blue water
+  beside purple land), a next ring of another colour, circles under 2.9 % of the map (round icons; the last small rings
+  are not read), a next ring under 0.3 x the current one (12 % of the map when no current ring shows: round 1). One read per 3 s of map (`RING_EVERY`, ~2 s a read); the next ring found just before is tried as a
+  start. Per game: `ringCircles` (per ring stage and phase: current circle cx, cy, r in map % + `mapX/mapY/mapR` for
+  the review map, `next`, `conf`), `ringEnds` (end circle of ring k: the next ring shown in round k and/or the current
+  circle in round k + 1's wait; `rUnits` from the map scale in `CAL`), `ringSpeed` (`closing`: radius change per
+  second while the player watches it close; `ends`: radius drop / closing time). Stage = the ring phase running at
+  that moment (`games[].ring`), so rounds must be numbered for stages (None otherwise).
+- **Respawns** (`pcs_respawn.py`): teammate cards bottom left (names at x 184, rows 1058 / 1146 at 1440p in own
+  view and on the full map; 85 px higher while spectating). Dead = a lime status line under the name (DEATHBOX
+  RECOVERY, RECOVER BANNER, CRAFT BANNER, DELIVER TO BEACON, AWAITING RESPAWN, RESPAWNING); alive = the health bar.
+  A slot read dead >= 3 times then alive >= 3 times = respawn (`who: teammate`, slot, card colour). Cards are used
+  only from own-view frames (while spectating they are the spectated squad's). The player's own death = a run of
+  spectator-layout ring reads (`ownDeaths`); own view again later in the same game = respawned (`who: self`,
+  `how: dropship` when a free fall follows). The card can't tell a beacon from a mobile beacon or a mode's own
+  respawn (`how: card`). 16:9 only. `games[].respawns` is always present (empty list = none seen).
+  Cards are found by the line under the name (one-letter names exist); a status line is 17 rows from x 186 with many
+  colour changes (grass behind the cards gives lime too). Card rows per game = the two rows read most (Wildcard sits
+  at 1035 / 1149). A frame without a ring-clock read counts as own view unless inside a spectating run (Wildcard shows
+  no clock most of the time); after the player's last death with no way back, cards are someone else's. Check set
+  (`pcs-handoff\checkset\checkset-respawn-ring.json`, 15 / 13 / 17 / 7 Nov): teammates 23 of 25 found, self 15 of 18,
+  none wrong. Misses: a respawn just before the player's own, a card read dead only twice.
+  The review player shows each respawn like a kill (coach's decision, 18 Nov 2026): a lime tick with a round head on
+  the kill feed lane and a line in Events ("You respawned", "<legend> respawned" by the card colour against the legend
+  select's hues, else "Teammate respawned"), click = seek. `respawns` is in `GAME_FIELDS` (`app/pcs_server.py`).
+  Rings, frames checked by eye (7, 15, 17 Nov): current ring 97 of 114 visible read right, next ring 164 of 180, none
+  wrong after the small-circle rule (the first run took a white map-feature circle on E-District for a next ring 5 times).
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
   Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a

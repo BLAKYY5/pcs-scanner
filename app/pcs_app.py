@@ -23,13 +23,14 @@ from pcs_core import APP, OUT, BUILD, SETTINGS
 def selftest(out):
     """Used by the build: proves the libraries, the scanner and the interface files are inside the exe."""
     try:
-        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, tkinter   # noqa: F401
+        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
-        import pcs_recorder.minimaps   # noqa: F401
+        import pcs_recorder.minimaps, pcs_recorder.squadpaths, pcs_recorder.weaponicons   # noqa: F401
+        import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         import pcs_recorder.teamtracks   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
@@ -353,6 +354,12 @@ def main():
     except Exception:
         autorec = None
         logging.exception('auto-record unavailable')
+    try:
+        from pcs_recorder import crash                     # crash reports to the team hub (Settings, on the hub only)
+        crash.install_hooks()
+    except Exception:
+        crash = None
+        logging.exception('crash reports unavailable')
 
     import pcs_server
     b = pcs_server.Backend()
@@ -370,6 +377,8 @@ def main():
                                       yt_signin=lambda: (win.show('settings'), b.yt_signin()))
         if not b.auto.s.player:
             b.auto.s.player = SETTINGS.get('player', '')
+        if crash:
+            crash.attach(b.auto.s, BUILD.get('version', 'dev'), str(BUILD.get('base') or ''), core.LOG_F)
         b.auto.ui.actions["eeclink"] = ("Paste the link", lambda: win.show('recordings'))
 
         def update_now():                                  # the corner message's button: the app stays in the tray
@@ -448,7 +457,7 @@ def main():
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)
-            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the team link, same rhythm
+            try: b.sync_icons(pcs_server.UPDATE_EVERY_S - 60)    # weapon icons from the hub or team link, same rhythm
             except Exception: logging.exception('team link')
             try: b.hub_backup_tick()                       # coach's hub key: the hub's nightly zip, once a day
             except Exception: logging.exception('hub backup copy')
