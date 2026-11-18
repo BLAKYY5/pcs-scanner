@@ -1,6 +1,6 @@
 # PCS Scanner: privacy policy
 
-_Last updated: 7 November 2026_
+_Last updated: 17 November 2026_
 
 PCS Scanner is a free Windows app used by the players of the PCS Apex Legends team to record their
 games, scan the recordings for coaching, and share the results with their coach. It is not sold and
@@ -24,6 +24,11 @@ removing PCS Scanner from <https://myaccount.google.com/permissions>.
 Recordings, settings, sign-in tokens and logs stay in your Windows user folder
 (`%LOCALAPPDATA%\PCS Scanner` and the recordings folder you choose). Recordings are deleted
 automatically according to the limits you set (number of days and maximum folder size).
+
+Crash reports: if you are on your team's hub, when recording, OBS or a scan fails the app sends a short report
+to that hub only (error, app and Windows version, graphics card, end of the app's log, with keys, passwords,
+e-mail addresses and your Windows user name removed), for your coach. Turn it off in Settings → Team hub. Nothing
+goes to any other service.
 
 Voice (Discord and microphone) is only recorded after you confirm in the app that your team agreed to
 it. Only the tracks you choose are sent, and only to your team (its Drive folder or its own server).

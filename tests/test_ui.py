@@ -252,6 +252,9 @@ def test_recorder_settings_and_start_with_windows():
         assert calls == [False] and b.auto.rec.cleaned == 2
         call(srv, "/api/settings", {"start_with_windows": True})
         assert calls == [False, True]
+        code, state, _ = call(srv, "/api/settings", {"crash_reports": False})    # Settings > Team hub switch
+        assert code == 200 and b.auto.s.crash_reports is False
+        assert state["recorder"]["settings"]["crash_reports"] is False
         srv.stop()
     finally:
         st.save = st_save

@@ -30,6 +30,7 @@ def selftest(out):
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
         import pcs_recorder.minimaps, pcs_recorder.squadpaths   # noqa: F401
+        import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
@@ -352,6 +353,12 @@ def main():
     except Exception:
         autorec = None
         logging.exception('auto-record unavailable')
+    try:
+        from pcs_recorder import crash                     # crash reports to the team hub (Settings, on the hub only)
+        crash.install_hooks()
+    except Exception:
+        crash = None
+        logging.exception('crash reports unavailable')
 
     import pcs_server
     b = pcs_server.Backend()
@@ -369,6 +376,8 @@ def main():
                                       yt_signin=lambda: (win.show('settings'), b.yt_signin()))
         if not b.auto.s.player:
             b.auto.s.player = SETTINGS.get('player', '')
+        if crash:
+            crash.attach(b.auto.s, BUILD.get('version', 'dev'), str(BUILD.get('base') or ''), core.LOG_F)
         b.auto.ui.actions["eeclink"] = ("Paste the link", lambda: win.show('recordings'))
 
         def update_now():                                  # the corner message's button: the app stays in the tray

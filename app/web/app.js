@@ -1194,7 +1194,10 @@ function renderSettings() {
       <div class="form">
         <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Empty = results go to Google Drive only.</small></label>
         <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in link your coach sent. Don't share it.</small></div>
-      </div>${S.hubBackup ? hubBackupHTML(S.hubBackup) : ''}</section>
+      </div>
+      ${switchHTML('f-crash_reports', s.crash_reports !== false, 'Send crash reports to the team hub', 'When recording, OBS or a scan fails: the error, app and Windows version, graphics card and the end of the app log, for your coach only. Keys, passwords, e-mails and your Windows name are removed. Only when you are on the hub.')}
+      ${S.hubBackup ? hubBackupHTML(S.hubBackup) : ''}
+    </section>
     <section class="card section"><h2>Start-up</h2>
       ${switchHTML('f-start_with_windows', s.start_with_windows, 'Start with Windows', 'PCS Scanner waits in the tray (bottom right) from the moment you log in. Recommended: you never have to think about it.')}
       ${switchHTML('f-enabled', r.enabled, 'Auto-record', 'Records the Apex window while the game runs, then offers to scan the session. Your mic and voice app are recorded only if you switch them on below, after your team agreed.')}
@@ -1341,7 +1344,7 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'crash_reports', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
     const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }
