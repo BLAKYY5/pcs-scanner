@@ -1900,6 +1900,95 @@ def test_legend_select_starts_a_game():
                 assert cells(s[0], o[0]) > 150, (other_mode, cells(s[0], o[0]))
 
 
+def test_mode_from_playlist_emblem():
+    """The playlist emblem at the top right (pubs: red "unranked" emblem, Wildcard: teal) gives a game its mode when
+    nothing else does (games[].modeSeen); signs that disagree, or another playlist's emblem, leave it unlabelled.
+    Ranked (RP panel) and scrims (drop screen) keep their old rules; a label set by hand still wins."""
+    import numpy as np
+    from PIL import Image
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    from pcs_recorder import labels
+    E = HUD.ModeEmblem
+    modes = {m: k for k, m, _, _ in E.T if m}
+    assert set(modes) == {"pubs", "wildcard"} and len(E.T) >= 5, [(k, m) for k, m, _, _ in E.T]
+    rng = np.random.default_rng(3)
+
+    def scene():
+        img = np.full((1440, 2560, 3), 90, np.uint8)
+        img[:300, 2160:] = rng.integers(60, 200, (300, 400, 3), dtype=np.uint8)
+        return img
+
+    def emblem(img, key, y, x):
+        _, _, rgb, mask = next(e for e in E.T if e[0] == key)
+        h, w = E.SIZE
+        big = np.asarray(Image.fromarray(rgb.astype(np.uint8)).resize((w, h), Image.NEAREST))
+        m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 0
+        box = img[y:y + h, x:x + w]; box[m] = big[m]
+        return img
+    for mode, key in modes.items():
+        for (y, x) in ((8, 2422), (10, 2420), (142, 2420)):          # in game, a few px off, waiting screen
+            r = E.read(emblem(scene(), key, y, x))
+            assert r and r[0] == key and r[1] == mode, (mode, y, x, r)
+    other = next(k for k, m, _, _ in E.T if not m)
+    r = E.read(emblem(scene(), other, 8, 2422))
+    assert r and r[0] == other and r[1] is None, r
+    for _ in range(5):
+        assert E.read(scene()) is None
+    assert E.read(np.zeros((1440, 2560, 3), np.uint8)) is None
+
+    # per game: a vote of the reads in the game's window (from 150 s before its start to 150 s before the next)
+    P, W = modes["pubs"], modes["wildcard"]
+    reads = [(t, P, "pubs", 10.0) for t in (520, 600, 700, 900)] + [(t, W, "wildcard", 12.0) for t in (1500, 1600, 1700)]
+    assert HUD.emblem_vote(reads, 500, 1350)[:2] == (P, "pubs")
+    assert HUD.emblem_vote(reads, 1350, 9e9)[:2] == (W, "wildcard")
+    assert HUD.emblem_vote(reads[:2], 0, 9e9)[:2] == (None, None)                       # two reads: not enough
+    assert HUD.emblem_vote(reads, 0, 9e9)[:2] == (None, None)                           # 4 against 3: no majority
+
+    def game(t, **kw):
+        g = SCAN.new_game(t, "SP"); g.update(kw); return g
+    games = [game(650, select={"tFirst": 650, "tLast": 680, "ranked": False, "squad": []}),
+             game(1550), game(3000, banner={"mode": "pubs", "map": "SP"}),
+             game(4000, banner={"mode": "pubs", "map": "SP"}),
+             game(5000), game(6000, drop={"spots": [], "tLast": 6000}),
+             game(7000, select={"tFirst": 7000, "tLast": 7030, "ranked": True, "squad": []})]
+    reads += [(t, W, "wildcard", 12.0) for t in (3900, 3950, 4100, 4200)]              # banner pubs vs emblem wildcard
+    reads += [(t, other, None, 15.0) for t in (4900, 5000, 5100)]                      # another playlist
+    reads += [(t, P, "pubs", 9.0) for t in (5900, 6000, 6100, 7000, 7100, 7200)]      # scrim drop / ranked select
+    rank = [(t, True) for t in range(7000, 7100, 10)]
+    SCAN.timeline(games, [], rank=rank, emblem=reads)
+    got = [(g["mode"], g["modeSeen"]["mode"], g["modeSeen"]["conflict"]) for g in games]
+    assert got == [("pubs", "pubs", False), ("wildcard", "wildcard", False), ("pubs", "pubs", False),
+                   ("unknown", None, True), ("unknown", None, False), ("scrim", "scrim", False),
+                   ("unknown", None, True)], got
+    assert games[0]["modeSeen"]["from"] == ["emblem"] and games[0]["modeSeen"]["emblemReads"] == {P: 4}
+    assert games[2]["modeSeen"]["from"] == ["banner"] and games[4]["modeSeen"]["emblem"] == other
+    assert games[6]["modeSeen"]["from"] == ["badge", "emblem", "select"], games[6]["modeSeen"]
+    # the RP panel alone keeps ranked; the banner's RANKED word now counts too
+    g1, g2 = game(100), game(900, banner={"mode": "ranked", "map": "ED"})
+    SCAN.timeline([g1, g2], [], rank=[(t, True) for t in range(100, 400, 10)])
+    assert (g1["mode"], g2["mode"]) == ("ranked", "ranked") and g1["modeSeen"]["from"] == ["badge"], (g1["modeSeen"], g2["modeSeen"])
+    g3 = game(100)
+    SCAN.timeline([g3], [], mode="scrim", emblem=reads)                                 # --mode still wins
+    assert g3["mode"] == "scrim"
+
+    # labels: pubs / wildcard reach the block label, with the sign that told it; by hand wins
+    labels.FILE.unlink(missing_ok=True)
+    folder = TMP / f"emb-{time.time_ns()}"
+    folder.mkdir()
+    pa, pb = str(folder / "a.mp4"), str(folder / "b.mp4")
+    sa = {"games": [{"mode": "pubs", "modeSeen": {"mode": "pubs", "from": ["emblem"]}}]}
+    sb = {"games": [{"mode": "unknown", "modeSeen": {"mode": None, "from": ["banner", "emblem"], "conflict": True}}]}
+    r = labels.explain_block([pa, pb], [sa, sb])
+    assert r["label"] == "pubs" and r["source"] == "scan" and "playlist emblem" in r["why"], r
+    sw = {"games": [{"mode": "wildcard", "modeSeen": {"mode": "wildcard", "from": ["banner", "emblem"]}}]}
+    assert labels.explain_block([pa, pb], [sa, sw])["label"] == "wildcard"
+    assert labels.explain(pb, sb)["label"] is None
+    labels.set_label(pa, "ranked")
+    assert labels.explain_block([pa, pb], [sa, sw]) == {"label": "ranked", "source": "hand", "why": "set by hand"}
+    labels.FILE.unlink(missing_ok=True)
+
 def _own_put(HUD, img, font, text, x_end=None, x_start=None, gap=2):
     """Draws a number of the own-stats strip with the reader's own digit shapes ('S' small white, 'B' big white,
     'K' dark knocks digits), ending at x_end or starting at x_start. -> (first x, last x)."""

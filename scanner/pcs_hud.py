@@ -768,6 +768,70 @@ class Banner:
         return out
 
 
+# ---------- playlist emblem (top right: pubs, Wildcard) ----------
+def _emblem_table(table):
+    """pcs_banner.json 'emblems': {asset id: {'mode', 'rgb': 768 hex (16 x 16 x RGB, 4 bits), 'mask': 64 hex}}."""
+    out = []
+    for key, e in table.get('emblems', {}).items():
+        rgb = np.array([int(c, 16) * 17 for c in e['rgb']], np.float32).reshape(16, 16, 3)
+        mask = np.array([b == '1' for c in e['mask'] for b in format(int(c, 16), '04b')]).reshape(16, 16)
+        out.append((key, e.get('mode'), rgb, mask))
+    return out
+
+class ModeEmblem:
+    """The playlist's round emblem at the top right: in a game (x 2422..2539, y 8..123 at 1440p, under the minimised
+    counters) and on the "waiting for players" screen (134 px lower). Pubs shows the red "unranked" emblem, Wildcard a
+    teal one, ranked a rank badge instead (not an emblem: ranked is told by the RP panel, `ranked`). The emblem is
+    squeezed to 16 x 16 colour cells and compared, on the cells the emblem fully covers, with the cells derived from
+    the game's own emblem images (pcs_banner.json 'emblems', built by tools/mode_emblems.py; the images are not in the
+    repo). Measured: the right emblem 9..14 apart (mean of |RGB| on 0..255), any other emblem, rank badge or scene 41
+    or more. Small shifts are searched (the HUD sits a few px differently between decoders and screens)."""
+    T = _emblem_table(BANNER_T)
+    ANCHORS = ((8, 2422), (142, 2420))      # (y, x) of the emblem's top left: in game, waiting screen
+    SIZE = (116, 118)                       # rows, columns
+    ACCEPT, MARGIN = 24.0, 12.0
+    SHIFTS = (-4, 0, 4)
+    @classmethod
+    def read(cls, a):
+        """a: full 16:9 frame. -> (asset id, mode or None, distance) or None."""
+        if not cls.T: return None
+        h, w = cls.SIZE; best = None
+        for y0, x0 in cls.ANCHORS:
+            for dy in cls.SHIFTS:
+                for dx in cls.SHIFTS:
+                    y, x = y0 + dy, x0 + dx
+                    if y < 0: continue
+                    c = a[y:y + h, x:x + w]
+                    if c.shape[:2] != (h, w): continue
+                    # the emblem is a filled disc: its centre is never near-white or near-black in all channels
+                    m = c[h // 2 - 8:h // 2 + 8, w // 2 - 8:w // 2 + 8]
+                    if m.max() < 40: continue
+                    s = np.asarray(Image.fromarray(np.ascontiguousarray(c)).resize((16, 16), Image.BOX)).astype(np.float32)
+                    for key, mode, rgb, mask in cls.T:
+                        d = float(np.abs(s - rgb)[mask].mean())
+                        if best is None or d < best[2]: best = (key, mode, d, y, x)
+                    if best and best[2] < cls.ACCEPT / 2: break     # a clear match: no need to look further
+        if not best or best[2] > cls.ACCEPT: return None
+        # the runner-up must be another emblem clearly further away (at the same place)
+        y, x = best[3], best[4]
+        s = np.asarray(Image.fromarray(np.ascontiguousarray(a[y:y + h, x:x + w])).resize((16, 16), Image.BOX)).astype(np.float32)
+        other = min((float(np.abs(s - rgb)[mask].mean()) for key, mode, rgb, mask in cls.T if key != best[0]), default=999)
+        if other - best[2] < cls.MARGIN: return None
+        return best[0], best[1], round(best[2], 1)
+
+def emblem_vote(reads, lo, hi, need=3, share=0.9):
+    """Emblem reads [(t, asset id, mode, distance)] between lo and hi -> (asset id or None, mode or None, counts).
+    One emblem must be read at least `need` times and make `share` of the reads, else nothing is told."""
+    C = {}
+    for t, key, mode, d in reads:
+        if lo <= t < hi: C[key] = C.get(key, 0) + 1
+    if not C: return None, None, C
+    key = max(C, key=C.get); n = sum(C.values())
+    if C[key] < need or C[key] < share * n: return None, None, C
+    mode = next((m for k, m, _, _ in ModeEmblem.T if k == key), None)
+    return key, mode, C
+
+
 # ---------- "N SQUADS LEFT" (top right during a game) ----------
 class SquadsLeft:
     """The number in front of "SQUADS LEFT": white digits 22 px high, right-aligned just left of the words.

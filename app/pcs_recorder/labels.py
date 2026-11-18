@@ -1,9 +1,10 @@
 """What kind of Apex session a recording is: scrims, ranked, pubs or wildcard.
 
-The player (or coach) can set it by hand in the app; otherwise it comes from the scan: the scrim drop screen
-means scrims, the ranked badge means ranked, the loading banner's mode word means wildcard or pubs (pubs trios
-only so far: other playlists show another word and stay unlabelled until it is taught to the scanner). The
-label decides what goes to YouTube and the word in the video title.
+The player (or coach) can set it by hand in the app (a label set by hand always wins); otherwise it comes from
+the scan: the scrim drop screen means scrims, the ranked badge means ranked, the loading banner's mode word or the
+playlist emblem at the top right of the HUD means wildcard or pubs (scanner: games[].modeSeen). A game whose
+signs disagree, or that shows another playlist's emblem, stays unlabelled. The label decides what goes to YouTube
+and the word in the video title.
 
 EEC drops confirm scrims (coach, 18 Nov 2026): when a block's EEC results fit its games by map and time and the
 EEC drops agree with where we landed (eec.check_block "match"), the block is scrims with source "eec", even when the
@@ -79,10 +80,23 @@ def of_block(paths: list[str], scans: list[dict], eec_check: dict | None = None)
     return r["label"], r["source"] == "hand"
 
 
-def _scan_why(kind: str | None) -> str:
+_MODE = {"scrims": "scrim", "ranked": "ranked", "wildcard": "wildcard", "pubs": "pubs"}
+_SIGN = {"badge": "the ranked badge", "select": "the rank badges at legend select", "banner": "the loading banner",
+         "emblem": "the playlist emblem", "drop": "the scrim drop screen"}
+
+
+def _scan_why(kind: str | None, scans: list[dict] | None = None) -> str:
+    if not kind:
+        return "nothing in the scan tells"
+    signs: list[str] = []
+    for s in scans or []:
+        for g in (s or {}).get("games", []):
+            if g.get("mode") == _MODE[kind]:
+                signs += [x for x in (g.get("modeSeen") or {}).get("from", []) if x in _SIGN and x not in signs]
+    if signs:
+        return " and ".join(_SIGN[x] for x in signs) + " showed " + TITLE[kind]
     return {"scrims": "the scrim drop screen was read", "ranked": "the ranked badge was seen",
-            "wildcard": "the loading banner said wildcard", "pubs": "the loading banner said trios (pubs)"}.get(
-        kind or "", "nothing in the scan tells")
+            "wildcard": "the loading banner said wildcard", "pubs": "the loading banner said trios (pubs)"}[kind]
 
 
 def explain_block(paths: list[str], scans: list[dict], eec_check: dict | None = None) -> dict:
@@ -95,8 +109,8 @@ def explain_block(paths: list[str], scans: list[dict], eec_check: dict | None = 
     if verdict == "match":
         return {"label": "scrims", "source": "eec", "why": eec_check.get("why") or "EEC drops agree"}
     found = [auto(s) for s in scans]
-    label = next((k for k in ("scrims", "ranked") if k in found), None)
-    why = _scan_why(label)
+    label = next((k for k in ("scrims", "ranked", "wildcard", "pubs") if k in found), None)
+    why = _scan_why(label, scans)
     if verdict == "mismatch":
         why += f"; not the EEC lobby: {eec_check.get('why') or 'drops differ'}"
     elif verdict == "unknown" and eec_check.get("why") and eec_check.get("lobby"):
@@ -112,7 +126,7 @@ def explain(path: str, scan: dict, eec_check: dict | None = None) -> dict:
     if (eec_check or {}).get("verdict") == "match":
         return {"label": "scrims", "source": "eec", "why": eec_check.get("why") or "EEC drops agree"}
     label = auto(scan)
-    why = _scan_why(label)
+    why = _scan_why(label, [scan])
     if (eec_check or {}).get("verdict") == "mismatch":
         why += f"; not the EEC lobby: {eec_check.get('why') or 'drops differ'}"
     return {"label": label, "source": "scan" if label else None, "why": why}
