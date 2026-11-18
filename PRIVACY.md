@@ -12,12 +12,21 @@ You sign in with Google only if you want to use these features, and you can sign
 removing PCS Scanner from <https://myaccount.google.com/permissions>.
 
 - **Google Drive** (`drive.file`): the app creates a "PCS Scans" folder in your Drive and uploads the
-  scan results it made (small text files, and your microphone track if you turned that on). It can only
+  scan results it made (small text files only: never your microphone track, voice or video). It can only
   see and change files it created itself, never your other files. The folder is shared read-only with
-  your team's coach.
+  the coach's Google address you typed in Settings, if any. Once you are on your team's hub, Drive is not
+  needed.
 - **YouTube** (`youtube.upload`): if you turn on YouTube upload, the app uploads the videos of your scrim
   blocks to the YouTube channel you pick when signing in, with a title and description. It cannot read,
   change or delete any video.
+
+## What goes to your team's hub
+
+The hub is your team's own server, run by your coach (not by Google or anyone else). If you joined it, the app
+sends it, with your hub key: the scan results (small text files), your microphone track if you said yes to "Send
+my mic track" (only after the voice consent below), crash reports (below) and your sharing choices. Videos never
+go to the hub: they go only to YouTube, if you turn that on. Your coach and your teammates on the same hub can see
+your scan results; players of another team cannot.
 
 ## What stays on your PC
 
@@ -31,7 +40,7 @@ e-mail addresses and your Windows user name removed), for your coach. Turn it of
 goes to any other service.
 
 Voice (Discord and microphone) is only recorded after you confirm in the app that your team agreed to
-it. Only the tracks you choose are sent, and only to your team (its Drive folder or its own server).
+it. Only the tracks you choose are sent, and only to your team's hub: never to Google Drive.
 
 If you choose "Share mic tracks with my team" (first-run setup or Settings), your microphone track is
 shared with your teammates on the team's server, and the app downloads your teammates' shared microphone
