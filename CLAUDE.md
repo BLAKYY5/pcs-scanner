@@ -321,6 +321,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   no clock most of the time); after the player's last death with no way back, cards are someone else's. Check set
   (`pcs-handoff\checkset\checkset-respawn-ring.json`, 15 / 13 / 17 / 7 Nov): teammates 23 of 25 found, self 15 of 18,
   none wrong. Misses: a respawn just before the player's own, a card read dead only twice.
+  The review player shows each respawn like a kill (coach's decision, 18 Nov 2026): a lime tick with a round head on
+  the kill feed lane and a line in Events ("You respawned", "<legend> respawned" by the card colour against the legend
+  select's hues, else "Teammate respawned"), click = seek. `respawns` is in `GAME_FIELDS` (`app/pcs_server.py`).
   Rings, frames checked by eye (7, 15, 17 Nov): current ring 97 of 114 visible read right, next ring 164 of 180, none
   wrong after the small-circle rule (the first run took a white map-feature circle on E-District for a next ring 5 times).
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.

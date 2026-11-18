@@ -2148,6 +2148,75 @@ def test_review_kill_feed_our_squad():
         assert text in js, text
 
 
+RESPAWN_GAME = {"map": "ED", "mode": "ranked", "tStart": 100.0, "tEndGame": 900.0, "drop": None, "ring": [], "landing": None,
+                "select": {"tFirst": 80.0, "tLast": 100.0, "ranked": True,
+                           "squad": [{"slot": 1, "legend": "wraith", "self": False, "hue": 77},
+                                     {"slot": 2, "legend": "crypto", "self": True, "hue": 39},
+                                     {"slot": 3, "legend": "bangalore", "self": False, "hue": 179}]},
+                # scanner PR #52: a teammate named by the card colour, one whose colour matches no slot, the player
+                "respawns": [{"t": 400.0, "who": "teammate", "slot": 1, "hue": 80, "color": "yellow", "how": "card",
+                              "deadSince": 328.0, "lastDeadRead": 395.0},
+                             {"t": 500.0, "who": "teammate", "slot": 2, "hue": 300, "color": "purple", "how": "card",
+                              "deadSince": 470.0},
+                             {"t": 650.5, "who": "self", "how": "dropship", "deadSince": 560.0}],
+                "ownDeaths": [560.0],
+                "samples": []}
+
+
+def test_review_respawns_like_kills():
+    """Respawns from the scan (PR #52) reach the review page, and the page shows each one like a kill: a marker on the
+    kill feed lane and a line in the events, its own colour, '<who> respawned', a click seeks there."""
+    folder = TMP / "respawn-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.17-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}              # a game scanned before PR #52
+    (rec.with_suffix(".scan")).mkdir(exist_ok=True)
+    (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [RESPAWN_GAME, old]}))
+    feed = {"lines": [{"t": 380.0, "jpg": "", "event": "kill", "killer": {"side": "squad", "hue": 39}, "victim": {"side": "other"}}]}
+    (rec.with_suffix(".scan") / (rec.stem + ".feed.json")).write_text(json.dumps(feed))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = call(srv, "/api/library")[1][0]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert d["games"][0]["respawns"] == RESPAWN_GAME["respawns"]                     # passed through untouched
+        assert d["games"][1]["respawns"] is None                                           # older scan: just missing
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+        assert "respawned`" in js and "Respawned</span>" in js and ".tick.respawn" in css
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            end = time.time() + 15
+            while time.time() < end and not page.js("!!(window.RV && RV.ev && document.querySelector('#laneF .tick'))"):
+                time.sleep(0.2)
+            ev = page.js("RV.ev.filter(e => e.k === 'respawn').map(e => [e.t, e.title, e.sub, e.g])")
+            assert ev == [[400, "Wraith respawned", "back after 1:12", 0], [500, "Teammate respawned", "back after 0:30", 0],
+                          [650.5, "You respawned", "back after 1:30 · dropship", 0]], ev
+            # on the kill feed lane beside the kill tick, not on the start / rings lane
+            assert page.js("[...document.querySelectorAll('#laneF .tick.respawn')].map(x => +x.dataset.t)") == [400, 500, 650.5]
+            assert page.js("document.querySelectorAll('#laneF .tick:not(.respawn)').length") == 1
+            assert page.js("document.querySelectorAll('#laneE [data-t=\"400\"]').length") == 0
+            assert "respawns" in page.js("document.querySelector('#laneF .lane-label').textContent")
+            # in the events list, in order with the kill, own style; a click seeks the video there
+            rows = page.js("[...document.querySelectorAll('#rvBody .ev')].map(x => [x.classList.contains('respawn'), x.querySelector('b').textContent])")
+            assert [r for r in rows if r[0]] == [[True, "Wraith respawned"], [True, "Teammate respawned"], [True, "You respawned"]], rows
+            names = [r[1] for r in rows]
+            assert "You killed" in names and names.index("You killed") < names.index("Wraith respawned"), \
+                (names, page.js("JSON.stringify([RV.d.feed, RV.d.feedSides, RV.d.games[0].select])"))
+            page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
+            page.js("document.querySelector('#rvBody .ev.respawn').click(); document.querySelector('#laneF .tick.respawn[data-t=\"650.5\"]').click(); 1")
+            assert page.js("__seeks") == [400, 650.5], page.js("__seeks")
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
+
+
 class MinimapHub:
     """A hub 0.5.2 with the `minimaps` collection: the list and the pictures need a key (any role). `docs` and `blobs`
     can be changed by the test; `blob_calls` counts picture downloads."""
