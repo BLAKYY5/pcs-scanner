@@ -153,7 +153,8 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
                "select", "banner", "squadsLeft", "own", "feedStats",
                "ringCircles", "respawns",   # scanner PR #52: respawns [{t, who: teammate | self, hue, deadSince, how}], shown like kills
-               "ownDeaths")                 # the recording player's deaths [t]: dead time and lives in the game bar
+               "ownDeaths",                 # the recording player's deaths [t]: dead time and lives in the game bar
+               "carePackages", "strongholds")   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
 
 
 def _same_sig(a, b) -> bool:
