@@ -597,6 +597,22 @@ def test_no_personal_email_in_app():
     assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
+def test_drive_gets_results_only():
+    """Google Drive gets the small result files only, never a mic track or a log (PRIVACY.md says so)."""
+    sent, saved = [], (core.drive_service, core.scans_folder, core.upload)
+    try:
+        core.drive_service = lambda interactive=True: object()
+        core.scans_folder = lambda svc: "folder"
+        core.upload = lambda svc, folder, p, log: sent.append(os.path.basename(p))
+        assert core.drive_upload_quiet(["a/x.scan.json", "a/x.feed.json", "a/x.mic.m4a", "a/x.log", "a/x.mp4"])
+    finally:
+        core.drive_service, core.scans_folder, core.upload = saved
+    assert sent == ["x.scan.json", "x.feed.json"], sent
+    root = Path(__file__).resolve().parent.parent
+    privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
+    assert "never your microphone track" in privacy and "never to Google Drive" in privacy
+
+
 def test_team_link_weapon_icons():
     """The weapon icons come from the Google Drive link the player pastes in Settings: only Drive links are taken,
     only a real icons file is kept, and a new version of the file replaces the old one."""
