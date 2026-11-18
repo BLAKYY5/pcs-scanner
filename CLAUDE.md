@@ -229,7 +229,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
 - **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.2 collection `minimaps`): the review player
-  draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`)
+  draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`;
+  without the overlay the HUD minimap's reads from `minimapTrack`, `pcs_server.seen_rows`, `seenFrom: "minimap"`)
   on the game's own minimap, with the marker at the video's moment, the landing and the harvesters (map % = picture
   fraction). World -> picture: `(x - pos_x) / scale / size`, `(pos_y - y) / scale / size` (the game's transform, from the
   hub document). The pictures are EA's: the coach uploads them to the hub (`tools/upload_minimaps.py` in the hub repo),
