@@ -1,4 +1,4 @@
-"""Tests for the app's local server (what the window talks to).
+﻿"""Tests for the app's local server (what the window talks to).
 Run:  python tests/test_ui.py
 """
 import json
@@ -7,6 +7,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1014,6 +1015,43 @@ def test_update_button_and_checks():
     finally:
         core.check_update, rcore.apex_running = real_check, real_running
         srv.stop()
+
+
+def test_update_pressed_twice_downloads_once():
+    """A second Update press while the first download runs says so and starts nothing (two downloads into the same
+    .part file made Windows refuse the file and the update never finished, 18 Nov 2026). After a failed download
+    the button works again, and the failure is told to the player instead of being lost."""
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend(_Auto(str(TMP / "recs-upd2")))
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
+    started, go = [], threading.Event()
+    real_install, real_running, real_quit = core.install_update, rcore.apex_running, b.quit
+
+    def slow_install(url, log, size=None, show=False, digest=None):
+        started.append(url)
+        go.wait(10)
+        raise RuntimeError("The download was incomplete. Try Update again.")
+    core.install_update, rcore.apex_running, b.quit = slow_install, (lambda: False), (lambda: None)
+    try:
+        first = []
+        th = threading.Thread(target=lambda: first.append(b.install_update()))
+        th.start()
+        for _ in range(100):
+            if started: break
+            time.sleep(0.02)
+        assert len(started) == 1
+        second = b.install_update(show=True)
+        assert second and "already downloading" in second, second
+        assert len(started) == 1                           # no second download
+        go.set(); th.join(5)
+        assert first == ["The download was incomplete. Try Update again."], first
+        go.clear(); go.set()                               # the button works again after a failure
+        assert b.install_update() == "The download was incomplete. Try Update again." and len(started) == 2
+        core.install_update = lambda *a, **k: True         # a good download keeps the lock: the app is closing
+        assert b.install_update() is None
+        assert "already downloading" in (b.install_update() or "")
+    finally:
+        core.install_update, rcore.apex_running, b.quit = real_install, real_running, real_quit
 
 
 def test_labels_queue_and_mics_api():
