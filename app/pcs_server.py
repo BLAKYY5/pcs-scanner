@@ -214,6 +214,7 @@ class Backend:
         self.google = "checking"                           # ok | expired | none | checking
         self.youtube = "checking"                          # same, for the YouTube upload sign-in
         self.update = None                                 # (tag, exe_url, page) when a new version exists
+        self._update_lock = threading.Lock()               # one update download at a time
         self.scan_queue: list[str] = []
         self.scan_now: str | None = None
         self.scan_lock = threading.Lock()
@@ -276,10 +277,23 @@ class Backend:
         why = self.update_blocked()
         if why:
             return why
-        u = self.update
-        if u and u[1] and core.install_update(u[1], self.say, u[3] if len(u) > 3 else None, show=show,
-                                              digest=u[4] if len(u) > 4 else None):
-            threading.Timer(1.0, self.quit).start()
+        # One download at a time: a second press (window button, corner message) while the first download runs used
+        # to start a second download into the same .part file; Windows then refused it ("file in use") and the
+        # update never finished (coach's PC, 18 Nov 2026). Kept after a good download: the app is closing.
+        if not self._update_lock.acquire(blocking=False):
+            return "The update is already downloading. PCS Scanner restarts by itself when it's done."
+        done = False
+        try:
+            u = self.update
+            if u and u[1] and core.install_update(u[1], self.say, u[3] if len(u) > 3 else None, show=show,
+                                                  digest=u[4] if len(u) > 4 else None):
+                done = True
+                threading.Timer(1.0, self.quit).start()
+        except RuntimeError as e:                          # address refused, bad or incomplete download
+            return str(e)
+        finally:
+            if not done:
+                self._update_lock.release()
         return None
 
     def update_blocked(self) -> str | None:
