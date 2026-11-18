@@ -174,6 +174,8 @@ function setupSteps() {
 }
 function choicesDone(st) { return st.share !== null && st.transcripts !== null; }
 function setupDone(st) { return st.name && (st.hub || st.google) && choicesDone(st); }
+/* a hub address is set: results go to the hub only, Google Drive is not used (leaving-Drive plan step 5) */
+function driveOff() { const r = S && S.recorder; return !!(r && r.settings && r.settings.hub_url); }
 /* one choice of the setup step: two buttons, the current answer highlighted (none before the first answer) */
 function choiceHTML(key, title, hint, value, yes, no, extra) {
   const b = (on, label) => `<button class="btn small ${value === on ? 'brand' : ''}" data-choice="${key}" data-on="${on ? 1 : 0}" aria-pressed="${value === on}">${label}</button>`;
@@ -188,12 +190,13 @@ function tailscaleHelp(ts) {
 function setupHTML() {
   const st = setupSteps(), r = S.recorder;
   if (!r || setupHidden() || setupDone(st)) return '';
-  const n = [st.name, st.hub, st.google, choicesDone(st)].filter(Boolean).length;
+  const drive = !st.hub && !driveOff(), total = drive ? 4 : 3;      // on the hub: no Drive step
+  const n = [st.name, st.hub, drive && st.google, choicesDone(st)].filter(Boolean).length;
   const li = (done, busy, i, title, hint, act, msg) => `<li class="${done ? 'done' : busy ? 'busy' : ''}"><span class="num">${done ? '✓' : i}</span>
     <div><b>${title}</b><small>${hint}</small></div><div class="act">${act}</div>${msg ? `<div class="msg">${msg}</div>` : ''}</li>`;
   const recPill = st.recBusy ? ' <span class="pill info">Setting up…</span>' : '';
   return `<section class="card setup" id="setup"><div class="row between"><h2>Get set up</h2>
-      <span class="row"><span class="faint" style="font-size:13px">${n} of 4 done</span><button class="btn small ghost" id="su-hide">Hide</button></span></div>
+      <span class="row"><span class="faint" style="font-size:13px">${n} of ${total} done</span><button class="btn small ghost" id="su-hide">Hide</button></span></div>
     <ol class="steps">
       ${li(st.name, false, 1, 'Your EEC name', 'Labels your scans for the coach.',
         st.name ? `<span class="pill good">${esc(S.player)}</span>` : `<input id="su-name" type="text" placeholder="EEC name" maxlength="40" value="${esc(st.hubName)}"><button class="btn small brand" id="su-name-save">Save</button>`)}
@@ -208,8 +211,8 @@ function setupHTML() {
         st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
           : '<input id="su-link" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the link from your coach"><button class="btn small brand" id="su-join">Join</button>',
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
-      ${li(st.google, false, 4, 'Google Drive', st.hub ? 'Optional: a backup copy of your results in your Drive.' : 'Your results go to your Drive, shared with the coach.',
-        st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>')}
+      ${drive ? li(st.google, false, 4, 'Google Drive', 'No team hub yet: your results go to your Drive, shared with the coach.',
+        st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>') : ''}
     </ol></section>`;
 }
 function wireSetup() {
@@ -272,8 +275,9 @@ function renderHome(prev, force) {
       <div class="kpi"><span>Storage used</span><b>${r ? fmtGB(used) : '—'}</b><small>of ${r ? r.settings.max_gb + ' GB' : '—'}</small>
         <div class="meter ${pct > 90 ? 'full' : pct > 70 ? 'warn' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div></div>
       <div class="kpi"><span>Quality</span><b>${r ? r.settings.bitrate_mbps + ' Mb/s' : '—'}</b><small>${r ? '≈ ' + gbHour(r.settings.bitrate_mbps) + ' GB per hour' : ''}</small></div>
-      <div class="kpi"><span>Google Drive</span><b style="font-size:22px;line-height:1.6"><span class="pill ${g[1]}" style="font-size:13px">${g[0]}</span></b>
-        <small>${S.google === 'ok' ? 'Results go to “PCS Scans”' : `<a href="#" id="signin">Sign in with Google</a>`}</small></div>
+      ${driveOff() ? `<div class="kpi"><span>Results</span><b style="font-size:22px;line-height:1.6"><span class="pill ${S.hub && S.hub.refused ? 'bad' : 'good'}" style="font-size:13px">${S.hub && S.hub.refused ? 'Key refused' : 'Team hub'}</span></b>
+        <small>Sent to the team hub</small></div>` : `<div class="kpi"><span>Google Drive</span><b style="font-size:22px;line-height:1.6"><span class="pill ${g[1]}" style="font-size:13px">${g[0]}</span></b>
+        <small>${S.google === 'ok' ? 'Results go to “PCS Scans”' : `<a href="#" id="signin">Sign in with Google</a>`}</small></div>`}
     </div>
     <div class="grid g2">
       <section class="card"><div class="row between"><h2>Latest recordings</h2><a class="btn small ghost" href="#recordings">All recordings</a></div>
@@ -1229,17 +1233,17 @@ function renderSettings() {
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
         <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub', 'Coach'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select>
           <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s hub key.'}</small></label>
-        <div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
+        ${driveOff() ? `<label class="field"><span>Google Drive</span><div class="row"><span class="pill">Not used</span></div><small>Your results go to the team hub.</small></label>` : `<div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
           <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
           <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
-        <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>
-        <label class="field wide"><span>Team link${S.iconsFromHub ? ' (optional)' : ''}</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="${S.iconsFromHub ? 'Not needed: the hub gives the weapon icons' : 'Paste the Google Drive link from your coach'}">
-          <small>${S.iconsFromHub ? 'Not needed: the team hub gives the weapon icons. A link here is only a backup. ' : 'Lets the scan name the weapons in the kill feed. Not needed once the team hub has the weapon icons. '}${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>
+        <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>`}
+        ${S.iconsFromHub ? `<label class="field"><span>Weapon icons</span><div class="row"><span class="pill ${S.icons ? 'good' : ''}">${S.icons ? 'Loaded' : 'Not loaded yet'}</span></div><small>From the team hub${S.icons ? ', ' + new Date(S.icons * 1000).toLocaleDateString() : ''}. No team link needed.</small></label>` : `<label class="field wide"><span>Team link</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="Paste the Google Drive link from your coach">
+          <small>Lets the scan name the weapons in the kill feed. Not needed once the team hub has the weapon icons. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>`}
       </div></section>
     ${r ? `
     <section class="card section"><h2>Team hub</h2>
       <div class="form">
-        <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Empty = results go to Google Drive only.</small></label>
+        <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Your results go here (Google Drive is then not used). Empty = Google Drive.</small></label>
         <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in or invite link your coach sent. Don't share it.</small></div>
       </div>
       ${switchHTML('f-crash_reports', s.crash_reports !== false, 'Send crash reports to the team hub', 'When recording, OBS or a scan fails: the error, app and Windows version, graphics card and the end of the app log, for your coach only. Keys, passwords, e-mails and your Windows name are removed. Only when you are on the hub.')}
@@ -1328,7 +1332,7 @@ function renderSettings() {
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + gbHour(q.value) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
-  $('#f-signin').onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
+  const fsi = $('#f-signin'); if (fsi) fsi.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
   const fl = $('#f-obslogs'); if (fl) fl.onclick = () => api('/api/open', {what: 'obslogs'});
   const ft = $('#f-retest'); if (ft) ft.onclick = async () => {
@@ -1395,7 +1399,8 @@ function askUnsaved(target) {
   $('[data-a="save"]', box).focus();
 }
 function settingsBody() {
-  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value, team_link: $('#f-team_link').value.trim(), coach_email: $('#f-coach_email').value.trim()};
+  const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
+  for (const k of ['team_link', 'coach_email']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }   // hidden on the hub
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }

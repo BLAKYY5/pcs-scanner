@@ -1550,10 +1550,10 @@ def test_weapon_icons_from_hub():
         calls = drive["calls"]
         fake.stop()
         assert b.sync_icons() == "hub:error" and Path(core.ICONS_F).read_bytes() == one and drive["calls"] == calls
-        # page words: the team link becomes optional with the hub's icons
+        # page words: the team link is hidden once the hub gives the icons (leaving-Drive plan step 2)
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-        for text in ("iconsFromHub", "Team link${S.iconsFromHub ? ' (optional)'", "no team link needed",
-                     "Not needed: the team hub gives the weapon icons", "invite link"):
+        for text in ("iconsFromHub", "${S.iconsFromHub ? `<label class=\"field\"><span>Weapon icons</span>",
+                     "no team link needed", "From the team hub", "invite link"):
             assert text in js, text
     finally:
         core.http_get = real_get
@@ -1647,10 +1647,16 @@ def test_hub_uploads_refused_key_and_old_hub():
             except ConnectionError as e:
                 assert "refused your key" in str(e) and BAD_KEY not in str(e)
         assert len([1 for _, p, a in fake.seen if a == "Bearer " + BAD_KEY]) == 1          # tried once only
-        # Drive still takes the results; the hub's refusal is noted
-        drive["ok"] = True
-        where = sender.upload(files)
-        assert where == ["Google Drive"] and where.hub_note == "Not sent to hub: key refused"
+        # on the hub, Drive is never used, even signed in and with the hub refusing (leaving-Drive plan step 5)
+        drive["ok"], drive_calls = True, []
+        sender.drive_upload = lambda paths: drive_calls.append(paths) or True
+        try:
+            sender.upload(files)
+            raise AssertionError("results went somewhere while the hub refused the key")
+        except ConnectionError as e:
+            assert "refused your key" in str(e)
+        assert drive_calls == []
+        sender.drive_upload = lambda paths: drive["ok"]
         drive["ok"] = False
         hub.set_key(GOOD_KEY)                                                            # new key: sent again
         assert sender.upload(files) == ["the team hub"]
@@ -1672,6 +1678,24 @@ def test_hub_uploads_refused_key_and_old_hub():
     finally:
         fake.stop()
         _fresh_hub()
+
+
+def test_hub_only_results_page():
+    """On the hub the page drops Google Drive (leaving-Drive plan step 5): no Drive step in Get set up, the Home tile
+    says the results go to the team hub, Settings hides the Drive sign-in and the coach's address, and saving works
+    without those fields."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "function driveOff()" in js and "r.settings.hub_url" in js[js.index("function driveOff()"):][:200]
+    setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
+    assert "const drive = !st.hub && !driveOff(), total = drive ? 4 : 3" in setup and "${n} of ${total} done" in setup and "${drive ? li(st.google" in setup
+    home = js[js.index("function renderHome"):js.index("function renderHome") + 6000]
+    assert "driveOff() ?" in home and "Sent to the team hub" in home
+    sett = js[js.index("function renderSettings"):js.index("function settingsBody")]
+    assert "${driveOff() ?" in sett and "Your results go to the team hub.</small>" in sett
+    assert "const fsi = $('#f-signin'); if (fsi)" in sett
+    body = js[js.index("function settingsBody"):js.index("function settingsBody") + 600]
+    assert "for (const k of ['team_link', 'coach_email']) { const el = $('#f-' + k); if (el)" in body
+    assert "$('#f-team_link').value" not in js and "$('#f-coach_email').value" not in js
 
 
 def test_team_window_signed_in():
@@ -1914,9 +1938,9 @@ def test_hub_key_never_in_logs_or_data_files():
 
 
 def test_hub_retry_with_real_hub_requests():
-    """Recorder + Sender + hub.py against a hub on localhost: Drive takes the results while the hub is not
-    reachable, then a refused key; the Recordings list says "Not on hub yet" and why; once the hub is reachable
-    and the key is fixed, the recording goes to the hub by itself, once."""
+    """Recorder + Sender + hub.py against a hub on localhost. Hub not reachable: the results wait (Drive is not used
+    on the hub). A recording an older version sent to Drive only, then a refused key: the Recordings list says
+    "Not on hub yet" and why; once the hub is reachable and the key is fixed, it goes to the hub by itself, once."""
     from pcs_recorder import retention, runtime, settings as st
     from pcs_recorder.core import Recorder
     hub = _fresh_hub()
@@ -1950,7 +1974,10 @@ def test_hub_retry_with_real_hub_requests():
     try:
         hub.set_key(BAD_KEY)
         rec._retry_uploads()
-        assert rec.idx["k"].status == "uploaded" and rec.hub_state("k") == {"hub": "pending", "why": "Hub not reachable"}
+        assert rec.idx["k"].status == "scanned" and "not sent yet" in rec.idx["k"].note    # waits, never to Drive
+        # what an older version left: results on Drive only, hub pending
+        rec.idx["k"].status, rec.idx["k"].note = "uploaded", ""
+        rec.sent["k"] = {"hub": "pending", "why": "Hub not reachable", "drive": "sent"}
         it = next(x for x in call(srv, "/api/library")[1] if x["name"] == v.name)
         assert it["hub"] == {"hub": "pending", "why": "Hub not reachable"}, it
         rec._retry_hub()                                                               # still down

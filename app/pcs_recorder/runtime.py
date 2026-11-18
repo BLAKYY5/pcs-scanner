@@ -222,8 +222,9 @@ hub_reason = hubmod.reason
 
 
 class Sender:
-    """Results go to the team hub when one is set, and to Google Drive when the player is signed in.
-    It succeeds if at least one of them took the files; otherwise the recorder retries later.
+    """Results go to the team hub when one is set; Google Drive only when no hub is set and the player is signed in
+    (leaving-Drive plan, coach's decision 18 Nov 2026: the hub is the destination, Drive is not used once on the hub).
+    If the destination didn't take the files, the recorder retries later.
     Hub requests carry the player's key (pcs_recorder.hub); a refused key stops hub uploads until it changes."""
 
     def __init__(self, s: st.Settings, drive_upload):
@@ -255,18 +256,18 @@ class Sender:
             except Exception as e:
                 errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
                 where.hub_why = "Hub not reachable"
-        try:
-            if self.drive_upload([str(f) for f in files]):
-                sent = True
-                where.append("Google Drive")
-                where.drive_ok = True
-            elif not self.s.hub_url:
-                raise NeedsSignIn("Your Google sign-in has expired or is missing, so the results couldn't go to "
-                                  "Drive")
-            # else: not signed in to Google, or Drive refused: drive_upload can't tell which (drive_ok stays None)
-        except Exception as e:
-            where.drive_ok = False
-            errors.append(f"Google Drive upload failed ({e})")
+        else:
+            try:
+                if self.drive_upload([str(f) for f in files]):
+                    sent = True
+                    where.append("Google Drive")
+                    where.drive_ok = True
+                else:
+                    raise NeedsSignIn("Your Google sign-in has expired or is missing, so the results couldn't go to "
+                                      "Drive")
+            except Exception as e:
+                where.drive_ok = False
+                errors.append(f"Google Drive upload failed ({e})")
         if not sent:
             raise ConnectionError("; ".join(errors) or "No destination set")
         return where

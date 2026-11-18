@@ -91,7 +91,7 @@ hub only. See [PRIVACY.md](PRIVACY.md).
   `pcs_core.py` has paths, settings, Google Drive, updates; `pcs_server.py` is the local server the window talks
   to (127.0.0.1, random port and token); `web/` is the interface. API tests: `python tests/test_ui.py`.
 - `app/pcs_recorder/` — Auto-record: Apex detection, private OBS driven over obs-websocket, scan prompt,
-  folder limits, uploads to the team hub and/or Drive. Logic tests: `python tests/test_recorder.py`.
+  folder limits, uploads to the team hub (or to Drive when no hub is set). Logic tests: `python tests/test_recorder.py`.
 - `.github/workflows/build.yml` — builds `PCS-Scanner.exe` on every push; a `v*` tag publishes a release.
 
 ## Build settings (repository Settings → Secrets and variables → Actions)
