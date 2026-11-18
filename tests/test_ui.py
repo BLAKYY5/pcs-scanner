@@ -151,6 +151,7 @@ def test_recording_date_and_game_data_for_review():
             "squadsLeft": [[579.0, 20], [593.0, 19], [944.0, 5]],
             "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
             "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
+            "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
             "samples": [[550.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False]]}
     old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}              # a scan from before 1.10.8
     for v, games, rs in ((named, [game, old], "2026-11-07T21:42:00"), (by_scan, [old], "2026-11-03T22:17:00"), (bare, [old], None)):
@@ -181,6 +182,9 @@ def test_recording_date_and_game_data_for_review():
         assert "g.tEndGame != null ? g.tEndGame" in js and "after your game ended" in js
         assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
+        assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
+        # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
+        assert "knock: ['', 'Knocked']" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
         assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
         assert o["drop"]["spots"] == []
         # a missing file: the player can say so (404), not "format not supported"
