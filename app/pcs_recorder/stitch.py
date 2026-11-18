@@ -163,8 +163,11 @@ def ended_in_game(path: str, dur: float | None, seconds: int = 12) -> bool | Non
         return None
     W, H = 2560, 1440
     n = W * H * 3
-    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-ss", f"{max(0.0, dur - seconds):.3f}", "-i", str(path),
-           "-vf", f"fps=1,scale={W}:{H}", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+    # keyframes only (OBS writes one a second): a dozen frames decoded, not 60 a second (a 1440p60 AV1 recording
+    # took minutes of CPU when every frame was decoded)
+    cmd = ["ffmpeg", "-nostdin", "-v", "error", "-skip_frame", "nokey", "-ss", f"{max(0.0, dur - seconds):.3f}",
+           "-i", str(path), "-fps_mode", "passthrough", "-vf", f"scale={W}:{H}", "-frames:v", str(seconds + 3),
+           "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
     frames = reads = 0
     try:
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, creationflags=_quiet())
