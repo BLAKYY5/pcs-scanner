@@ -225,6 +225,8 @@ class Backend:
         self.youtube = "checking"                          # same, for the YouTube upload sign-in
         self.update = None                                 # (tag, exe_url, page) when a new version exists
         self._update_lock = threading.Lock()               # one update download at a time
+        self.update_state = None                           # the window's "Updating" screen (see install_update)
+        self.on_update_change = lambda: None               # the tray menu redraws its Update item
         self.scan_queue: list[str] = []
         self.scan_now: str | None = None
         self.scan_lock = threading.Lock()
@@ -261,6 +263,7 @@ class Backend:
         if u and (not self.update or self.update[0] != u[0]):
             self.update = u
             self.say(f'Version {u[0]} is available: press "Update" at the top right.')
+            self._update_changed()
 
     def sync_icons(self, min_age_s: float = 0, tell: bool = False) -> str:
         """Fetch the weapon icons: from the team hub when it has them (pcs_recorder.weaponicons; "hub:<status>"),
@@ -281,30 +284,98 @@ class Backend:
             self.say(text)
         return status
 
-    def install_update(self, show: bool = False) -> str | None:
-        """Download and restart into the new version; returns why not, if it can't now. show: pressed in the open
-        window, so the new version opens its window too (otherwise it starts in the tray)."""
+    # The update, step by step, for the window's full-window "Updating PCS Scanner" screen (it locks the whole UI):
+    # update_state = None, or {"step": "download" | "check" | "restart" | "failed", "tag", "done", "total" (bytes),
+    # "error"}. It lives here, not in the page, so the window opened from the tray or refreshed shows the same screen.
+    UPDATE_FAILED_DOWNLOAD = "The download stopped. Check the internet and try again."
+
+    def _update_changed(self) -> None:
+        try:
+            self.on_update_change()
+        except Exception:
+            pass
+
+    def _set_update_step(self, step: str, done: int = 0, total: int = 0, error: str = "") -> None:
+        st = dict(self.update_state or {})
+        new = st.get("step") != step
+        if step == "failed":                               # the step it stopped at stays marked on the screen
+            st["at"] = st.get("step") if st.get("step") in ("download", "check", "restart") else "download"
+        st.update(step=step, done=int(done or 0), total=int(total or 0), error=error)
+        st.setdefault("tag", self.update[0] if self.update else "")
+        self.update_state = st
+        if new:
+            self._update_changed()
+
+    def updating(self) -> bool:
+        """An update is running (downloading, checking or restarting): the window and the tray menu are locked."""
+        return bool(self.update_state and self.update_state.get("step") != "failed")
+
+    def _begin_update(self) -> str | None:
+        """Checks and the lock, before anything is downloaded. -> why not, or None (the lock is then held)."""
         why = self.update_blocked()
         if why:
             return why
-        # One download at a time: a second press (window button, corner message) while the first download runs used
-        # to start a second download into the same .part file; Windows then refused it ("file in use") and the
+        # One download at a time: a second press (window button, corner message, tray) while the first download runs
+        # used to start a second download into the same .part file; Windows then refused it ("file in use") and the
         # update never finished (coach's PC, 18 Nov 2026). Kept after a good download: the app is closing.
         if not self._update_lock.acquire(blocking=False):
             return "The update is already downloading. PCS Scanner restarts by itself when it's done."
+        if not (self.update and self.update[1]):
+            self._update_lock.release()
+            return "No new version to install."
+        self.update_state = {"step": "download", "tag": self.update[0], "done": 0,
+                             "total": int((self.update[3] if len(self.update) > 3 else 0) or 0), "error": ""}
+        self._update_changed()
+        return None
+
+    def _run_update(self, show: bool) -> str | None:
+        """Download, check, start the finisher (lock held by _begin_update). -> why it failed, or None."""
         done = False
         try:
             u = self.update
-            if u and u[1] and core.install_update(u[1], self.say, u[3] if len(u) > 3 else None, show=show,
-                                                  digest=u[4] if len(u) > 4 else None):
+            if core.install_update(u[1], self.say, u[3] if len(u) > 3 else None, show=show,
+                                   digest=u[4] if len(u) > 4 else None, step=self._set_update_step):
                 done = True
-                threading.Timer(1.0, self.quit).start()
+                st = self.update_state or {}
+                self._set_update_step("restart", st.get("done", 0), st.get("total", 0))
+                threading.Timer(3.0, self.quit).start()    # time to read "Restarting" before the window closes
+            else:                                          # run from source: nothing to install
+                self.update_state = None
+                self._update_changed()
+            return None
         except RuntimeError as e:                          # address refused, bad or incomplete download
-            return str(e)
+            why = str(e)
+        except Exception as e:                             # no internet, GitHub unreachable, disk full...
+            core.ulog(f"download failed: {e!r}")
+            why = self.UPDATE_FAILED_DOWNLOAD
         finally:
             if not done:
                 self._update_lock.release()
+        self._set_update_step("failed", error=why)
+        return why
+
+    def install_update(self, show: bool = False) -> str | None:
+        """Download and restart into the new version; returns why not, if it can't now (or why it failed). show:
+        pressed in the open window, so the new version opens its window too (otherwise it starts in the tray)."""
+        why = self._begin_update()
+        return why or self._run_update(show)
+
+    def start_update(self, show: bool = False) -> str | None:
+        """The window's button: refused at once (Apex, recording, already updating...), else the download runs in the
+        background and the window follows update_state."""
+        why = self._begin_update()
+        if why:
+            return why
+        threading.Thread(target=self._run_update, args=(show,), daemon=True, name="update").start()
         return None
+
+    def update_back(self) -> bool:
+        """The failed screen's Back button: the window is usable again. Never while an update runs."""
+        if self.update_state and self.update_state.get("step") == "failed":
+            self.update_state = None
+            self._update_changed()
+            return True
+        return False
 
     def update_blocked(self) -> str | None:
         """Never restart in the middle of a game, a recording, a scan or an upload."""
@@ -815,6 +886,7 @@ class Backend:
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "iconsFromHub": self.icons_from_hub(),     # then the team link is optional
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
+                "updateState": dict(self.update_state) if self.update_state else None,   # the "Updating" screen
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "hub": self.hub_state(),
                 "hubBackup": self.hubbackup.public() if a and a.s.hub_url else None,   # coach's hub key only
@@ -1586,8 +1658,10 @@ class Server:
                         b.signin()
                         return self._json({"ok": True})
                     if path == "/api/update":
-                        why = b.install_update(show=True)          # the window's button: the window comes back
-                        return self._json({"error": why}, 409) if why else self._json({"ok": True})
+                        why = b.start_update(show=True)            # the window's button: the window comes back
+                        return self._json({"error": why}, 409) if why else self._json({"ok": True, "updateState": b.update_state})
+                    if path == "/api/update/back":
+                        return self._json({"ok": b.update_back()})
                     if path == "/api/update/check":
                         threading.Thread(target=b.check_update, args=(UPDATE_ON_OPEN_S,), daemon=True).start()
                         return self._json({"ok": True})

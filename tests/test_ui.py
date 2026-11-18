@@ -730,12 +730,16 @@ def test_update_relaunch_arguments():
     b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
     got, spawned = [], []
     real_install, real_blocked = core.install_update, b.update_blocked
-    core.install_update = lambda url, log, size=None, show=False, digest=None: (got.append(show), False)[1]
+    core.install_update = lambda url, log, size=None, show=False, digest=None, step=None: (got.append(show), False)[1]
     b.update_blocked = lambda: None
     srv = pcs_server.Server(b)
     srv.start()
     try:
-        assert call(srv, "/api/update", {})[0] == 200 and got == [True]
+        assert call(srv, "/api/update", {})[0] == 200
+        for _ in range(100):                               # the window's button: the download runs in the background
+            if got and not b.updating(): break
+            time.sleep(0.02)
+        assert got == [True] and b.update_state is None    # run from source: nothing installed, screen gone
         assert b.install_update() is None and got == [True, False]
     finally:
         core.install_update = real_install
@@ -746,7 +750,7 @@ def test_update_relaunch_arguments():
     real = (sys.executable, core.spawn_detached, core.download, getattr(sys, "frozen", None), dict(core.BUILD))
     sys.executable, core.spawn_detached, sys.frozen = str(new), spawned.append, True
     core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
-    core.download = lambda url, p: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
+    core.download = lambda url, p, **k: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
     url = "https://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe"
     try:
         assert core.install_update(url, lambda m: None, 12, show=False)
@@ -784,7 +788,7 @@ def test_update_download_checked():
     import hashlib
     sha = hashlib.sha256(body).hexdigest()
 
-    def fake_download(url, p):
+    def fake_download(url, p, **k):
         fetched.append(url)
         Path(p).write_bytes(body)
         return hashlib.sha256(body).hexdigest()
@@ -1051,7 +1055,7 @@ def test_update_pressed_twice_downloads_once():
     started, go = [], threading.Event()
     real_install, real_running, real_quit = core.install_update, rcore.apex_running, b.quit
 
-    def slow_install(url, log, size=None, show=False, digest=None):
+    def slow_install(url, log, size=None, show=False, digest=None, step=None):
         started.append(url)
         go.wait(10)
         raise RuntimeError("The download was incomplete. Try Update again.")
@@ -1076,6 +1080,162 @@ def test_update_pressed_twice_downloads_once():
         assert "already downloading" in (b.install_update() or "")
     finally:
         core.install_update, rcore.apex_running, b.quit = real_install, real_running, real_quit
+
+
+def test_update_screen_steps():
+    """Update pressed in the window: the app keeps the step for the full-window "Updating PCS Scanner" screen (in
+    /api/state, so a window opened from the tray or reloaded shows it): downloading with % and MB, checking the file,
+    restarting. A second press while it runs is refused and downloads nothing; Back is refused while it runs."""
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend(_Auto(str(TMP / "recs-upd3")))
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 200 * 1048576, "sha256:" + "ab" * 32)
+    gates = {k: threading.Event() for k in ("half", "check", "restart")}
+    started, quits, changes = [], [], []
+    real = core.install_update, rcore.apex_running, b.quit
+
+    def fake_install(url, log, size=None, show=False, digest=None, step=None):
+        started.append(show)
+        step("download", 0, size)
+        gates["half"].wait(10)
+        step("download", size // 2, size)
+        gates["check"].wait(10)
+        step("check", size, size)
+        gates["restart"].wait(10)
+        step("restart", size, size)
+        return True
+    core.install_update, rcore.apex_running, b.quit = fake_install, (lambda: False), (lambda: quits.append(1))
+    b.on_update_change = lambda: changes.append((b.update_state or {}).get("step"))
+    srv = pcs_server.Server(b)
+    srv.start()
+
+    def state():
+        return call(srv, "/api/state")[1]["updateState"]
+
+    def wait_for(cond):
+        for _ in range(250):
+            if cond(): return True
+            time.sleep(0.02)
+        return False
+    try:
+        assert state() is None and not b.updating()
+        code, r, _ = call(srv, "/api/update", {})
+        assert code == 200 and r["updateState"]["step"] == "download" and r["updateState"]["tag"] == "v9.9.9"
+        assert wait_for(lambda: started) and started == [True]
+        assert b.updating()
+        st = state()
+        assert st["step"] == "download" and st["total"] == 200 * 1048576 and st["done"] == 0
+        # a second press, from the window or the corner message / tray, starts nothing
+        code, r, _ = call(srv, "/api/update", {})
+        assert code == 409 and "already downloading" in r["error"]
+        assert "already downloading" in (b.install_update() or "")
+        assert call(srv, "/api/update/back", {})[1]["ok"] is False and b.updating()
+        gates["half"].set()
+        assert wait_for(lambda: (state() or {}).get("done") == 100 * 1048576)
+        gates["check"].set()
+        assert wait_for(lambda: (state() or {}).get("step") == "check")
+        gates["restart"].set()
+        assert wait_for(lambda: (state() or {}).get("step") == "restart")
+        assert started == [True]                           # one download in all
+        assert wait_for(lambda: quits)                     # the app closes; the finisher starts the new version
+        assert b.updating() and "already downloading" in (b.install_update() or "")
+        assert changes[:3] == ["download", "check", "restart"], changes   # the tray menu redrew at each step
+    finally:
+        for g in gates.values(): g.set()
+        core.install_update, rcore.apex_running, b.quit = real
+        srv.stop()
+
+
+def test_update_screen_failure_and_back():
+    """A failed update shows the reason on the screen, at the step it stopped, until Back: then the window is usable
+    again and Update works again. No internet = a plain sentence, not Python's error."""
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend(_Auto(str(TMP / "recs-upd4")))
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 1000)
+    real = core.install_update, rcore.apex_running, b.quit
+    tries = []
+
+    def bad_file(url, log, size=None, show=False, digest=None, step=None):
+        tries.append(1)
+        step("download", 400, size)
+        step("check", size, size)
+        raise RuntimeError("The download doesn't match the release. Try Update again later.")
+
+    def no_net(url, log, size=None, show=False, digest=None, step=None):
+        tries.append(1)
+        step("download", 0, size)
+        raise OSError("getaddrinfo failed")
+    core.install_update, rcore.apex_running, b.quit = bad_file, (lambda: False), (lambda: None)
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        assert b.install_update() == "The download doesn't match the release. Try Update again later."
+        st = call(srv, "/api/state")[1]["updateState"]
+        assert st["step"] == "failed" and st["at"] == "check" and "doesn't match" in st["error"]
+        assert not b.updating()                            # the tray item is usable again
+        assert call(srv, "/api/update/back", {})[1]["ok"] is True
+        assert call(srv, "/api/state")[1]["updateState"] is None
+        assert call(srv, "/api/update/back", {})[1]["ok"] is False   # nothing to go back from
+        core.install_update = no_net
+        assert b.install_update() == b.UPDATE_FAILED_DOWNLOAD
+        st = call(srv, "/api/state")[1]["updateState"]
+        assert st["at"] == "download" and "internet" in st["error"] and "getaddrinfo" not in st["error"]
+        # Update from the failed screen's state works again (the lock was given back)
+        core.install_update = lambda *a, **k: False
+        assert b.install_update() is None and b.update_state is None and len(tries) == 2
+        # refused before it starts (Apex running): no screen at all
+        rcore.apex_running = lambda: True
+        assert "Apex" in (b.install_update() or "") and b.update_state is None
+    finally:
+        core.install_update, rcore.apex_running, b.quit = real
+        srv.stop()
+
+
+def test_update_download_progress():
+    """core.download reports bytes so far and the total (the server's length, else the release's size)."""
+    import hashlib, http.server
+    body = b"MZ" + bytes(range(256)) * 9000                  # ~2.2 MB: three chunks
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+    httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    seen = []
+    dest = TMP / "progress.bin"
+    try:
+        sha = core.download(f"http://127.0.0.1:{httpd.server_port}/x.exe", str(dest),
+                            progress=lambda d, t: seen.append((d, t)))
+    finally:
+        httpd.shutdown()
+    assert sha == hashlib.sha256(body).hexdigest() and dest.read_bytes() == body
+    assert seen[0] == (0, len(body)) and seen[-1] == (len(body), len(body)) and len(seen) >= 3
+    assert all(a[0] <= b[0] for a, b in zip(seen, seen[1:]))
+    dest.unlink()
+
+
+def test_update_screen_page():
+    """The window's screen: covers and locks the page (inert, keys stopped), steps in plain words, Back on failure;
+    the tray menu's Update item says "Updating…" and is greyed while it runs."""
+    web = Path(pcs_server.WEB)
+    html = (web / "index.html").read_text(encoding="utf-8")
+    js = (web / "app.js").read_text(encoding="utf-8")
+    css = (web / "app.css").read_text(encoding="utf-8")
+    for words in ("Updating PCS Scanner", "Downloading the update", "Checking the file", "Restarting PCS Scanner",
+                  "The app closes and opens again by itself in a few seconds.", ">Back<"):
+        assert words in html, words
+    assert "function renderUpdating" in js and "el.inert = !!st" in js and "/api/update/back" in js
+    assert "S.updateState" in js and "stopImmediatePropagation" in js
+    assert ".updating{position:fixed;inset:0;z-index:100" in css
+    app = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+    assert "'Updating…' if b.updating()" in app and "update_menu()" in app and "b.on_update_change" in app
+    rt = (Path(__file__).resolve().parent.parent / "app" / "pcs_recorder" / "runtime.py").read_text(encoding="utf-8")
+    assert "enabled=lambda _: can_run()" in rt
 
 
 def test_labels_queue_and_mics_api():

@@ -391,7 +391,18 @@ def main():
             threading.Thread(target=go, daemon=True).start()
         b.auto.ui.actions["update"] = ("Update", update_now)
         autorec.hold_guard(lambda: win.show())
-        b.auto.tray(lambda: win.show(), lambda: b.quit(), open_settings=lambda: win.show('settings'))
+        # the tray menu's Update item: greyed "Updating…" while an update runs (one download at a time)
+        tray_update = (lambda: 'Updating…' if b.updating() else f'Update to {b.update[0]}' if b.update else 'Update',
+                       update_now, lambda: not b.updating(), lambda: bool(b.update) or b.updating())
+        b.auto.tray(lambda: win.show(), lambda: b.quit(), open_settings=lambda: win.show('settings'),
+                    update=tray_update)
+
+        def tray_redraw():
+            try:
+                b.auto.ui.icon.update_menu()
+            except Exception:
+                pass
+        b.on_update_change = tray_redraw
         if updated:                                        # tell the player: the window doesn't open after an update
             v = BUILD.get('version', '')
             try:
@@ -467,7 +478,7 @@ def main():
             try: b.minimaps_tick()                         # map pictures for the minimap position track
             except Exception: logging.exception('minimap pictures')
             # tell the player once per new version with a corner message (not during a game: it waits)
-            if b.update and told != b.update[0] and b.auto and not b.update_blocked():
+            if b.update and told != b.update[0] and b.auto and not b.updating() and not b.update_blocked():
                 told = b.update[0]
                 b.auto.ui.notify(f"Update available: {b.update[0]}", "A new version of PCS Scanner is out. Press Update "
                                  "(about a minute; the app restarts by itself).", sticky=True, action="update")

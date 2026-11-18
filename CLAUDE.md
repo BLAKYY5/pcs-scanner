@@ -115,6 +115,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.13 i
   (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
   without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
   message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).
+  While it runs, `Backend.update_state` (`updateState` in `/api/state`: step download / check / restart / failed,
+  bytes done / total, error) drives a full-window "Updating PCS Scanner" screen that locks the whole UI (also when
+  the window is opened or reloaded mid-update), and the tray's Update item is greyed "Updating…". One download at a
+  time (`_update_lock`); failed = the reason + Back (`/api/update/back`).
 - **Quiet window** (a slower Apex session, 17 Nov 2026): WebView2 does not stop drawing when its window goes to the
   tray. A hidden window with the old pulsing dots drew 358 frames/s on a 360 Hz screen (~70 % of a CPU core plus GPU)
   for whole sessions. Now: no endless CSS animation (a test checks `app.css`), the web view is set invisible and

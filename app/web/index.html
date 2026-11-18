@@ -28,6 +28,21 @@
 </header>
 <main id="main" class="wrap"></main>
 <div id="toast" class="toast" hidden></div>
+<div id="updating" class="updating" role="dialog" aria-modal="true" aria-labelledby="upd-title" hidden>
+  <div class="upd-box">
+    <h2 id="upd-title">Updating PCS Scanner</h2>
+    <p class="upd-tag" id="upd-tag"></p>
+    <ol class="upd-steps">
+      <li data-step="download"><b>Downloading the update</b><span id="upd-dl"></span><i class="upd-bar"><i id="upd-bar"></i></i></li>
+      <li data-step="check"><b>Checking the file</b></li>
+      <li data-step="restart"><b>Restarting PCS Scanner</b><span>The app closes and opens again by itself in a few seconds.</span></li>
+    </ol>
+    <div class="upd-fail" id="upd-fail" hidden>
+      <p><b>Update failed.</b> <span id="upd-why"></span></p>
+      <button class="btn brand" id="upd-back">Back</button>
+    </div>
+  </div>
+</div>
 <script src="app.js"></script>
 <script src="session.js"></script>
 <script src="review-extras.js"></script>

@@ -79,6 +79,8 @@ function renderTop() {
   document.body.classList.toggle('quiet', !!(S && S.apex));          // Apex runs: no animation at all (app.css)
   const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = 'Update to ' + S.update.tag;
+  u.disabled = !!(S && S.updateState);
+  renderUpdating();
   $$('#nav a').forEach(a => a.classList.toggle('on', a.dataset.page === (page === 'review' ? 'recordings' : page)));
   const yn = $('#nav a[data-page="youtube"]'); if (yn) yn.hidden = !(S && S.youtube && S.youtube.available);
   const tn = $('#nav a[data-page="team"]'); if (tn) tn.hidden = !(S && S.hub && S.hub.url);   // only with a hub address
@@ -87,9 +89,47 @@ function renderTop() {
 document.addEventListener('visibilitychange', () => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); });
 setInterval(() => { if (!document.hidden) api('/api/update/check', {}).catch(() => {}); }, 10 * 60 * 1000);   // window open: every 10 min
 $('#updateBtn').onclick = async () => {
+  if (S && S.updateState) return renderUpdating();                    // already updating: the screen shows it
   if (!confirmBox('Download the new version now? The app restarts by itself.')) return;
-  toast('Downloading the update…'); await api('/api/update', {}).catch(e => toast(e.message, true));
+  try {
+    const r = await api('/api/update', {});
+    if (S && r.updateState) { S.updateState = r.updateState; renderUpdating(); }
+    schedulePoll(0);
+  } catch (e) { toast(e.message, true); }
 };
+
+/* "Updating PCS Scanner": a full-window screen that locks the whole UI while an update runs (S.updateState, kept by
+   the app, so a window opened from the tray or reloaded shows it too). Steps: download (% and MB), check, restart.
+   Failed: the reason and Back, which unlocks the window. */
+const UPD_STEPS = ['download', 'check', 'restart'];
+const mb = n => (n / 1048576).toFixed(n >= 104857600 ? 0 : 1);
+function renderUpdating() {
+  const st = S && S.updateState, box = $('#updating');
+  box.hidden = !st;
+  [...document.body.children].forEach(el => { if (el !== box && el.tagName !== 'SCRIPT') el.inert = !!st; });
+  if (!st) return;
+  const failed = st.step === 'failed', at = failed ? (st.at || 'download') : st.step, cur = UPD_STEPS.indexOf(at);
+  $('#upd-tag').textContent = st.tag ? 'Version ' + st.tag : '';
+  $$('.upd-steps li', box).forEach((li, i) => {
+    li.className = i < cur ? 'done' : i === cur ? (failed ? 'bad' : 'now') : '';
+  });
+  const done = st.done || 0, total = st.total || 0, pct = total ? Math.min(100, Math.floor(done * 100 / total)) : null;
+  $('#upd-dl').textContent = at === 'download' && !failed ? (pct != null ? `${pct}% · ${mb(done)} of ${mb(total)} MB` : `${mb(done)} MB`)
+    : cur > 0 && total ? `${mb(total)} MB` : '';
+  $('#upd-bar').style.width = (pct != null ? pct : 0) + '%';
+  $('#upd-fail').hidden = !failed;
+  $('#upd-why').textContent = failed ? (st.error || 'Try Update again.') : '';
+  if (failed && !box.contains(document.activeElement)) $('#upd-back').focus();
+}
+$('#upd-back').onclick = async () => {
+  await api('/api/update/back', {}).catch(() => {});
+  if (S) S.updateState = null;
+  renderUpdating(); schedulePoll(0);
+};
+// while updating, keys reach nothing behind the screen (the review player's shortcuts, Enter on a page button...)
+window.addEventListener('keydown', e => {
+  if (S && S.updateState && !$('#updating').contains(e.target)) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
 function confirmBox(msg) { return window.confirm(msg); }
 
 /* The window stays quiet while it isn't seen and while Apex runs (it shares the graphics card with the game):
@@ -101,7 +141,8 @@ let pollTimer = null, polling = false, lastInput = 0;
   const idle = Date.now() - lastInput > ACTIVE_MS; lastInput = Date.now();
   if (idle && S && S.apex && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
 }, {capture: true, passive: true}));
-function pollDelay() { return S && S.apex && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
+function pollDelay() { if (S && S.updateState && S.updateState.step !== 'failed') return 1000;   // the Updating screen moves
+  return S && S.apex && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
 function schedulePoll(ms) {
   clearTimeout(pollTimer); pollTimer = null;
   if (document.hidden || polling) return;                             // hidden: nothing runs until it's shown
