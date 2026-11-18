@@ -1,6 +1,6 @@
 """PCS Scanner shared logic (no window): paths, settings, Google Drive, updates, scanning.
 Used by the app window, the tray recorder and the headless --scan mode."""
-import os, sys, json, time, subprocess, urllib.request, logging
+import os, sys, json, time, subprocess, urllib.request, urllib.error, logging
 
 if os.name == 'nt':   # no console windows popping up for ffmpeg / ffprobe (also applies in the scanner's worker processes)
     _Popen = subprocess.Popen
@@ -94,13 +94,55 @@ SCOPES = ['https://www.googleapis.com/auth/drive.file']
 TOKEN_F = os.path.join(DATA, 'google_token.json')
 FOLDER = 'PCS Scans'
 
+# ---------------- sign-in tokens (Google Drive, YouTube) ----------------
+# Kept encrypted for this Windows user (DPAPI, like the hub key): a copy of the data folder (sent for help, a
+# backup) doesn't carry a working sign-in. A file in clear from an older version is encrypted the first time it is
+# read. Same file names as before, so "signed in / expired / none" checks are unchanged.
+_TOKEN_ENTROPY = b'PCS Scanner Google sign-in'
+
+def read_token(path):
+    """The saved sign-in (the dict google-auth wrote), or None when there is none or it can't be read here."""
+    import base64
+    try:
+        with open(path, encoding='utf-8') as f: raw = f.read()
+    except FileNotFoundError:
+        return None
+    try:
+        d = json.loads(raw)
+        if isinstance(d, dict) and 'dpapi' in d:
+            from pcs_recorder.hub import _dpapi
+            d = json.loads(_dpapi(base64.b64decode(d['dpapi']), False, _TOKEN_ENTROPY).decode('utf-8'))
+        elif isinstance(d, dict) and os.name == 'nt':
+            try: write_token(path, raw)                        # written in clear by an older version
+            except Exception as e: logging.warning('sign-in not encrypted (%s)', e.__class__.__name__)
+    except Exception as e:
+        logging.warning('sign-in not readable (%s): sign in again', e.__class__.__name__)
+        return None
+    return d if isinstance(d, dict) else None
+
+def write_token(path, text):
+    """Save a sign-in (google-auth's JSON text), encrypted for this Windows user."""
+    import base64
+    if os.name == 'nt':
+        from pcs_recorder.hub import _dpapi
+        text = json.dumps({'dpapi': base64.b64encode(_dpapi(text.encode('utf-8'), True, _TOKEN_ENTROPY)).decode()})
+    tmp = path + '.part'
+    with open(tmp, 'w', encoding='utf-8') as f: f.write(text)
+    os.replace(tmp, path)
+
+def _saved_creds(path, scopes):
+    from google.oauth2.credentials import Credentials
+    info = read_token(path)
+    if not info: return None
+    try: return Credentials.from_authorized_user_info(info, scopes)
+    except Exception: return None
+
 # ---------------- Google Drive ----------------
 def drive_service(interactive=True):
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
-    creds = Credentials.from_authorized_user_file(TOKEN_F, SCOPES) if os.path.exists(TOKEN_F) else None
+    creds = _saved_creds(TOKEN_F, SCOPES)
     if creds and creds.expired and creds.refresh_token:
         try: creds.refresh(Request())
         except Exception: creds = None
@@ -110,7 +152,7 @@ def drive_service(interactive=True):
         if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask Blakey for a new build.')
         creds = InstalledAppFlow.from_client_secrets_file(client, SCOPES).run_local_server(port=0, open_browser=True,
             success_message='PCS Scanner is signed in. You can close this tab.')
-        open(TOKEN_F, 'w').write(creds.to_json())
+        write_token(TOKEN_F, creds.to_json())
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
 YT_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
@@ -118,11 +160,10 @@ YT_TOKEN_F = os.path.join(DATA, 'youtube_token.json')
 
 def youtube_service(interactive=True):
     """YouTube upload, signed in separately from Drive (the player picks the team channel at sign-in)."""
-    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
-    creds = Credentials.from_authorized_user_file(YT_TOKEN_F, YT_SCOPES) if os.path.exists(YT_TOKEN_F) else None
+    creds = _saved_creds(YT_TOKEN_F, YT_SCOPES)
     if creds and creds.expired and creds.refresh_token:
         try: creds.refresh(Request())
         except Exception: creds = None
@@ -132,7 +173,7 @@ def youtube_service(interactive=True):
         if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask Blakey for a new build.')
         creds = InstalledAppFlow.from_client_secrets_file(client, YT_SCOPES).run_local_server(port=0, open_browser=True,
             success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
-        open(YT_TOKEN_F, 'w').write(creds.to_json())
+        write_token(YT_TOKEN_F, creds.to_json())
     return build('youtube', 'v3', credentials=creds, cache_discovery=False)
 
 def scans_folder(svc):
@@ -247,12 +288,47 @@ def check_update():
         tag = rel.get('tag_name', '')
         if older_or_same(tag): return None
         asset = next((a for a in rel.get('assets', []) if a['name'].lower().endswith('.exe')), None)
-        if not asset: return None
-        return tag, asset['browser_download_url'], rel.get('html_url'), asset.get('size')
+        if not asset or not update_url_ok(asset.get('browser_download_url')): return None
+        return tag, asset['browser_download_url'], rel.get('html_url'), asset.get('size'), asset.get('digest')
     except Exception:
         return None
 
 UPDATE_LOG = os.path.join(DATA, 'update.log')
+# The new exe comes only from this app's GitHub releases, over HTTPS (redirects included), and must match the SHA-256
+# GitHub lists for the release file (`digest`), so a changed or damaged download is never started.
+UPDATE_HOSTS = ('github.com',)                                   # where the release link may point
+UPDATE_REDIRECT_HOSTS = ('github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com')
+
+def update_url_ok(url, hosts=UPDATE_HOSTS):
+    """An https address of this app's own releases (the repo the build was made from)."""
+    import urllib.parse
+    try: u = urllib.parse.urlsplit(str(url or ''))
+    except ValueError: return False
+    if u.scheme != 'https' or (u.hostname or '').lower() not in hosts or u.username or u.password: return False
+    if hosts is UPDATE_HOSTS:
+        repo = str(BUILD.get('repo') or '').strip('/').lower()
+        if not repo or not u.path.lower().startswith(f'/{repo}/releases/download/'): return False
+    return True
+
+class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not update_url_ok(newurl, UPDATE_REDIRECT_HOSTS):
+            raise urllib.error.URLError('update download redirected to an unexpected address')
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+def download(url, dest):
+    """Download to dest over HTTPS only. -> SHA-256 (hex) of what was written."""
+    import hashlib
+    opener = urllib.request.build_opener(_HttpsOnlyRedirect)
+    h = hashlib.sha256()
+    req = urllib.request.Request(url, headers={'User-Agent': APP})
+    with opener.open(req, timeout=60) as r, open(dest, 'wb') as out:
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk: break
+            h.update(chunk)
+            out.write(chunk)
+    return h.hexdigest()
 
 def ulog(msg):
     try:
@@ -263,23 +339,38 @@ def staged_path(cur=None):
     cur = cur or sys.executable
     return os.path.join(os.path.dirname(cur), 'PCS-Scanner.update.exe')
 
-def install_update(url, log, size=None, show=False):
+def install_update(url, log, size=None, show=False, digest=None):
     """Download the new exe next to the current one and start it with --finish-update: once this app has
     closed, the new exe copies itself over the old one and starts it (log in update.log). show = the player pressed
-    Update in the open window: the new version opens its window; otherwise it starts in the tray."""
+    Update in the open window: the new version opens its window; otherwise it starts in the tray. digest = GitHub's
+    "sha256:<hex>" of the release file: the download must match it."""
     if not getattr(sys, 'frozen', False): return False
+    if not update_url_ok(url):
+        ulog(f'refused: not a release address of this app: {url}')
+        raise RuntimeError("The update address isn't this app's GitHub release. Download it from the release page.")
+    want = str(digest or '').lower()
+    want = want[7:] if want.startswith('sha256:') else ''
     cur = sys.executable
     new = staged_path(cur)
     log('Downloading the update…')
     ulog(f'download {url} -> {new}')
     tmp = new + '.part'
-    urllib.request.urlretrieve(url, tmp)
+    try:
+        sha = download(url, tmp)
+    except Exception:
+        if os.path.exists(tmp): os.remove(tmp)
+        raise
     got = os.path.getsize(tmp)
     with open(tmp, 'rb') as f: head = f.read(2)
     if head != b'MZ' or (size and got != size):
         os.remove(tmp)
         ulog(f'bad download: {got} bytes (expected {size}), header {head!r}')
         raise RuntimeError('The download was incomplete. Try Update again.')
+    if want and sha != want:
+        os.remove(tmp)
+        ulog(f'bad download: SHA-256 {sha}, the release says {want}')
+        raise RuntimeError("The download doesn't match the release. Try Update again later.")
+    ulog(f'SHA-256 {sha}' + (' matches the release' if want else ' (the release lists none: size checked only)'))
     os.replace(tmp, new)
     ulog(f'downloaded {got} bytes; starting the finisher')
     spawn_detached([new, '--finish-update', cur, str(os.getpid())] + (['--show'] if show else []))
@@ -334,6 +425,52 @@ def cleanup_staged():
     if getattr(sys, 'frozen', False) and os.path.abspath(sys.executable) != os.path.abspath(p) and os.path.exists(p):
         try: os.remove(p)
         except OSError: pass
+
+BUNDLE_MARKERS = ('pcs_maps.json', 'pcs_fonts.json', 'build.json', os.path.join('web', 'index.html'))
+
+def clean_old_unpacked(tmp=None, current=None, min_age_s=600, now=None):
+    """The exe unpacks itself (~600 MB) to a temporary folder (_MEI + digits) at every start and removes it when it
+    ends; a crash, a forced stop or Windows shutting down leaves it on C:. At start, the app removes such leftovers,
+    and only its own: a folder named like that, holding this app's files (BUNDLE_MARKERS and Python's DLL), not the one
+    this process runs from, unpacked more than min_age_s ago (not one being unpacked right now), and not in use: a
+    running copy of the app keeps Python's DLL loaded, which Windows refuses to delete, so that DLL goes first and a
+    refusal leaves the folder untouched. Returns [(folder, bytes)] removed."""
+    import re, shutil, tempfile
+    tmp = tmp or tempfile.gettempdir()
+    current = os.path.normcase(os.path.abspath(current if current is not None else getattr(sys, '_MEIPASS', '') or '?'))
+    now = now if now is not None else time.time()
+    out = []
+    try: names = os.listdir(tmp)
+    except OSError: return out
+    for name in names:
+        p = os.path.join(tmp, name)
+        ours = re.fullmatch(r'_MEI\d+\.pcs-old', name)       # renamed by an earlier start, removal unfinished
+        if not (ours or re.fullmatch(r'_MEI\d+', name)) or not os.path.isdir(p) or os.path.islink(p): continue
+        if os.path.normcase(os.path.abspath(p)) == current: continue
+        if not ours:
+            try:
+                st = os.stat(p)
+                if now - getattr(st, 'st_birthtime', st.st_ctime) < min_age_s: continue
+                if not all(os.path.isfile(os.path.join(p, m)) for m in BUNDLE_MARKERS): continue    # not this app's
+                dlls = [f for f in os.listdir(p) if re.fullmatch(r'python3\d*\.dll', f, re.I)]
+                if not dlls: continue
+                json.load(open(os.path.join(p, 'build.json'), encoding='utf-8-sig'))['version']
+            except Exception: continue
+            try:
+                for f in dlls: os.remove(os.path.join(p, f))       # in use by a running copy: refused, folder kept
+            except OSError: continue
+            try: os.rename(p, p + '.pcs-old'); p += '.pcs-old'
+            except OSError: pass
+        size = 0
+        for root, _, files in os.walk(p):
+            for f in files:
+                try: size += os.path.getsize(os.path.join(root, f))
+                except OSError: pass
+        shutil.rmtree(p, ignore_errors=True)
+        if not os.path.exists(p): out.append((p, size))
+    if out:
+        logging.info('removed %d leftover unpacked copies of the app (%.0f MB)', len(out), sum(s for _, s in out) / 2 ** 20)
+    return out
 
 # ---------------- scanning ----------------
 def run_scan(files, log, out=OUT):

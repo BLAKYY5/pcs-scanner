@@ -315,7 +315,7 @@ def test_scan_queue_waits_for_apex():
     started = []
 
     class P:
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
     real_running, real_proc = rcore.apex_running, runtime.scan_process
     rcore.apex_running = lambda: apex[0]
@@ -338,6 +338,40 @@ def test_scan_queue_waits_for_apex():
         assert any("done, sent to Google Drive" in m["text"] for m in b.messages), list(b.messages)
     finally:
         rcore.apex_running, runtime.scan_process, core.drive_upload_quiet = real_running, real_proc, core_upload
+
+
+def test_scan_by_hand_stops_when_apex_starts():
+    """A scan asked for by hand that is running when Apex starts is stopped (not left running or paused in memory
+    during the game) and goes on when Apex closes."""
+    import subprocess
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend()
+    apex = [False]
+    stopped = []
+
+    class P:
+        def __init__(self):
+            self.n = 0
+
+        def wait(self, timeout=None):
+            self.n += 1
+            if self.n >= 2:
+                apex[0] = True                       # Apex starts while it runs
+            raise subprocess.TimeoutExpired("scan", timeout)
+    real_running, real_stop = rcore.apex_running, rcore.stop_tree
+    rcore.apex_running = lambda: apex[0]
+    rcore.stop_tree = lambda p, **k: stopped.append(p)
+    try:
+        p = P()
+        assert b._run_scan(p, every_s=0.01) is None and stopped == [p]
+        apex[0] = False
+
+        class Done:
+            def wait(self, timeout=None):
+                return 0
+        assert b._run_scan(Done()) == 0 and stopped == [p]
+    finally:
+        rcore.apex_running, rcore.stop_tree = real_running, real_stop
 
 
 def test_audio_tracks():
@@ -555,7 +589,7 @@ def test_update_relaunch_arguments():
     b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
     got, spawned = [], []
     real_install, real_blocked = core.install_update, b.update_blocked
-    core.install_update = lambda url, log, size=None, show=False: (got.append(show), False)[1]
+    core.install_update = lambda url, log, size=None, show=False, digest=None: (got.append(show), False)[1]
     b.update_blocked = lambda: None
     srv = pcs_server.Server(b)
     srv.start()
@@ -568,14 +602,18 @@ def test_update_relaunch_arguments():
     # what install_update starts: the downloaded exe with --finish-update, and --show only when asked
     new = TMP / "dl" / "PCS-Scanner.exe"
     new.parent.mkdir(exist_ok=True)
-    real = (sys.executable, core.spawn_detached, core.urllib.request.urlretrieve, getattr(sys, "frozen", None))
+    real = (sys.executable, core.spawn_detached, core.download, getattr(sys, "frozen", None), dict(core.BUILD))
     sys.executable, core.spawn_detached, sys.frozen = str(new), spawned.append, True
-    core.urllib.request.urlretrieve = lambda url, p: Path(p).write_bytes(b"MZ" + b"x" * 10)
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    core.download = lambda url, p: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
+    url = "https://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe"
     try:
-        assert core.install_update("https://x", lambda m: None, 12, show=False)
-        assert core.install_update("https://x", lambda m: None, 12, show=True)
+        assert core.install_update(url, lambda m: None, 12, show=False)
+        assert core.install_update(url, lambda m: None, 12, show=True, digest="sha256:" + "ab" * 32)
     finally:
-        sys.executable, core.spawn_detached, core.urllib.request.urlretrieve = real[:3]
+        sys.executable, core.spawn_detached, core.download = real[:3]
+        core.BUILD.clear()
+        core.BUILD.update(real[4])
         if real[3] is None:
             del sys.frozen
         else:
@@ -587,6 +625,186 @@ def test_update_relaunch_arguments():
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
     assert "if background and not updated and not" in src and "'--updated' in sys.argv" in src
     assert "show='--show' in sys.argv" in src
+
+
+def test_update_download_checked():
+    """The new exe comes only from this app's GitHub releases over HTTPS, and must match the SHA-256 GitHub lists for
+    it: anything else is refused and never started (nothing left next to the app)."""
+    folder = TMP / "dl-check"
+    folder.mkdir(exist_ok=True)
+    cur = folder / "PCS-Scanner.exe"
+    staged = Path(core.staged_path(str(cur)))
+    real = (sys.executable, core.spawn_detached, core.download, getattr(sys, "frozen", None), dict(core.BUILD))
+    spawned, fetched = [], []
+    sys.executable, core.spawn_detached, sys.frozen = str(cur), spawned.append, True
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    good = "https://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe"
+    body = b"MZ" + b"new version" * 10
+    import hashlib
+    sha = hashlib.sha256(body).hexdigest()
+
+    def fake_download(url, p):
+        fetched.append(url)
+        Path(p).write_bytes(body)
+        return hashlib.sha256(body).hexdigest()
+    core.download = fake_download
+    try:
+        # addresses: only https, only github.com, only this repo's release files
+        assert core.update_url_ok(good)
+        for bad in ("http://github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://github.com.evil.example/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://evil.example/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://github.com/someone/else/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "https://user:pw@github.com/BLAKYY5/pcs-scanner/releases/download/v9.9.9/PCS-Scanner.exe",
+                    "", None):
+            assert not core.update_url_ok(bad), bad
+        # redirects of the download: GitHub's file hosts over https only
+        assert core.update_url_ok("https://release-assets.githubusercontent.com/x?y=1", core.UPDATE_REDIRECT_HOSTS)
+        assert not core.update_url_ok("http://release-assets.githubusercontent.com/x", core.UPDATE_REDIRECT_HOSTS)
+        h = core._HttpsOnlyRedirect()
+        try:
+            h.redirect_request(urllib.request.Request(good), None, 302, "Found", {}, "http://evil.example/x.exe")
+            raise AssertionError("redirect to http accepted")
+        except urllib.error.URLError:
+            pass
+        # a foreign address is refused before anything is downloaded
+        try:
+            core.install_update("https://evil.example/PCS-Scanner.exe", lambda m: None, len(body), digest="sha256:" + sha)
+            raise AssertionError("foreign address accepted")
+        except RuntimeError:
+            pass
+        assert not fetched and not spawned
+        # wrong SHA-256: refused, the download removed, nothing started
+        try:
+            core.install_update(good, lambda m: None, len(body), digest="sha256:" + "0" * 64)
+            raise AssertionError("wrong digest accepted")
+        except RuntimeError as e:
+            assert "doesn't match" in str(e)
+        assert not spawned and not staged.exists() and not Path(str(staged) + ".part").exists()
+        assert "bad download: SHA-256" in Path(core.UPDATE_LOG).read_text()
+        # right SHA-256: started
+        assert core.install_update(good, lambda m: None, len(body), digest="SHA256:" + sha.upper())
+        assert spawned and spawned[-1][0] == str(staged) and staged.read_bytes() == body
+        assert "matches the release" in Path(core.UPDATE_LOG).read_text()
+    finally:
+        sys.executable, core.spawn_detached, core.download = real[:3]
+        core.BUILD.clear()
+        core.BUILD.update(real[4])
+        if real[3] is None:
+            del sys.frozen
+        else:
+            sys.frozen = real[3]
+    # the update check passes GitHub's digest on, and ignores a release file that isn't on this repo's releases
+    rel = {"tag_name": "v99.0.0", "html_url": "https://github.com/BLAKYY5/pcs-scanner/releases/tag/v99.0.0",
+           "assets": [{"name": "PCS-Scanner.exe", "browser_download_url": good, "size": 5, "digest": "sha256:" + sha}]}
+    real_open, real_build = core.urllib.request.urlopen, dict(core.BUILD)
+
+    class _R:
+        def __init__(self, d):
+            self.d = json.dumps(d).encode()
+
+        def read(self, *a):
+            return self.d
+    core.urllib.request.urlopen = lambda req, timeout=0: _R(rel)
+    core.BUILD.update({"repo": "BLAKYY5/pcs-scanner", "version": "1.0.0"})
+    try:
+        assert core.check_update() == ("v99.0.0", good, rel["html_url"], 5, "sha256:" + sha)
+        rel["assets"][0]["browser_download_url"] = "http://evil.example/PCS-Scanner.exe"
+        assert core.check_update() is None
+    finally:
+        core.urllib.request.urlopen = real_open
+        core.BUILD.clear()
+        core.BUILD.update(real_build)
+
+
+def test_sign_in_tokens_encrypted():
+    """Google Drive and YouTube sign-ins are kept encrypted for this Windows user; a file in clear from an older
+    version is encrypted the first time it is read, and an unreadable file means "sign in again"."""
+    f = TMP / "appdata" / "test_token.json"
+    info = {"token": "at-123", "refresh_token": "rt-secret-456", "client_id": "cid", "client_secret": "cs",
+            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.SCOPES}
+    core.write_token(str(f), json.dumps(info))
+    assert core.read_token(str(f)) == info
+    if os.name == "nt":
+        assert b"rt-secret-456" not in f.read_bytes() and "dpapi" in json.loads(f.read_text())
+    # an older version's file in clear: read, then encrypted in place
+    f.write_text(json.dumps(info))
+    assert core.read_token(str(f)) == info
+    if os.name == "nt":
+        assert b"rt-secret-456" not in f.read_bytes()
+    assert core.read_token(str(f)) == info
+    # google-auth reads it back
+    creds = core._saved_creds(str(f), core.SCOPES)
+    assert creds is not None and creds.refresh_token == "rt-secret-456"
+    # unreadable (another user's encryption, damaged): no sign-in, no crash
+    f.write_text(json.dumps({"dpapi": "AAAA"}))
+    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.SCOPES) is None
+    f.write_text("not json")
+    assert core.read_token(str(f)) is None
+    assert core.read_token(str(TMP / "appdata" / "missing_token.json")) is None
+    # the sign-in code writes through write_token, never in clear
+    src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
+    assert "write_token(TOKEN_F, creds.to_json())" in src and "write_token(YT_TOKEN_F, creds.to_json())" in src
+    assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
+
+
+def test_request_body_limit():
+    """The page sends small JSON only: a huge request body is refused before it is read."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        import http.client
+        c = http.client.HTTPConnection("127.0.0.1", srv.port, timeout=10)
+        c.putrequest("POST", "/api/label")
+        c.putheader("X-PCS-Token", srv.token)
+        c.putheader("Content-Type", "application/json")
+        c.putheader("Content-Length", str(pcs_server.MAX_BODY + 1))
+        c.endheaders()
+        r = c.getresponse()
+        assert r.status == 413, r.status
+        c.close()
+    finally:
+        srv.stop()
+
+
+def test_show_guard_not_blocked_by_a_silent_client():
+    """A program that connects to the single-instance port and sends nothing can't stop "show window" requests."""
+    import socket
+    import threading
+    from pcs_recorder import runtime
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    real, runtime.GUARD_PORT = runtime.GUARD_PORT, port
+    shown = threading.Event()
+    try:
+        s = runtime.hold_guard(shown.set)
+        assert s is not None
+        silent = socket.create_connection(("127.0.0.1", port), timeout=2)
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+                c.sendall(b"show")
+            assert shown.wait(6), "show request blocked"
+        finally:
+            silent.close()
+            s.close()
+    finally:
+        runtime.GUARD_PORT = real
+
+
+def test_hub_notes_cleaned_for_the_page():
+    """Times and colours from the hub go straight into the page's markup: whatever a hub sends, the page gets
+    numbers and plain colours there (text is escaped by the page)."""
+    from pcs_recorder import notes
+    n = notes.clean_note({"id": "an-1", "t": '1"><img src=x onerror=alert(1)>', "dur": "7",
+                          "drawings": [{"kind": "pen", "color": "red;background:url(x)", "pts": [[0.1, "0.2"], ["x", 1]]},
+                                       {"kind": "line", "color": "#ffd60a", "pts": [[0, 0], [1, 1]]}, "junk"],
+                          "text": "<b>kept as text</b>"})
+    assert n["t"] == 0.0 and n["dur"] == 7.0 and n["text"] == "<b>kept as text</b>"
+    assert [d["color"] for d in n["drawings"]] == ["#ffd60a", "#ffd60a"]
+    assert n["drawings"][0]["pts"] == [[0.1, 0.2], [0.0, 1.0]]
+    assert notes.num(float("nan")) == 0.0 and notes.num("12.5") == 12.5 and notes.num(None, 3.0) == 3.0
 
 
 def test_no_password_in_app_log():
@@ -2624,6 +2842,352 @@ def test_review_talk_recording():
         fake.stop()
         _fresh_hub()
         talkmod.save_pending([])
+
+
+# ------------------------------------------------------------------ hub backup copy (coach's hub key only)
+PLAYER_KEY = "pcs_" + "P" * 43
+
+
+def _zip_bytes(tag: str, pad: int = 0) -> bytes:
+    import io
+    import zipfile
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_STORED) as zf:
+        zf.writestr("data/hub.db", tag.encode() + os.urandom(pad))
+        zf.writestr("backup-info.json", json.dumps({"hub_version": "0.5.4"}))
+    return buf.getvalue()
+
+
+class BackupHub:
+    """A hub 0.5.4: /api/me (GOOD_KEY = coach, PLAYER_KEY = player) and the coach-only /api/backup/latest (GET, HEAD,
+    ?date=). `zips` = {yyyymmdd: bytes}; `fail` = status to answer on the backup route; `lie` = bytes added to the
+    size header. Every request is kept (method, path)."""
+
+    def __init__(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.zips, self.fail, self.lie, self.calls = {}, 0, 0, []
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                if self.command != "HEAD":
+                    self.wfile.write(data)
+
+            def _go(self):
+                hub.calls.append((self.command, self.path))
+                auth = self.headers.get("Authorization", "")
+                role = {"Bearer " + GOOD_KEY: "coach", "Bearer " + PLAYER_KEY: "player"}.get(auth)
+                if not role:
+                    return self._json(401, {"error": "bad_key"})
+                if self.path == "/api/me":
+                    return self._json(200, {"name": "Blakey" if role == "coach" else "Moe", "role": role})
+                if self.path.startswith("/api/backup/latest"):
+                    if role != "coach":
+                        return self._json(403, {"error": "coach_only"})
+                    if hub.fail:
+                        return self._json(hub.fail, {"error": "x"})
+                    q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    days = sorted(hub.zips, reverse=True)
+                    if q.get("date"):
+                        days = [d for d in days if d == q["date"][0]]
+                    if not days:
+                        return self._json(404, {"error": "none"})
+                    data = hub.zips[days[0]]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("X-Backup-Date", days[0])
+                    self.send_header("X-Backup-Bytes", str(len(data) + hub.lie))
+                    self.end_headers()
+                    if self.command == "GET":
+                        self.wfile.write(data)
+                    return
+                return self._json(404, {"error": "not found"})
+
+            do_GET = do_HEAD = do_POST = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def backup_calls(self):
+        return [c for c in self.calls if c[1].startswith("/api/backup")]
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _backup_setup(key=GOOD_KEY):
+    """App server + fake hub + a scratch target folder (standing in for E:). The test PC's own drives are never
+    used: the Windows drive is pretended to be Q:, the E: drive check answers what the test says."""
+    from pcs_recorder import hubbackup, settings as st
+    hub = _fresh_hub()
+    hub.set_key(key)
+    hubbackup.STATE_FILE.unlink(missing_ok=True)
+    if not hasattr(_backup_setup, "real_save"):
+        _backup_setup.real_save = st.save
+    st.save = lambda s: None                # the stand-in isn't a real Settings object (restored by _backup_done)
+    fake = BackupHub()
+    auto = _Auto(str(TMP / "bkrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    hb = b.hubbackup
+    hb.drive_exists = lambda p: False
+    hb.busy = lambda: None
+    clock = {"t": time.mktime((2026, 11, 18, 5, 0, 0, 0, 0, -1))}       # 05:00, after the hub's nightly zip
+    hb.now = lambda: clock["t"]
+    target = TMP / "E-drive" / "PCS Hub backups"
+    shutil.rmtree(target.parent, ignore_errors=True)
+    srv = pcs_server.Server(b)
+    srv.start()
+    return hubbackup, hub, fake, b, hb, srv, clock, target
+
+
+def _backup_done(srv, fake):
+    from pcs_recorder import settings as st
+    st.save = _backup_setup.real_save
+    srv.stop()
+    fake.stop()
+    _fresh_hub()
+
+
+def _backup_wait(hb, s=10):
+    end = time.time() + s
+    while hb.running and time.time() < end:
+        time.sleep(0.02)
+    assert not hb.running
+
+
+def test_hub_backup_folder_rules():
+    """Default E:\\PCS Hub backups only when there is an E: drive (never C:); C: refused; bad paths refused."""
+    from pcs_recorder import hubbackup
+    real = hubbackup.system_drive
+    try:
+        hubbackup.system_drive = lambda: "C:"
+        assert hubbackup.default_folder(lambda p: p == "E:\\") == "E:\\PCS Hub backups"
+        assert hubbackup.default_folder(lambda p: False) == ""
+        for bad in ("C:\\PCS Hub backups", "c:/x", "relative\\folder", "\\\\server\\share\\x", "E:"):
+            try:
+                hubbackup.check_folder(bad)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(bad)
+        assert hubbackup.check_folder("  ") == "" and hubbackup.check_folder("E:\\PCS Hub backups") == "E:\\PCS Hub backups"
+        hubbackup.system_drive = lambda: "E:"                  # Windows on E: -> no default there either
+        assert hubbackup.default_folder(lambda p: True) == ""
+        for k in (0, 366, "x"):
+            try:
+                hubbackup.validate(None, k)
+            except ValueError:
+                pass
+            else:
+                raise AssertionError(k)
+    finally:
+        hubbackup.system_drive = real
+
+
+def test_hub_backup_download_skip_and_keep():
+    """Coach: Settings block, folder + keep saved, the daily copy downloads the newest zip (.partial, then renamed),
+    the same date again is skipped, only pcs-hub-<8 digits>.zip files beyond `keep` are removed, Copy now works."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd = hubbackup.system_drive
+    hubbackup.system_drive = lambda: "Q:"                      # the scratch folder may be on this PC's C:
+    try:
+        fake.zips = {"20261117": _zip_bytes("old"), "20261118": _zip_bytes("new", 3 << 20)}   # 3 MB: several chunks
+        assert call(srv, "/api/state")[1]["hubBackup"] is None       # role not known yet: no block
+        assert hb.role() == "coach" and fake.calls == [("GET", "/api/me")]
+        st = call(srv, "/api/state")[1]["hubBackup"]
+        assert st["folder"] == "" and st["keep"] == 14 and st["last"] == {}, st   # no E: here: off
+        assert not hb.tick() and not fake.backup_calls()                         # off: nothing asked
+        # settings: folder and keep, through the normal Save
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": str(target), "hub_backup_keep": 3})
+        assert code == 200 and r["hubBackup"]["folder"] == str(target) and r["hubBackup"]["keep"] == 3, r
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": "Q:\\backups", "player": "changed?"})
+        assert code == 500 and "another drive" in r["error"] and core.SETTINGS.get("player") != "changed?"
+        assert hb.folder == str(target)
+        # files that aren't the copy's own, and older copies
+        target.mkdir(parents=True)
+        others = ["holiday.jpg", "pcs-hub-notes.zip", "pcs-hub-2026111.zip", "PCS-HUB-20261101.zip.bak",
+                  "pcs-hub-20261101.zip.txt", "my pcs-hub-20261101.zip"]
+        for o in others:
+            (target / o).write_text("mine")
+        (target / "sub").mkdir()
+        (target / "sub" / "pcs-hub-20261101.zip").write_text("mine")
+        for d in ("20261110", "20261111", "20261112", "20261113"):
+            (target / f"pcs-hub-{d}.zip").write_text("old copy")
+        (target / "pcs-hub-20261112.zip.partial").write_text("left over")
+        # 03:00: not yet
+        clock["t"] -= 2 * 3600
+        assert not hb.due() and not hb.tick()
+        clock["t"] += 2 * 3600
+        assert hb.tick()
+        _backup_wait(hb)
+        z = target / "pcs-hub-20261118.zip"
+        assert z.read_bytes() == fake.zips["20261118"] and not list(target.glob("*.partial"))
+        assert fake.backup_calls() == [("HEAD", "/api/backup/latest"), ("GET", "/api/backup/latest?date=20261118")]
+        own = sorted(p.name for p in target.iterdir() if hubbackup.NAME_RE.fullmatch(p.name))
+        assert own == ["pcs-hub-20261112.zip", "pcs-hub-20261113.zip", "pcs-hub-20261118.zip"], own
+        for o in others:
+            assert (target / o).read_text() == "mine"
+        assert (target / "sub" / "pcs-hub-20261101.zip").exists()
+        last = call(srv, "/api/state")[1]["hubBackup"]["last"]
+        assert last["ok"] and last["result"] == "Copied" and last["date"] == "20261118" and last["bytes"] == z.stat().st_size
+        assert not any("Hub backup" in m["text"] for m in b.messages)          # no message when it works
+        # same day: not again; next day, same zip on the hub: HEAD only, skipped
+        assert not hb.due() and not hb.tick()
+        clock["t"] += 86400
+        n = len(fake.backup_calls())
+        assert hb.tick()
+        _backup_wait(hb)
+        assert fake.backup_calls()[n:] == [("HEAD", "/api/backup/latest")]
+        assert call(srv, "/api/state")[1]["hubBackup"]["last"]["result"] == "Already copied"
+        # Copy now (the button): a new zip on the hub
+        fake.zips["20261119"] = _zip_bytes("newer")
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 200 and r["started"], r
+        _backup_wait(hb)
+        assert (target / "pcs-hub-20261119.zip").read_bytes() == fake.zips["20261119"]
+        assert not (target / "pcs-hub-20261112.zip").exists() and (target / "holiday.jpg").exists()
+        # an incomplete download: nothing kept, the previous copies stay
+        fake.zips["20261120"], fake.lie = _zip_bytes("bad"), 5
+        res = hb.copy_once()
+        assert not res["ok"] and "incomplete" in res["error"] and not (target / "pcs-hub-20261120.zip").exists()
+        assert not list(target.glob("*.partial")) and (target / "pcs-hub-20261119.zip").exists()
+        # the key is never in the state file
+        assert GOOD_KEY not in hubbackup.STATE_FILE.read_text()
+    finally:
+        hubbackup.system_drive = real_sd
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_never_during_apex():
+    """Apex running (or a recording, a scan): no request at all, Copy now refused; Apex starting during a download
+    stops it (partial removed, not counted as a failure) and it is tried again later."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd, real_every = hubbackup.system_drive, hubbackup.BUSY_EVERY_S
+    hubbackup.system_drive = lambda: "Q:"
+    try:
+        fake.zips = {"20261118": _zip_bytes("big", 4 << 20)}
+        hb.role()
+        hb.set(str(target), 14)
+        fake.calls.clear()
+        hb.busy = lambda: "Apex is running"
+        assert not hb.tick() and fake.calls == []
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 500 and r["error"] == "Close Apex first." and fake.calls == []
+        # the real check: Apex, the recorder, a scan
+        b2 = pcs_server.Backend(_Auto(str(TMP / "bkrecs2")))
+        b2._apex_running = lambda: True
+        assert b2._backup_busy() == "Apex is running"
+        b2._apex_running = lambda: False
+        assert b2._backup_busy() is None
+        b2.auto.rec.current = object()
+        assert b2._backup_busy() == "the auto-recorder is busy"
+        b2.auto.rec.current, b2.scan_now = None, "x.mp4"
+        assert b2._backup_busy() == "a scan is running"
+        # Apex starts after the download began
+        looks = []
+        hb.busy = lambda: (looks.append(1), None if len(looks) <= 2 else "Apex is running")[1]
+        hubbackup.BUSY_EVERY_S = 0
+        assert hb.tick()
+        _backup_wait(hb)
+        assert ("GET", "/api/backup/latest?date=20261118") in fake.calls
+        assert not list(target.glob("pcs-hub-*")), list(target.iterdir())
+        assert hb.st.get("fail_days", []) == [] and hb.st.get("last") is None and hb.next_try > clock["t"]
+        # later, Apex closed: done
+        hb.busy = lambda: None
+        clock["t"] = hb.next_try + 1
+        assert hb.tick()
+        _backup_wait(hb)
+        assert (target / "pcs-hub-20261118.zip").read_bytes() == fake.zips["20261118"]
+    finally:
+        hubbackup.system_drive, hubbackup.BUSY_EVERY_S = real_sd, real_every
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_not_for_players():
+    """A player's key: no Settings block, settings ignored, Copy now refused, the backup route never asked."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup(PLAYER_KEY)
+    try:
+        fake.zips = {"20261118": _zip_bytes("x")}
+        hb.drive_exists = lambda p: True                       # even with an E: drive
+        assert not hb.tick()
+        assert hb.role() == "player" and fake.backup_calls() == []
+        assert call(srv, "/api/state")[1]["hubBackup"] is None
+        code, r, _ = call(srv, "/api/settings", {"hub_backup_dir": str(target), "hub_backup_keep": 3})
+        assert code == 200 and r["hubBackup"] is None and not hubbackup.STATE_FILE.exists()
+        code, r, _ = call(srv, "/api/hubbackup/copy", {})
+        assert code == 403 and "coach" in r["error"] and fake.backup_calls() == []
+        assert not target.exists()
+        # the page's code: the block only when the state has it
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "S.hubBackup ? hubBackupHTML(S.hubBackup) : ''" in js and "Copy now" in js and "Hub backup copy" in js
+        # no hub address: nothing
+        b.auto.s.hub_url = ""
+        assert call(srv, "/api/state")[1]["hubBackup"] is None
+    finally:
+        _backup_done(srv, fake)
+
+
+def test_hub_backup_failure_message_rule():
+    """One short line in Activity only when copies failed 3 days in a row; once; a working copy resets it."""
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup()
+    real_sd = hubbackup.system_drive
+    hubbackup.system_drive = lambda: "Q:"
+    try:
+        hb.role()
+        hb.set(str(target), 14)
+        fake.fail = 500
+        said = lambda: [m["text"] for m in b.messages if "Hub backup" in m["text"]]
+        for day in range(2):                                   # day 1 twice (retry), day 2
+            hb._run("daily")
+            hb._run("daily")
+            assert said() == [] and hb.next_try > clock["t"]
+            clock["t"] += 86400
+        hb._run("daily")                                       # day 3
+        assert said() == ["Hub backup copy failed: hub error 500"], said()
+        assert call(srv, "/api/state")[1]["hubBackup"]["last"]["error"] == "hub error 500"
+        clock["t"] += 86400
+        hb._run("daily")                                       # day 4: told already
+        assert len(said()) == 1
+        # it works again: reset; then two failed days, a day off, one more: not 3 in a row
+        fake.fail, fake.zips = 0, {"20261122": _zip_bytes("ok")}
+        hb._run("daily")
+        assert hb.st["fail_days"] == [] and "told" not in hb.st
+        fake.fail = 500
+        for gap in (1, 1, 2):
+            clock["t"] += gap * 86400
+            hb._run("daily")
+        assert len(said()) == 1
+        clock["t"] += 86400                                    # now 2 in a row... and a third
+        hb._run("daily")
+        hb._run("daily")
+        assert len(said()) == 1
+        clock["t"] += 86400
+        hb._run("daily")
+        assert len(said()) == 2 and said()[-1] == "Hub backup copy failed: hub error 500"
+        # the hub writing tonight's zip (409): waits, not a failure day
+        n = len(hb.st["fail_days"])
+        fake.fail = 409
+        clock["t"] += 86400
+        hb._run("daily")
+        assert len(hb.st["fail_days"]) == n and hb.next_try == clock["t"] + 900
+        assert "Hub backup copy failed: " == hubbackup.FAILED
+    finally:
+        hubbackup.system_drive = real_sd
+        _backup_done(srv, fake)
 
 
 if __name__ == "__main__":

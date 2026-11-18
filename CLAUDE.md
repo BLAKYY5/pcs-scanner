@@ -76,7 +76,7 @@ BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
 gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
 build and compare it with a scan from the previous build (same games and values).
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 is released).
 
 ## How the pieces work (things that bit us)
 
@@ -103,7 +103,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
   the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
-  Dev builds are offered releases ≥ their `base`. The restart is in the tray (`--background --updated`: a corner
+  Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
+  (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
+  without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
   message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).
 - **Quiet window** (a slower Apex session, 17 Nov 2026): WebView2 does not stop drawing when its window goes to the
   tray. A hidden window with the old pulsing dots drew 358 frames/s on a 360 Hz screen (~70 % of a CPU core plus GPU)
@@ -127,6 +129,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
 - **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
   through `pcs_core.redact`. `scrub_log` cleans old lines at start; the obs-websocket password is renewed once
   (`obs.renew_password`, only while our OBS is closed).
+- **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
+  `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
+  sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
 - **Results to hub and Drive**: a recording is "uploaded" once the hub OR Drive took its results; where they went is
   kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
@@ -196,6 +201,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   each app downloads them with the key into the data folder (`minimaps/`), never in this repo. No hub / no key: "Minimap
   needs the team hub"; no picture (Olympus) or map `?`: "No minimap for this map yet". Drawn on changes only (time,
   view, size), never in an animation loop. Key M = map (mute moved to U).
+- **Hub backup copy** (`pcs_recorder/hubbackup.py`, coach's hub key only, hub 0.5.4 `GET`/`HEAD /api/backup/latest`):
+  a second copy of the hub's nightly zip (`pcs-hub-<yyyymmdd>.zip`) on the coach's main PC (coach's decision, 17 Nov
+  2026: "Yes, also on E:"). Settings → Team hub shows "Hub backup copy" only when `/api/me` says coach (asked at most
+  every 6 h, or by Test). Folder default `E:\PCS Hub backups` when an E: drive exists, else off; never the Windows
+  drive (refused). Once a day from 04:00 (or the next app start after), only while Apex is closed and nothing records,
+  scans or records review talk (not even a request then): HEAD, skip if that date is there, download at background
+  priority to `.partial`, check size + zip, rename; Apex starting meanwhile stops it (not a failure). Keeps the newest
+  N (14) files named exactly `pcs-hub-<8 digits>.zip`, nothing else touched. No pop-up: one Activity line
+  "Hub backup copy failed: <reason>" after failures on 3 days in a row. State in `hub-backup.json` (never the key).
 - **Scanner robustness**: never trust a single read. Ring clock via countdown consistency, harvesters only if
   seen in ≥ 25 % of map opens, feed lines matched by time AND names. 4:3 stretched recordings are supported.
 - **Game end**: `games[].tEnd` is the last drop screen / legend select / full map frame (often = `tStart`), kept for
@@ -208,6 +222,19 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
   which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
   region caches (0 differences) and the check set table.
+- **Scan plumbing** (18 Nov 2026, to keep the scan unnoticeable): `keyframes()` reads ffmpeg's pipe unbuffered
+  (`bufsize=0`, `readinto` one new buffer per frame). The old `bufsize=10**8` + `.read(n)` cost 134 ms and 0.18 CPU-s
+  per keyframe, mostly kernel time; now 25-30 ms and 0.08 CPU-s, same bytes. A 127.0.0.1 socket was measured too: no
+  faster, ~12 % more CPU, so not used (the study blamed the pipe; it was the buffer). A recording is cut into the same chunks as
+  before (`default_chunks`: half the CPU threads, max 8; results depend on the cuts) but only `WORKERS` (2) run at a time (~360 MB each; whole scan < 1 GB).
+  Each finished chunk is kept in `<out>/<name>.partial/` (pickle, keyed by file size/time, cuts, decoder, layout,
+  build) until the scan completes: when Apex starts, the app stops the scan (`core.stop_tree`, nothing stays in
+  memory) instead of suspending it, and the next run goes on from the chunks still to do. `result_files` never
+  sends `.partial`. 4:3 stretched views fill only the boxes their readers look at (`view_top` rows 0..640).
+- **Leftover unpacked copies**: the onefile exe unpacks ~600 MB to `%TEMP%\_MEI*` per start (and per scan); a crash or
+  forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
+  are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
+  it goes first, a refusal keeps the folder) (`pcs_core.clean_old_unpacked`).
 - **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
   → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
   minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
@@ -265,6 +292,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.10 i
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
+  Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a
+  weaker alarm count right after it (`soundWeak`, 7 dB for 0.3 s within -0.5..+3.5 s); an alarm heard while the ring
+  clock shows the ring closing or a countdown far from its end is not a ring start (`ringSoundOther`, e.g. the "Loot
+  Bins and Arsenals Reset" event plays the same tones); a damage total resting on a single read is refused when the
+  game was quiet between the read before it (`damagePrevReadAt`) and it (`damageRefused: "quiet"`). Measured on the
+  7 / 15 / 17 Nov recordings: rings heard 38 -> 42 of 47, unexplained alarms 3 -> 0, real single damage reads 7 of 7
+  kept. Never use the voice / mic tracks for detection. Developer tool: `tools/audio_cross.py` (scores the ring alarm
+  and the damage check against a scan; game track audio, no video decode).
 
 ## Developer tools (`tools/`, not in the exe)
 

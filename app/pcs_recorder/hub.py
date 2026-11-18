@@ -146,8 +146,9 @@ def mask(key: str | None) -> str:
     return f"pcs_…{key[-4:]}" if key else ""
 
 
-def _dpapi(data: bytes, protect: bool) -> bytes:
-    """Windows' own per-user encryption (the one browsers use for saved passwords)."""
+def _dpapi(data: bytes, protect: bool, entropy: bytes = _ENTROPY) -> bytes:
+    """Windows' own per-user encryption (the one browsers use for saved passwords). Also used for the Google and
+    YouTube sign-ins (pcs_core.read_token), with their own `entropy`."""
     import ctypes
     from ctypes import wintypes
 
@@ -161,7 +162,7 @@ def _dpapi(data: bytes, protect: bool) -> bytes:
     crypt32, kernel32 = ctypes.windll.crypt32, ctypes.windll.kernel32
     kernel32.LocalFree.argtypes = [ctypes.c_void_p]
     src, _keep1 = blob(data)
-    ent, _keep2 = blob(_ENTROPY)
+    ent, _keep2 = blob(entropy)
     out = BLOB()
     fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
     if not fn(ctypes.byref(src), None, ctypes.byref(ent), None, None, 0x1, ctypes.byref(out)):   # 0x1: no UI
