@@ -369,6 +369,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   spectator-layout ring reads (`ownDeaths`); own view again later in the same game = respawned (`who: self`,
   `how: dropship` when a free fall follows). The card can't tell a beacon from a mobile beacon or a mode's own
   respawn (`how: card`). 16:9 only. `games[].respawns` is always present (empty list = none seen).
+  Banner and beacon (plan item 7): each dead card's status line is matched (`status_of`) on its first 96 px against
+  shapes from our recordings (`pcs_banner.json` `status`: DEATHBOX RECOVERY, RECOVER BANNER, CRAFT BANNER, DELIVER TO
+  BEACON, AWAITING RESPAWN, RESPAWNING..., RESPAWNING IN ss.cc; IoU ≥ 0.45 with a margin, else none). A teammate respawn
+  gets `bannerAt` (first of 2 DELIVER TO BEACON reads in a row: a teammate holds the banner), `banner` (picked / crafted
+  by what came before), `beaconAt` (first AWAITING RESPAWN / RESPAWNING... run), `modeRespawn` (Wildcard timer); only
+  the steps read. Held-out (7 / 17 Nov): status reads 56 of 60 sampled named, all right, 4 left unnamed; beacon use
+  4 of 4 within 1 s; banner pickup 1 of 1 where the DELIVER line showed (in 3 respawns box -> awaiting came between
+  keyframes or off screen). GPU vs CPU: 89 of 92 keyframes the same, the rest named vs unnamed, never two names.
+  Review Events: "... respawned · back after m:ss · banner picked up at +m:ss · beacon at +m:ss".
   Cards are found by the line under the name (one-letter names exist); a status line is 17 rows from x 186 with many
   colour changes (grass behind the cards gives lime too). Card rows per game = the two rows read most (Wildcard sits
   at 1035 / 1149). A frame without a ring-clock read counts as own view unless inside a spectating run (Wildcard shows
@@ -380,6 +389,29 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   select's hues, else "Teammate respawned"), click = seek. `respawns` is in `GAME_FIELDS` (`app/pcs_server.py`).
   Rings, frames checked by eye (7, 15, 17 Nov): current ring 97 of 114 visible read right, next ring 164 of 180, none
   wrong after the small-circle rule (the first run took a white map-feature circle on E-District for a next ring 5 times).
+- **Own knocks, shields and health** (`pcs_bars.py`, 16:9 only): the player's own card bottom left. Health bar = 16 rows
+  from x 236 (top row 1344 at 1440p), white or light pink after a revive (red = health just lost, tan = a med kit still
+  healing, green = regenerating: not counted). Shield bar 16 rows above it, segments of 25 points 63 px apart, filled in
+  the tier colour (white tier = light grey ~196; blue, purple measured; red / gold not seen yet, reference colours
+  unchecked). How many segments show is the armour's capacity, not tied to the colour (4 blue segments exist).
+  Knocked = a thin yellow bleed-out bar (rows 1348..1355) with the name in red (gold while being revived: still
+  knocked). A card 85 px higher (top row 1259) is the spectated player's: read as `spectating`, never as the player.
+  Teammates: the same bars on the alive cards `pcs_respawn.read_cards` finds (segments 42 px apart from x 185, health
+  216 px), the bar's top row searched near the card row (the card row jitters ±3 px between decoders).
+  Per game (`attach`): `ownKnocks` = [{t, end, reads, outcome: revived | died}], always present; a knock needs 2
+  knocked reads (Wildcard knocks last 1-3 s), menus inside it are fine, an alive card within 5 s of the last knocked
+  read = revived (a death shows a recap or spectating first). `shieldTimeline` = {cols [t, tier, shield, health],
+  self, mates [slot 1, slot 2]}: a value is kept when the next read agrees (±3) and it differs from the last kept one;
+  `[t, 'knocked']` rows for knocks. Squad wiped while the player was last alive = no knock state at all (none to find).
+  Cost ~0.6 ms per keyframe (`read_cards` was already there). Check set (`pcs-handoff\checkset\checkset-own-state.json`,
+  dev 13 / 15 Nov, held 7 Nov + 17 Nov games 1-6): knocks dev 22 / 22 found, outcome 22 right; held 22 / 22, outcome
+  22 right (one truth corrected on 1 s frames after the reader disagreed), none false, start within 3 s. Own bars on
+  sampled frames, held: state 20 / 20 (4 knocked), tier 15 / 15, shield ±5 16 / 16, health ±5 16 / 16; teammates (7 Nov,
+  17 cards): 16 found (a card at 2 % health is not found by read_cards), tier 16 / 16, shield and health ±5 15 / 16
+  (a striped segment being recharged counts as filled). GPU vs CPU decoding (15 Nov 880-1700 s, 7 Nov 3000-3800 s):
+  own state and tier the same on all 1620 keyframes, values within 2 on 1617 (3 health reads 3-7 apart on a damaged
+  bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review player shows own knocks like respawns (a grey tick with a
+  square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:
@@ -413,8 +445,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
 ## Developer tools (`tools/`, not in the exe)
 
 - **Region cache** (`tools/region_cache.py`): decodes a recording once with the scanner's own `keyframes()` and keeps,
-  per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, HUD minimap, top-left block for legend select /
-  banner / ring clock, rest of the banner words, top-right counters, kill feed), as lossless WebP (bit-identical: lossy
+  per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, HUD minimap (`minimap`), top-left block for legend select /
+  banner / ring clock, rest of the banner words, top-right counters, kill feed, squad cards + own bars `squad`, added
+  18 Nov 2026: older caches lack it; `--boxes squad,left` for the cards, bars and spectating), as lossless WebP (bit-identical: lossy
   formats were tried and changed reader results). `build "<rec>" --verify` (about 1.5 GB per hour of recording),
   then `run "<rec>" --readers squads,own --per game` re-runs readers in seconds to a minute; `verify` compares with the
   reads taken on the real frames. `Cache(dir).frames()` gives full-size frames (black outside the boxes), so readers

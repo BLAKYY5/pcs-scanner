@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_mapicons, pcs_minimap
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_minimap
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -492,6 +492,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
             if cards: perf.setdefault('_cards', []).append((round(t, 2), cards, bool(hud[2]['spec']) if hud and hud[2] else None))
+            try: own_bar = pcs_bars.read_own(img); mate_bars = pcs_bars.read_mates(img, cards)    # shields, health, knocks
+            except Exception: own_bar, mate_bars = None, []
+            if own_bar or mate_bars:
+                perf.setdefault('_bars', []).append((round(t, 2), own_bar, mate_bars, bool(hud[2]['spec']) if hud and hud[2] else None))
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -601,10 +605,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; minimap = []
+    rings = []; cards = []; icons = []; bars = []; minimap = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
-        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); minimap += pf.pop('_minimap', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); minimap += pf.pop('_minimap', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -617,7 +621,9 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
-    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0]); perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
+    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0])
+    perf['_bars'] = sorted(bars, key=lambda r: r[0])
+    perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -747,6 +753,8 @@ def main():
         except Exception as e: perf['mapIconsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_respawn.attach(games, perf.pop('_cards', []), samples)    # respawns, the player's own deaths
         except Exception as e: perf['respawnError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_bars.attach(games, perf.pop('_bars', []), samples)     # own knocks, shield / health timelines
+        except Exception as e: perf['barsError'] = f'{type(e).__name__}: {e}'[:200]
         t_mm = time.time(); mm = perf.pop('_minimap', [])
         try: pcs_minimap.attach(games, mm)                                 # position from the HUD minimap (no debug overlay needed)
         except Exception as e: perf['minimapError'] = f'{type(e).__name__}: {e}'[:200]

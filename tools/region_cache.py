@@ -42,6 +42,8 @@ BOXES = {
                                           #   Caches built before 16 Nov 2026 start at x = 1990: ranked kills there
                                           #   lose their skull icon, so OwnStats leaves them unread on those caches.
     'feed':     (260, 640, 1820, 2470),   # Feed: a[260:640, 1820:2470]
+    'squad':    (860, 1400, 0, 600),      # pcs_respawn cards a[860:1330, 0:430]; pcs_bars own card and bars
+                                          #   (rows 1290..1365, x 230..560) and teammate bars
     'minimap':  (56, 396, 56, 396),       # pcs_minimap: the HUD minimap a[66:386, 66:388] with a margin
 }
 CODEC = 'webp-lossless'
@@ -83,6 +85,7 @@ READERS = {
     'ranked':  (('counters',), lambda a: HUD.ranked(a) or None),
     'ring':    (('left',), _ring),
     'dbg':     (('dbg',), _dbg),
+    'ownbar':  (('squad',), lambda a: __import__('pcs_bars').read_own(a)),    # own card: shield, health, knocked
 }
 VERIFY = ('legends', 'banner', 'squads', 'own', 'ranked', 'ring', 'dbg')   # stored by build --verify
 
@@ -239,6 +242,7 @@ def _short(r, v):
     if r == 'ring': return f"{'pre ' if v['pre'] else ''}{v['v']}"
     if r == 'dbg': return 'pos' if v['pos'] else 'vel'
     if r == 'feed': return v.get('event', 'line')
+    if r == 'ownbar': return v['state'] if v['state'] != 'alive' else f"{v['tier'] or '-'} {v['shield']}/{v['health']}"
     return str(v)
 
 def summary(reads, per='minute'):

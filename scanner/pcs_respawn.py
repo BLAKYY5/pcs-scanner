@@ -10,7 +10,23 @@ back in his own view later in the same game = respawned (a fall from the respawn
 
 Cards are read on own-view frames only: while spectating, the cards are the spectated squad's.
 """
+import json
+import os
+import sys
+
 import numpy as np
+
+_HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))
+try: _ST = json.load(open(os.path.join(_HERE, 'pcs_banner.json'), encoding='utf-8')).get('status') or {}
+except Exception: _ST = {}
+SW, SH = _ST.get('w', 96), _ST.get('h', 17)
+STATUS = {k: np.unpackbits(np.frombuffer(bytes.fromhex(v), np.uint8))[:SW * SH].reshape(SH, SW).astype(bool)
+          for k, v in (_ST.get('shapes') or {}).items()}
+# what each status line says about the banner (the words on the card)
+#   box: DEATHBOX RECOVERY (banner still in the death box)   recover: RECOVER BANNER   craft: CRAFT BANNER (expired:
+#   craft a new one at a replicator)   held: DELIVER TO BEACON (a teammate carries the banner)   awaiting: AWAITING
+#   RESPAWN (a beacon was used)   respawning: RESPAWNING... (the dropship comes)   timer: RESPAWNING IN ss.cc (a mode's
+#   own respawn, Wildcard)
 
 NAME_X0, NAME_X1 = 180, 340          # names start at x = 184 (all layouts: normal, map open, spectating)
 STAT_X1 = 430                        # the lime status line ends before the card's right edge (x ~ 400)
@@ -59,15 +75,37 @@ def read_cards(a):
         # the status line: 17 rows of capitals from x 186..188 with ~50 colour changes a row (RESPAWNING... fewer);
         # grass behind the cards gives lime too, but from the column's edge, in bands of other heights
         b = lime[y0:y1]; cols = np.nonzero(b.any(0))[0]
-        if 14 <= y1 - y0 <= 20 and 4 <= cols.min() <= 12 and np.median(_trans(b)) >= 18: cards.append((y0 - 27, 'dead'))
+        if 14 <= y1 - y0 <= 20 and 4 <= cols.min() <= 12 and np.median(_trans(b)) >= 18:
+            cards.append((y0 - 27, 'dead', status_of(lime[y0:y0 + SH])))
     # alive: a solid white bar from the name column (a knocked player's bar is red, a low one may be too short)
     wl = _left(white)
     run = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
                     if wl[y] < 999 else 0 for y in range(white.shape[0])])
     brow = (wl >= 3) & (wl <= 12) & (run >= 8) & (_trans(white) <= 3)
     for y0, y1 in _runs(brow, 4):
-        if y1 - y0 <= 14 and not any(abs((y0 - 33) - y) < 14 for y, _ in cards): cards.append((y0 - 33, 'alive'))
-    return [{'y': int(Y0 + y), 'state': s, 'hue': frame_hue(a, Y0 + y)} for y, s in sorted(cards)]
+        if y1 - y0 <= 14 and not any(abs((y0 - 33) - c[0]) < 14 for c in cards): cards.append((y0 - 33, 'alive', None))
+    out = []
+    for y, s, st in sorted(cards, key=lambda c: c[0]):
+        c = {'y': int(Y0 + y), 'state': s, 'hue': frame_hue(a, Y0 + y)}
+        if st: c['status'] = st
+        out.append(c)
+    return out
+
+
+def status_of(m):
+    """The words of a dead card's status line (see STATUS) from its lime mask (17 rows), or None when unsure.
+    Compared on the first 96 px from the first ink column (the line is left-aligned; digits of a timer come later)."""
+    if not STATUS: return None
+    idx = np.nonzero(m.any(0))[0]
+    if not len(idx): return None
+    p = np.zeros((SH, SW), bool); seg = m[:SH, idx[0]:idx[0] + SW]; p[:seg.shape[0], :seg.shape[1]] = seg
+    sc = sorted((((p & t).sum() / max(1, (p | t).sum())), k) for k, t in STATUS.items())[::-1]
+    (best, k), (second, k2) = sc[0], sc[1]
+    resp = {'timer', 'respawning'}
+    if best < 0.45 or (best - second < 0.08 and not {k, k2} <= resp): return None
+    if k in resp:                     # same first word: RESPAWNING... ends early, RESPAWNING IN ss.cc runs on
+        k = 'timer' if idx[idx < idx[0] + 205].max() - idx[0] > 170 else 'respawning'
+    return k
 
 
 def frame_hue(a, y):
@@ -98,22 +136,48 @@ def teammate_respawns(reads, t0, t1, hold=3):
     rows = slot_rows([x['y'] for _, c in R for x in c])
     out = []
     for k in range(len(rows)):
-        seq = [(t, x['state'], x['hue']) for t, c in R for x in c
+        seq = [(t, x['state'], x['hue'], x.get('status')) for t, c in R for x in c
                if slot_of(x['y'], rows) == k and x['state'] in ('alive', 'dead')]
         dead = []; i = 0
         while i < len(seq):
-            t, st, _ = seq[i]
-            if st == 'dead': dead.append(t); i += 1; continue
+            t, st, _, status = seq[i]
+            if st == 'dead': dead.append((t, status)); i += 1; continue
             j = i
             while j < len(seq) and seq[j][1] == 'alive': j += 1
             if j - i < hold: i = j; continue                 # a short run of 'alive' reads: not trusted, keep waiting
-            if len(dead) >= hold and t - dead[-1] <= MAX_GAP:
-                hues = [h for _, s, h in seq[i:j] if h is not None]
+            if len(dead) >= hold and t - dead[-1][0] <= MAX_GAP:
+                hues = [h for _, s, h, _ in seq[i:j] if h is not None]
                 h = int(np.median(hues)) if hues else None
                 out.append({'t': round(float(t), 2), 'who': 'teammate', 'slot': k + 1, 'hue': h, 'color': hue_name(h),
-                            'how': 'card', 'deadSince': round(float(dead[0]), 2), 'lastDeadRead': round(float(dead[-1]), 2)})
+                            'how': 'card', 'deadSince': round(float(dead[0][0]), 2),
+                            'lastDeadRead': round(float(dead[-1][0]), 2), **banner_steps(dead)})
             dead = []; i = j
     return sorted(out, key=lambda e: e['t'])
+
+
+STEP_HOLD = 2             # status reads of one kind in a row before a banner step counts
+
+
+def banner_steps(dead):
+    """dead: [(t, status)] of one death on a card, time order. The banner's way back from what the status line says:
+    bannerAt (first of STEP_HOLD 'DELIVER TO BEACON' reads in a row: a teammate holds the banner), banner ('picked' from
+    the death box, 'crafted' after CRAFT BANNER), beaconAt (first AWAITING RESPAWN / RESPAWNING... run: a beacon was
+    used), modeRespawn (RESPAWNING IN ss.cc: the mode brings the player back, no banner). Only the steps read."""
+    out = {}; before = None
+    runs = []                                            # [(status, first t, count)] of consecutive equal reads
+    for t, st in dead:
+        if st is None: continue
+        if runs and runs[-1][0] == st: runs[-1][2] += 1
+        else: runs.append([st, t, 1])
+    for st, t, n in runs:
+        if n < STEP_HOLD: continue
+        if st in ('box', 'recover', 'craft') and 'bannerAt' not in out: before = st
+        elif st == 'held' and 'bannerAt' not in out:
+            out['bannerAt'] = round(float(t), 2)
+            if before: out['banner'] = 'crafted' if before == 'craft' else 'picked'
+        elif st in ('awaiting', 'respawning') and 'beaconAt' not in out: out['beaconAt'] = round(float(t), 2)
+        elif st == 'timer': out['modeRespawn'] = True
+    return out
 
 
 MAX_GAP = 40.0            # s from the last 'dead' read to the first 'alive' one (more: cards unseen, maybe another game)
