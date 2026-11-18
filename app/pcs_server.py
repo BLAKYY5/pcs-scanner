@@ -149,7 +149,8 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
-               "select", "banner", "squadsLeft", "own", "feedStats")
+               "select", "banner", "squadsLeft", "own", "feedStats",
+               "respawns")   # scanner PR #52: [{t, who: teammate | self, hue, deadSince, how}], shown like kills
 
 
 def _same_sig(a, b) -> bool:
@@ -467,6 +468,7 @@ class Backend:
             elif p in self.scan_queue:
                 status = "waiting"
             yt = None
+            chk = None
             if norm in rec_index and self.auto and getattr(self.auto.rec, "youtube", None):
                 up = self.auto.rec.youtube
                 b = up.block_of(rec_index[norm][0])
@@ -475,12 +477,23 @@ class Backend:
                 r = up.results_of(rec_index[norm][0])
                 if r:
                     yt["res"] = {k: r.get(k) for k in ("standing", "teams", "pts", "kills")}
-            label, by_hand = labels.of(p, full)
+                try:
+                    chk = up.check_of_key(rec_index[norm][0])
+                except Exception:
+                    chk = None
+                if chk:
+                    yt["eecCheck"] = {"verdict": chk["verdict"], "why": chk["why"]}
+            lab = labels.explain(p, full, chk)
+            label, by_hand = lab["label"], lab["source"] == "hand"
             rec = recorded_at(p, full)
             items[i] = {"id": i, "name": Path(p).name, "path": p, "size": st.st_size, "mtime": st.st_mtime,
                         # "Recorded" = when the recording started, not when the file was last written
                         "recorded": rec if rec is not None else st.st_mtime,
-                        "label": label, "label_by_hand": by_hand,
+                        "label": label, "label_by_hand": by_hand, "label_source": lab["source"], "label_why": lab["why"],
+                        # EEC drop per game where EEC's results were compared with this recording's games
+                        "eecGames": [{k: x.get(k) for k in ("i", "eecGame", "eecDrop", "ourDrop", "ourFrom", "check", "why")}
+                                     for x in (chk or {}).get("games", []) if norm in rec_index and x.get("rec") == rec_index[norm][0]]
+                                    if chk and chk["verdict"] != "mismatch" else [],
                         "status": status, "scan": summary, "auto": norm in rec_index, "yt": yt,
                         "note": rec_index[norm][1].note if norm in rec_index else "",   # e.g. "Sent to hub: 11 games"
                         # on the team hub? {"hub": "sent" | "pending" | "", "why": "Hub not reachable" | "Key refused"…}
@@ -738,6 +751,7 @@ class Backend:
         a = self.auto
         rec = None
         if a:
+            from pcs_recorder.settings import default_mbps
             used, n = a.rec.usage()
             s = a.s
             rec = {"enabled": s.enabled, "status": a.rec.status, "recording": a.rec.current is not None,
@@ -745,6 +759,7 @@ class Backend:
                    "used": used, "count": n,
                    "settings": {k: getattr(s, k) for k in REC_FIELDS if hasattr(s, k)},
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
+                   "bitrateDefault": default_mbps(s.encoder), "bitrateAuto": bool(getattr(s, "bitrate_auto", True)),
                    "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
@@ -753,7 +768,7 @@ class Backend:
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
-                "teamLink": core.SETTINGS.get("team_link", ""),
+                "teamLink": core.SETTINGS.get("team_link", ""), "coachEmail": core.SETTINGS.get("coach_email", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
                 "recorder": rec, "messages": list(self.messages)[-60:],
@@ -987,24 +1002,20 @@ class Backend:
 
     # ------------------------------------------------------------- coach
     def check_coach(self) -> bool:
-        """The Coach role is only for the coach's Google account (the one the team's scans are shared with):
-        checked against the Google account this app is signed in with, not just the menu choice."""
+        """The Coach role is only for the coach's hub key: the team hub says which key is the coach's (`/api/me`),
+        checked here, not just the menu choice. No address or account name is built into the app."""
         self.coach = False
-        if core.SETTINGS.get("role") != "Coach":
+        if core.SETTINGS.get("role") != "Coach" or not self.auto:
             return False
-        want = (core.BUILD.get("coach") or "").strip().lower()
         try:
-            svc = core.drive_service(interactive=False)
-            email = svc.about().get(fields="user(emailAddress)").execute()["user"]["emailAddress"] if svc else ""
+            self.coach = self.hubbackup.role(ask=True) == "coach"
         except Exception:
-            email = ""
-        self.coach = bool(want) and email.strip().lower() == want
+            self.coach = False
         return self.coach
 
     def require_coach(self) -> None:
         if not getattr(self, "coach", False):
-            raise PermissionError("Only the coach can do this (Settings → Role: Coach, signed in with the coach's "
-                                  "Google account).")
+            raise PermissionError("Only the coach can do this (Settings → Role: Coach, with the coach's hub key).")
 
     def save_settings(self, body: dict) -> None:
         body = dict(body)
@@ -1051,6 +1062,11 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "coach_email" in body:
+            mail = str(body["coach_email"] or "").strip()
+            if mail and not core.valid_email(mail):
+                raise ValueError("The coach's Google address doesn't look right. Check it and try again.")
+            core.SETTINGS["coach_email"] = mail
         if "team_link" in body:
             link = str(body["team_link"]).strip()
             if link and not core.drive_link_id(link):
@@ -1066,8 +1082,8 @@ class Backend:
             if body["role"] == "Coach" and not self.check_coach():
                 core.SETTINGS["role"] = before
                 core.save_settings()
-                raise PermissionError("Coach is reserved for the coach's Google account. Sign in with it first "
-                                      "(Settings → Google Drive), then choose Coach again.")
+                raise PermissionError("Coach is reserved for the coach's hub key. Add it first "
+                                      "(Settings → Team hub), then choose Coach again.")
             if body["role"] != "Coach":
                 self.coach = False
         core.save_settings()
@@ -1079,7 +1095,10 @@ class Backend:
             hub_before = a.s.hub_url
             for k in REC_FIELDS:
                 if k in body:
-                    setattr(a.s, k, body[k])
+                    if k == "bitrate_mbps" and hasattr(a.s, "set_bitrate"):
+                        a.s.set_bitrate(body[k])           # the encoder's default unless the player picks another
+                    else:
+                        setattr(a.s, k, body[k])
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st

@@ -18,6 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
+import pcs_ring, pcs_respawn
 
 VERSION = '1.10.11'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -34,6 +35,7 @@ def build_stamp(here=HERE):
 MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
 USE_HW = True
+RING_EVERY = 3.0   # s between two ring-circle reads of the full map (one read takes about 2 s; a 10 s map open gives 4)
 LAYOUT = None   # None = detect per recording; False = 16:9; True = 4:3 stretched to 16:9 (forced with --layout)
 
 # ---------- 4:3 stretched recordings ----------
@@ -419,7 +421,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends()
+    legends = HUD.Legends(); ring_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -444,7 +446,16 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             d = read_dropscreen(view_drop(img) if st else img, st)
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
             d = mr.read(view_map(img) if st else img, st)
-            if d: events.append({'t': round(t, 2), 'kind': 'map', 'data': d}); votes[st] += 1; break
+            if d:
+                events.append({'t': round(t, 2), 'kind': 'map', 'data': d}); votes[st] += 1
+                if t - ring_at >= RING_EVERY:     # ring circles on the full map (about 2 s a read)
+                    ring_at = t
+                    R = perf.get('_rings') or [(None, None, None)]
+                    hint = R[-1][2] if R[-1][1] == d['map'] and t - R[-1][0] < 90 else None    # same ring a moment ago
+                    try: rr = pcs_ring.read(view_map(img) if st else img, mr.cache[1], hint)
+                    except Exception: rr = None
+                    if rr and (rr['cur'] or rr['next']): perf.setdefault('_rings', []).append((round(t, 2), d['map'], rr))
+                break
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
@@ -467,6 +478,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 except Exception: own = {}
                 if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
                     perf.setdefault('_own', []).append((round(t, 2), own))
+        if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
+            try: cards = pcs_respawn.read_cards(img)
+            except Exception: cards = []
+            if cards: perf.setdefault('_cards', []).append((round(t, 2), cards, bool(hud[2]['spec']) if hud and hud[2] else None))
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -576,8 +591,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
+    rings = []; cards = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -590,6 +607,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
+    perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -713,6 +731,10 @@ def main():
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
         if kind == 'video': games = split_restarts(games, samples)
         timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []))
+        try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
+        except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_respawn.attach(games, perf.pop('_cards', []), samples)    # respawns, the player's own deaths
+        except Exception as e: perf['respawnError'] = f'{type(e).__name__}: {e}'[:200]
         perf['refine'] = time.time() - t_tl
         audio = None
         if kind == 'video':     # sound cues from the game track back up what was read on screen

@@ -15,6 +15,15 @@ SETTINGS_FILE = APP_DIR / "recorder.json"
 MIN_MAX_GB = 20          # below this a single scrim block may not fit
 MAX_KEEP_DAYS = 90
 MIN_MBPS, MAX_MBPS = 8, 60   # 8 = the floor that keeps HUD text readable (Twitch VODs are 8-10)
+# Default video bitrate per encoder (coach's decision, 18 Nov 2026, from the bitrate study): AV1 at 10 Mbit/s reads
+# the same as 12 (8 loses squads-left reads and a landing); HEVC and H.264 need 12 (H.264 at 8 gave wrong results).
+AV1_MBPS, OTHER_MBPS = 10, 12
+OLD_DEFAULT_MBPS = 12        # the single default up to 1.10.11: a saved 12 was never chosen by hand (load())
+
+
+def default_mbps(encoder: str) -> int:
+    """The recommended bitrate for this OBS encoder: 10 for AV1, 12 for HEVC / H.264 and before the encoder test."""
+    return AV1_MBPS if "av1" in (encoder or "").lower() else OTHER_MBPS
 # voice app on track 2: name shown to the player, program(s) whose sound is recorded.
 # TeamSpeak: the classic client (TeamSpeak 3) and the newer one (TeamSpeak 5/6) have different programs;
 # both are listened to, only the one that runs makes sound.
@@ -42,7 +51,8 @@ class Settings:
     folder: str = str(Path.home() / "Videos" / "PCS Recordings")
     keep_days: int = 7                                 # delete recordings older than this
     max_gb: int = 100                                  # the recorder's files never take more than this
-    bitrate_mbps: int = 12                             # constant bitrate; 12 Mbit/s ~ 5.4 GB per hour
+    bitrate_mbps: int = OTHER_MBPS                     # constant bitrate; 12 Mbit/s ~ 5.4 GB per hour
+    bitrate_auto: bool = True                          # bitrate follows the encoder (default_mbps) until set by hand
     game_audio: bool = True                            # track 1: Apex's own sound only
     comms_consent: bool = False                        # the team agreed that voice comms are recorded
     discord_audio: bool = True                         # track 2: the voice app only (needs comms_consent)
@@ -83,6 +93,8 @@ class Settings:
     def clamp(self) -> "Settings":
         self.keep_days = max(1, min(MAX_KEEP_DAYS, int(self.keep_days)))
         self.max_gb = max(MIN_MAX_GB, int(self.max_gb))
+        if self.bitrate_auto:
+            self.bitrate_mbps = default_mbps(self.encoder)
         self.bitrate_mbps = max(MIN_MBPS, min(MAX_MBPS, int(self.bitrate_mbps)))
         self.scan_delay_s = max(5, min(600, int(self.scan_delay_s)))
         self.hub_url = (self.hub_url or "").strip().rstrip("/")
@@ -107,6 +119,19 @@ class Settings:
         self.voice_app = self.voice_app if self.voice_app in VOICE_APPS else "discord"
         self.voice_exe = valid_exe(self.voice_exe) or ""
         return self
+
+    def mbps_for(self, encoder: str) -> int:
+        """Bitrate to record with on this encoder: the player's own value, or the encoder's default
+        (the encoder test tries each candidate at its own default)."""
+        return default_mbps(encoder) if self.bitrate_auto else self.bitrate_mbps
+
+    def set_bitrate(self, mbps) -> None:
+        """A bitrate from the Settings page. The page sends the shown value with every save, so an unchanged value
+        keeps the setting as it was; a new value is the player's own unless it is the encoder's default."""
+        mbps = max(MIN_MBPS, min(MAX_MBPS, int(mbps)))
+        if mbps != self.bitrate_mbps:
+            self.bitrate_mbps = mbps
+            self.bitrate_auto = mbps == default_mbps(self.encoder)
 
     def voice_exes(self) -> list[str]:
         """The program(s) whose sound goes on track 2 (none when "other" has no valid program yet)."""
@@ -147,10 +172,13 @@ def load() -> Settings:
     s = Settings()
     if SETTINGS_FILE.exists():
         try:
-            for k, v in json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).items():
+            saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+            for k, v in saved.items():
                 if hasattr(s, k):
                     setattr(s, k, v)
-        except (json.JSONDecodeError, OSError):
+            if "bitrate_auto" not in saved:                # saved before the per-encoder default:
+                s.bitrate_auto = saved.get("bitrate_mbps", OLD_DEFAULT_MBPS) == OLD_DEFAULT_MBPS   # keep a hand-set value
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass
     save(s)
     return s
