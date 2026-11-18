@@ -72,6 +72,7 @@ class Settings:
     hk_mark: str = "ctrl+alt+m"                        # "mark this moment" for the review
     hk_sounds: bool = True                             # short beep when a hotkey is used
     nogame_keep_h: int = 24                            # recordings with no game: deleted after this (0 = at once)
+    min_record_min: int = 5                            # shorter sessions not kept unless Apex crashed and restarted (0 = keep all)
     yt_enabled: bool = False                           # one YouTube video per scrim block, to the team channel
     yt_privacy: str = "unlisted"                       # unlisted | private
     yt_audio: str = "game"                             # game | mix (game + Discord + mic, needs comms_consent)
@@ -110,6 +111,7 @@ class Settings:
         self.yt_gap_min = max(10, min(240, int(self.yt_gap_min)))
         self.yt_wait_eec_h = max(1, min(72, int(self.yt_wait_eec_h)))
         self.nogame_keep_h = max(0, min(24 * 30, int(self.nogame_keep_h)))
+        self.min_record_min = max(0, min(30, int(self.min_record_min)))
         self.yt_team = (self.yt_team or "").strip()[:30]
         self.yt_when = self.yt_when if self.yt_when in ("after_block", "night") else "after_block"
         self.night_from, self.night_to = int(self.night_from) % 24, int(self.night_to) % 24

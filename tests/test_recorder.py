@@ -2409,6 +2409,73 @@ def test_own_bars_and_knocks():
     assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
 
 
+def test_fights_and_ring_damage():
+    """pcs_fights: ring damage from the red screen edges and health ticks (shield untouched); fights from our squad's
+    kill-feed lines, own knocks and hits: kills decide, the player's own death counts, a wiped squad lost; one line
+    captured twice counts once; a name in a colour none of our squad has is not ours; third party = more enemy names
+    than a squad, or shooting after every opponent died."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_fights as F
+    a = np.zeros((1440, 2560, 3), np.uint8); a[...] = (90, 100, 110)
+    assert F.read_storm(a) == (0.0, 0.0, 0.0, 0.0) and not F.storm_outside(F.read_storm(a))
+    a[..., 0] = 230; a[..., 1] = 90; a[..., 2] = 60                            # red-orange haze everywhere
+    assert F.storm_outside(F.read_storm(a))
+    b = np.zeros((1440, 2560, 3), np.uint8); b[0:24] = (230, 90, 60)            # only the top strip: low health vignette
+    assert not F.storm_outside(F.read_storm(b))
+    A = lambda t, s, h: (float(t), {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': h}, [], False)
+    # ring: 3 health a tick for 8 reads, shield 50 untouched; a fight hit (shield) is not ring damage
+    bars = [A(t, 50, 100) for t in range(100, 110)] + [A(110 + i, 50, 97 - 3 * i) for i in range(8)] +            [A(t, 50, 76) for t in range(118, 125)] + [A(125, 20, 76), A(126, 20, 76)]
+    storm = [(float(t), (0.9, 0.9, 0.8, 0.7) if 111 <= t <= 117 else (0.0, 0.0, 0.0, 0.0)) for t in range(100, 127)]
+    g = [{'tStart': 90.0, 'ring': [{'round': 1, 'kind': 'closing', 'firstSeen': 100.0, 'endsAt': 300.0}]}]
+    F.attach(g, [], bars, storm)
+    rd = g[0]['ringDamage']
+    assert len(rd['segments']) == 1 and rd['segments'][0]['perTick'] == 3.0 and rd['segments'][0]['round'] == 1, rd
+    assert 21 <= rd['measured'] <= 24 and rd['damage'] >= rd['measured'] and 6 <= rd['seconds'] <= 12, rd
+    # ticks alone (no storm read), shield up: still ring; one or two drops: not
+    g = [{'tStart': 90.0}]
+    F.attach(g, [], [A(100 + i, 75, 100 - 3 * i) for i in range(6)], [])
+    assert g[0]['ringDamage']['segments'] and g[0]['ringDamage']['segments'][0]['how'] == 'ticks'
+    F.attach(g, [], [A(100, 75, 100), A(101, 75, 97), A(102, 75, 97)], [])
+    assert g[0]['ringDamage']['segments'] == []
+    # fights
+    sq = lambda hue: {'side': 'squad', 'hue': hue}
+    other = {'side': 'other'}
+    sig1, sig2 = '0' * 36, 'f' * 36
+    sig3 = '00ff' * 9
+    line = lambda t, ev, k, v, ks=None, vs=None, y=290, w='r301': {'t': float(t), 'event': ev, 'weapon': w, 'killer': k,
+                                                                     'victim': v, 'killerSig': ks, 'victimSig': vs, 'y': y}
+    game = lambda: {'tStart': 0.0, 'tEndGame': 900.0, 'select': {'squad': [{'slot': 1, 'hue': 40, 'self': True},
+                                                                            {'slot': 2, 'hue': 77}, {'slot': 3, 'hue': 179}]}}
+    feed = [line(100, 'knock', sq(40), other, vs=sig1), line(103, 'knock', sq(40), other, vs=sig1, y=330),   # same line again, lower
+            line(110, 'kill', sq(77), other, vs=sig1), line(112, 'knock', other, sq(179), ks=sig2),
+            line(130, 'knock', sq(210), other, vs=sig3),                       # blue: none of us
+            line(400, 'knock', other, sq(40), ks=sig3)]
+    g = [game()]
+    g[0]['ownKnocks'] = [{'t': 401.0, 'end': 420.0, 'reads': 10, 'outcome': 'died'}]
+    g[0]['ownDeaths'] = [421.0]
+    F.attach(g, feed, [A(t, 50, 100) for t in range(90, 140)], [])
+    f1, f2 = g[0]['fights']
+    assert (f1['ours'], f1['theirs'], f1['result']) == ({'knocks': 1, 'kills': 1}, {'knocks': 1, 'kills': 0}, 'won'), f1
+    assert f1['opponents'] == 2 and not f1['thirdParty'] and f1['t0'] <= 100 <= 112 <= f1['t1'] < 130, f1
+    assert f2['theirs'] == {'knocks': 1, 'kills': 1} and f2['result'] == 'lost', f2                     # he died in it
+    assert F.verdict({'knocks': 3, 'kills': 0}, {'knocks': 1, 'kills': 0}) == 'won'
+    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'even'
+    assert F.verdict({'knocks': 2, 'kills': 2}, {'knocks': 0, 'kills': 0}, wiped=True) == 'lost'
+    # third party: a fourth enemy name in one fight
+    sigs = ['0' * 36, 'f' * 36, '0f' * 18, 'f0' * 18]
+    g = [game()]
+    F.attach(g, [line(200 + 5 * k, 'knock', sq(77), other, vs=s_, w='w%d' % k) for k, s_ in enumerate(sigs)], [], [])
+    f = g[0]['fights'][0]
+    assert f['opponents'] == 4 and f['thirdParty'] and f['thirdPartyWhy'] == 'new enemy', f
+    # shooting after every opponent we met died
+    g = [game()]
+    loud = np.full(int(400 / 0.05), -50.0, np.float32); loud[int(300 / 0.05):int(330 / 0.05)] = -10.0
+    F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
+    f = g[0]['fights'][0]
+    assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
@@ -2459,6 +2526,43 @@ def test_fast_colour_masks_identical():
         assert SCAN.MapReader.is_map(img) == SCAN.MapReader.is_map(img.astype(np.int16)) is True
         assert SCAN.MapReader().read(img, st) == SCAN.MapReader().read(img.astype(np.int16), st)
     assert HUD.read_ring(img) == HUD.read_ring(img.astype(np.int16)) and HUD.read_dbg(img) == HUD.read_dbg(img.astype(np.int16))
+
+
+def test_debug_overlay_misreads():
+    """The debug overlay's POS line: a clear line is read; an unreadable cell is never taken for a digit gap: a '?'
+    inside a number (15?63 for 15863.63) or where a minus sign or first digit was (?1607 for 11607) gives no position
+    from that frame instead of a wrong one. The decimal point read as '-' or '?' and the gap before a minus read as
+    '-' are fine."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    def frame(text, y=22):
+        img = np.zeros((1440, 2560, 3), np.uint8)
+        for i, ch in enumerate(text):
+            x = 3 + 8 * (6 + i)
+            if ch == '.':
+                img[40 + y + 7:40 + y + 9, x + 2:x + 4] = 255
+            elif ch == '#':                                        # an unreadable blob
+                img[40 + y:40 + y + 9, x:x + 7] = 255
+            elif ch != ' ':
+                g = np.array(HUD.DBG_T[ch], bool)
+                img[40 + y:40 + y + 9, x:x + 7][g] = 255
+        return img
+    assert HUD.read_dbg(frame("29619.14 -26234.44 1149.94")) == ([29619.14, -26234.44, 1149.94], None)
+    assert HUD.read_dbg(frame("29619#14 -26234.44 1149.94#"))[0] == [29619.14, -26234.44, 1149.94]   # a '?' point
+    assert HUD.read_dbg(frame("15#63.82 -5643.20 5882.23"))[0] is None            # not 15.63
+    assert HUD.read_dbg(frame("#1607.77 -30548.06 6348.02"))[0] is None           # not 1607.77
+    assert HUD.read_dbg(frame("#24217.65 33525.88 867.56"))[0] is None            # a lost minus sign
+    assert HUD.read_dbg(frame("100.00 200.00"))[0] is None                        # two numbers only
+    for line, xyz in (("28619-14--26234-44 1148-94   ?", (28619.14, -26234.44, 1148.94)),
+                      ("-28653?76--18149-44 707-08   -", (-28653.76, -18149.44, 707.08)),
+                      ("15830-75 -26232-44 1270-57?-  ", (15830.75, -26232.44, 1270.57))):
+        g = HUD.POSRX.match(line).groups()
+        assert tuple(float(g[2 * i] + '.' + g[2 * i + 1]) for i in range(3)) == xyz
+    for line in ("15?63-82--5643-20-5882-23  ---", "?1607-77--30548-06 6348-02   ?", "?28744-84--19830-08 545-97   -",
+                 "-7?77-31-27333-04-8092-86-----"):
+        assert HUD.POSRX.match(line) is None
+    assert HUD.read_dbg(frame("299.00", y=50))[1] == 299.0                        # VEL line as before
 
 
 def _tools():
@@ -3406,6 +3510,243 @@ def test_clean_old_unpacked_copies():
         holder.kill(); holder.wait()
     gone = core.clean_old_unpacked(str(tmp), str(current), now=time.time() + 3600)   # no longer in use: removed
     assert [Path(p).name for p, _ in gone] == ["_MEI1004.pcs-old"] and gone[0][1] > 1000, gone
+
+
+# ------------------------------------------------------------------ short sessions and Apex crashes (stitch.py)
+class ActivityUI(FakeUI):
+    def __init__(self, answer=False):
+        super().__init__(answer)
+        self.lines = []
+
+    def activity(self, text):
+        self.lines.append(text)
+
+
+class VideoOBS(FakeOBS):
+    """Gives a real short video (when `real`) or a placeholder file per session."""
+    def __init__(self, folder, real=False):
+        super().__init__(folder)
+        self.real, self.secs = real, [3, 4, 2]
+
+    def stop(self):
+        self.rec = False
+        self.n += 1
+        p = Path(self.folder) / f"Apex Legends_2026.11.18-16.{self.n:02d}.mp4"
+        if not (self.real and _test_video(p, self.secs[(self.n - 1) % len(self.secs)])):
+            p.write_bytes(b"x" * 1000)
+        return str(p)
+
+
+def _crash_recorder(real=False, minutes=5):
+    """A recorder with a fake clock, fake Apex and fake crash signals: `sig` = [(time, reason)] seen by the
+    crash probe, `durs` / `ends` = fake length and in-game end per file name (None = can't be read)."""
+    from pcs_recorder import stitch
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    stitch.STATE_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"crash-{time.time_ns()}")
+    s.enabled, s.min_record_min, s.comms_consent = True, minutes, False
+    clock, apex = {"t": 1_800_000_000.0}, {"on": False}
+    ui, obs = ActivityUI(False), VideoOBS(s.folder_path, real)
+    r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"], clock=lambda: clock["t"])
+    r._final_file = lambda p, wait_s=0: p
+    r.cutter = type("C", (), {"add": lambda self, p, asked=False: None, "clean": lambda self, f=(): None})()
+    sig, durs, ends, recycled = [], {}, {}, []
+    r.crash_probe = lambda since, until: next((why for t, why in sig if since <= t <= until), "")
+    if not real:
+        r.duration_probe = lambda p: durs.get(Path(p).name)
+    r.end_probe = lambda p, d: ends.get(Path(p).name, False)
+
+    def recycle(path):
+        recycled.append(Path(path).name)
+        os.remove(path)
+    r.recycle = recycle
+
+    def session(mins, crash=None, gap=0.0):
+        """Apex runs `mins` minutes, then closes; `crash` = a crash sign at the end; then `gap` minutes pass."""
+        apex["on"] = True; r.tick()
+        clock["t"] += mins * 60
+        if crash:
+            sig.append((clock["t"] - 5, crash))
+        apex["on"] = False; r.tick()
+        clock["t"] += gap * 60
+        r.tick()
+        return obs.n
+    return r, ui, clock, apex, sig, durs, ends, recycled, session
+
+
+def test_short_recording_not_kept():
+    """A session under min_record_min: no scan prompt, nothing sent, and once no restart came in 10 min its files
+    go to the Recycle Bin with one Activity line (no pop-up). Longer sessions, min 0 and unreadable files: kept."""
+    r, ui, clock, apex, sig, durs, ends, recycled, session = _crash_recorder()
+    durs["Apex Legends_2026.11.18-16.01.mp4"] = 170
+    session(3)
+    (k1,) = r.idx
+    assert ui.asked == 0 and r.queue == [] and r.scan_proc is None and r.idx[k1].status == "recorded"
+    assert k1 in r.waiting_keys() and not r.rescan(k1)              # waits: not scanned, not cleaned up
+    clock["t"] += 9 * 60; r.tick()
+    assert k1 in r.idx and recycled == []                           # still within the 10 min
+    clock["t"] += 2 * 60; r.tick(); r.tick()
+    assert k1 not in r.idx and set(recycled) == {"Apex Legends_2026.11.18-16.01.mp4",
+                                                 "Apex Legends_2026.11.18-16.01.events.json"}, recycled
+    assert ui.lines == ["Too short: not kept (Apex Legends_2026.11.18-16.01.mp4, 3 min)"], ui.lines
+    assert ui.notes == [] and ui.asked == 0 and r.hub.uploads == []
+    # a long one: the scan prompt as before
+    durs["Apex Legends_2026.11.18-16.02.mp4"] = 20 * 60
+    session(20)
+    assert ui.asked == 1 and len(r.idx) == 1
+    # unreadable file (length unknown): kept
+    session(2)
+    assert ui.asked == 2 and len(r.idx) == 2
+    # 0 = keep every session
+    r.s.min_record_min = 0
+    durs["Apex Legends_2026.11.18-16.04.mp4"] = 60
+    session(1)
+    assert ui.asked == 3 and len(r.idx) == 3
+    # short, then Apex started again without any crash sign: the short one goes at once, the new one is recorded
+    r.s.min_record_min = 5
+    durs["Apex Legends_2026.11.18-16.05.mp4"] = 120
+    session(2, gap=1)
+    apex["on"] = True; r.tick()
+    assert "Apex Legends_2026.11.18-16.05.mp4" in recycled and r.current is not None
+    assert ui.lines[-1] == "Too short: not kept (Apex Legends_2026.11.18-16.05.mp4, 2 min)"
+    assert sum(x.startswith("Too short") for x in ui.lines) == 2
+    assert r.s.min_record_min == settings.Settings().min_record_min == 5
+    assert settings.Settings(min_record_min=99).clamp().min_record_min == 30
+
+
+def test_in_progress_imported_and_older_never_touched():
+    """The recording in progress, files added by hand and recordings from before this change are never dropped."""
+    r, ui, clock, apex, sig, durs, ends, recycled, session = _crash_recorder()
+    folder = r.s.folder_path
+    by_hand = folder / "my clip.mp4"; by_hand.write_bytes(b"x")
+    durs["my clip.mp4"] = 30
+    old = folder / "Apex Legends_2026.11.01-10.00.mp4"; old.write_bytes(b"x")
+    durs[old.name] = 60
+    r.idx["rec-1"] = retention.Entry(path=str(old), started=clock["t"] - 3600, status="recorded")
+    retention.save_index(r.idx)
+    apex["on"] = True; r.tick()
+    cur = r.current
+    for _ in range(4):
+        clock["t"] += 5 * 60; r.tick()                     # 20 min of play
+    assert r.idx[cur].status == "recording" and recycled == []
+    durs["Apex Legends_2026.11.18-16.01.mp4"] = 120
+    apex["on"] = False; r.tick()                           # Apex closes after the in-progress one: kept (long run)
+    clock["t"] += 11 * 60; r.tick()
+    assert by_hand.exists() and old.exists() and "rec-1" in r.idx and recycled == []
+
+
+def test_short_kept_and_joined_after_crash():
+    """Apex crashed (crash sign at the end) and was started again within 10 min: the short first piece is kept, the
+    next recording continues it, and once that session ends both are joined (stream copy) into one recording with
+    the first one's name, checked, scanned; the originals go to the Recycle Bin only after the check."""
+    from pcs_recorder import stitch
+    import json
+    r, ui, clock, apex, sig, durs, ends, recycled, session = _crash_recorder(real=True, minutes=1)
+    if not _test_video(TMP / "probe.mp4", 1):
+        print("  (no ffmpeg: join test skipped)")
+        return
+    first = r.s.folder_path / "Apex Legends_2026.11.18-16.01.mp4"
+    r.events = []
+    session(2, crash="EA Javelin Anticheat: The game r5apex_dx12.exe exited unexpectedly", gap=3)
+    (k1,) = r.idx
+    assert ui.asked == 0 and k1 in r.js["holds"] and r.idx[k1].note == "Waiting: Apex may restart"
+    Path(first).with_suffix(".events.json").write_text(json.dumps({"tracks": ["game"], "events": [
+        {"t": 1.5, "kind": "mark"}]}), encoding="utf-8")
+    apex["on"] = True; r.tick()                             # restarted 3 min later: the next one continues it
+    assert ui.lines == ["Apex restarted after a crash: this recording will be joined with the one before."], ui.lines
+    k2 = r.current
+    r.events = [{"t": 0.5, "kind": "mark"}]
+    clock["t"] += 20 * 60
+    apex["on"] = False; r.tick()
+    assert ui.asked == 0 and r.js["joins"] == [[k1, k2]], r.js
+    for _ in range(200):                                    # ffmpeg runs in the background
+        if not r.js["joins"]:
+            break
+        time.sleep(0.1); r.tick()
+    assert not r.js["joins"] and list(r.idx) == [k1], (r.js, r.idx)
+    e = r.idx[k1]
+    assert Path(e.path) == first and first.exists(), e.path   # the first recording's name, now the whole session
+    assert abs(stitch.media_duration(e.path) - 7) < 0.5
+    assert {"Apex Legends_2026.11.18-16.01.mp4", "Apex Legends_2026.11.18-16.02.mp4"} <= set(recycled), recycled
+    assert not (r.s.folder_path / stitch.JOIN_DIR).exists()
+    ev = json.loads(first.with_suffix(".events.json").read_text(encoding="utf-8"))
+    ts = [x["t"] for x in ev["events"]]                     # second part's mark moved by the first part's length
+    assert len(ts) == 2 and ts[0] == 1.5 and abs(ts[1] - 3.5) < 0.1, ev
+    assert ev["joined"][0]["offset"] == 0 and abs(ev["joined"][1]["offset"] - 3.0) < 0.1, ev
+    assert ui.asked == 1 and e.note == "Joined after Apex crash (2 parts)"
+    assert ui.lines[-1].startswith("Joined after Apex crash: Apex Legends_2026.11.18-16.01.mp4 (2 recordings")
+    assert ui.notes == []
+
+
+def test_join_waits_for_apex_and_failed_join_keeps_both():
+    """A join is stopped when Apex starts (its unfinished file removed, started again later); a joined file that
+    fails the check (length, playable) is removed and both recordings are kept as they are, even a short one."""
+    from pcs_recorder import stitch
+    r, ui, clock, apex, sig, durs, ends, recycled, session = _crash_recorder(real=True, minutes=1)
+    if not _test_video(TMP / "probe.mp4", 1):
+        print("  (no ffmpeg: join test skipped)")
+        return
+    session(2, crash="Apex crash window (crashmsg.exe)", gap=1)
+    apex["on"] = True; r.tick()
+    clock["t"] += 10 * 60
+    apex["on"] = False; r.tick()                              # the session ends: the join starts in the same tick
+    job = r.join_job
+    assert job is not None
+    r._join_tick(True)                                        # Apex starts: stopped, nothing left behind
+    assert r.join_job is None and not job["out"].exists() and len(r.js["joins"]) == 1
+    real_check = stitch.check_joined
+    stitch.check_joined = lambda out, expected: (False, "the joined file can't be played")
+    try:
+        for _ in range(200):
+            if not r.js["joins"]:
+                break
+            time.sleep(0.1); r.tick()
+    finally:
+        stitch.check_joined = real_check
+    assert len(r.idx) == 2 and recycled == [] and all(Path(e.path).exists() for e in r.idx.values())
+    assert ui.lines[-1] == ("Not joined after Apex crash (the joined file can't be played): the recordings are kept "
+                            "as they are."), ui.lines
+    assert ui.asked == 2 and not (r.s.folder_path / stitch.JOIN_DIR).exists()
+
+
+def test_unsure_crash_keeps_recordings():
+    """When it can't be told: a crash sign but no restart = kept; the end of a short recording can't be read and
+    Apex restarts = both kept as they are; ended in game, no restart, short = not kept."""
+    r, ui, clock, apex, sig, durs, ends, recycled, session = _crash_recorder()
+    durs["Apex Legends_2026.11.18-16.01.mp4"] = 150
+    session(3, crash="Application Error: Faulting application name: r5apex_dx12.exe", gap=11)
+    assert len(r.idx) == 1 and recycled == [] and ui.asked == 1          # crashed, never restarted: kept, scanned
+    durs["Apex Legends_2026.11.18-16.02.mp4"] = 150
+    ends["Apex Legends_2026.11.18-16.02.mp4"] = None                     # its end can't be read
+    session(3, gap=2)
+    k2 = [k for k in r.idx if r.idx[k].path.endswith("16.02.mp4")][0]
+    assert k2 in r.js["holds"]
+    apex["on"] = True; r.tick()                                          # restart, no crash sign: unsure
+    assert k2 in r.idx and r.idx[k2].status == "waiting" and k2 in r.queue and recycled == []
+    k3 = r.current
+    durs["Apex Legends_2026.11.18-16.03.mp4"] = 100
+    clock["t"] += 2 * 60
+    apex["on"] = False; r.tick()
+    assert k3 in r.idx and k3 not in r.js["holds"]                       # the second one is kept too
+    durs["Apex Legends_2026.11.18-16.04.mp4"] = 150
+    ends["Apex Legends_2026.11.18-16.04.mp4"] = True                     # ended in game, never restarted
+    session(3, gap=11)
+    assert "Apex Legends_2026.11.18-16.04.mp4" in recycled
+
+
+def test_apex_crash_events_read():
+    """The event log lines about Apex (as wevtutil prints them on this PC) are recognised, others are not."""
+    from pcs_recorder import stitch
+    text = ("Event[0]\n  Log Name: Application\n  Source: EA Javelin Anticheat\n  Date: 2026-11-18T15:06:43.000\n"
+            "  Event ID: 1000\n  Level: Error\n  Description: \nThe game r5apex_dx12.exe exited unexpectedly, exit code: "
+            "0x40010004\n\nEvent[1]\n  Log Name: Application\n  Source: Application Error\n  Event ID: 1000\n"
+            "  Description: \nFaulting application name: KillerNetworkService.exe, version: 3.1122.104.2\n")
+    assert stitch.parse_events(text) == ["EA Javelin Anticheat: The game r5apex_dx12.exe exited unexpectedly, "
+                                         "exit code: 0x40010004"], stitch.parse_events(text)
+    assert stitch.parse_events("") == []
+    assert stitch.media_duration(str(TMP / "nothing.mp4")) is None
+    assert stitch.ended_in_game(str(TMP / "nothing.mp4"), None) is None
 
 
 def run_all(tests):

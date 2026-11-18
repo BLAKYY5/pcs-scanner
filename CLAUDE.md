@@ -278,6 +278,18 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
   are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
   it goes first, a refusal keeps the folder) (`pcs_core.clean_old_unpacked`).
+- **Debug overlay POS reads** (`pcs_hud.read_dbg`, 18 Nov 2026): the glyphs are matched as 9 x 7 black / white cells,
+  and a cell that fits no digit is '?'. The POS line must be three numbers from the line's start with a gap cell
+  between them (`POSRX`): the decimal point may read '-' or '?', the gap '-'; any other '?' makes the line unread.
+  Before, '?' could stand for the decimal point anywhere (15?63 read as 15.63 for 15863.63), a '?' in place of a
+  minus or first digit was skipped (?1607 for 11607, lost signs), and numbers were picked from anywhere in the line.
+  Checked against the HUD minimap position on 4 recordings (4,950 moments): wrong POS reads (> 1500 units off) 82 ->
+  15 (1.9 % -> 0.4 %), POS read at 89 % -> 83 % of those moments; no value that both versions read differs.
+  8 / 9 confusions (3-4 pixels apart; ties are common) are still possible: 10 of the 15 left are on 7 Nov.
+  `landing` takes VEL also from frames whose POS was refused (the free-fall start was found through them), and
+  `clean_pos` no longer flips the sign of values within 3000 of 0 (a landing at x 748 was turned to -748).
+  47 landings on the 4 recordings: no place name changed, one landing 6,471 units off is now 202 off, two moved by
+  0.5 % within the same place.
 - **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
   → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
   minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
@@ -412,6 +424,27 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   own state and tier the same on all 1620 keyframes, values within 2 on 1617 (3 health reads 3-7 apart on a damaged
   bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review player shows own knocks like respawns (a grey tick with a
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
+- **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
+  opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
+  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, feedLines [t]}] and
+  `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
+  damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
+  lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
+  has is not ours), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
+  health lost; joined when < 25 s apart. Result: kills decide (the player's own death in the fight counts as a kill on
+  us), then a lead of 2 knocks; a squad wiped in it = lost. Third party: more than 3 enemy names, a name first seen
+  >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
+  median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
+  29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
+  shield unchanged: ring damage skips shields; 3+ ticks with the shield up, 4+ without, or 2+ inside red edges; 1.5 s
+  tick from the deathfield script; 3-4 a tick seen); `read_storm` (share of red-tinted pixels in four thin edge strips,
+  own card alive only) only widens it: Storm Point's red grass and E-District's red-lit streets tint the strips like the
+  ring does. Damage = ticks lasted x tick size. Truths `pcs-handoff\checkset\checkset-fights.json` (dev 7 Nov, held
+  17 Nov, labelled on the feed line images + own card, frames for the ring): held fights found 18 / 19, result 18 / 18,
+  third party 12 / 15 (3 false); ring stretches 2 / 2, one false 8 s stretch of 1-point ticks. Weak spot: our own kill
+  lines on a red plate (+RP) are read with both sides 'squad' (pcs_hud.kill_parts): such a fight is missed.
+  The review player draws fights as bands on the kill feed lane (green won, grey lost, amber even, dashed = third party)
+  and time outside the ring as an orange bar on the rings lane, both in Events.
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:
