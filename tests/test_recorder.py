@@ -1988,6 +1988,9 @@ def test_mode_from_playlist_emblem():
     labels.set_label(pa, "ranked")
     assert labels.explain_block([pa, pb], [sa, sw]) == {"label": "ranked", "source": "hand", "why": "set by hand"}
     labels.FILE.unlink(missing_ok=True)
+    # the ranked banner since 17 Nov 2026 says "RANKED - DROPZONE" (one wide word): taught from 18 Nov
+    dz = "e4aaee077777f57a4aa8a055553954acea8a055552954aeecca655552956eaecca657552976eeee8a057574934eeaa8a056574934aaaa8a055544934aaaaee075747f17b2aaee065747617"
+    assert HUD.Banner.near(dz, 14.05, HUD.BANNER_T["mode"]) == "ranked"
 
 def _own_put(HUD, img, font, text, x_end=None, x_start=None, gap=2):
     """Draws a number of the own-stats strip with the reader's own digit shapes ('S' small white, 'B' big white,

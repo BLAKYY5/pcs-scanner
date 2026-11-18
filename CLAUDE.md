@@ -100,8 +100,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   emblemReads}; `games[].mode` = its mode or `unknown`. Order kept from before: RP panel -> ranked, drop screen ->
   scrim; then the other signs must agree. Two signs naming different modes, or the emblem of a playlist we can't
   name, = no mode (unlabelled), never a guess. Wildcard and pubs come from the loading banner's word (pubs: trios
-  only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`, any pubs playlist: duos too). The block label
-  (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
+  only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
+  emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
 - **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 only): the round emblem at
   the top right (x 2422..2539, y 8..123 at 1440p in a game; 134 px lower on the "waiting for players" screen). Pubs =
   red "unranked" emblem, Wildcard = teal; ranked shows a rank badge there instead. Compared as 16 x 16 colour cells on
@@ -337,7 +337,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   and the orange background filling the badge window at the wrong roster position (rejected by size). 16:9 only so far.
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
-  only: ranked, wildcard, pubs (the word TRIOS of pubs trios); SP, ED, BM so far). The table's mode keys are the
+  only: ranked (RANKED, and RANKED - DROPZONE read as one word since 17 Nov 2026), wildcard, pubs (the word TRIOS
+  of pubs trios); SP, ED, BM so far). The table's mode keys are the
   scanner's mode values, not the on-screen words. It gives `games[].banner`, the map when nobody opens it, and the
   `wildcard` / `pubs` mode and label. An unknown word is kept as `modeSig` / `mapSig`: name it in the table to
   teach it (pubs duos and other playlists are still unknown).
