@@ -2232,6 +2232,32 @@ def test_respawn_cards_and_events():
     assert own == [{'t': 236.0, 'who': 'self', 'how': 'dropship', 'deadSince': 200.0}], own
 
 
+def test_banner_pickup_and_beacon_from_status_lines():
+    """A dead card's status line says where the banner is (shapes in pcs_banner.json 'status'): DEATHBOX RECOVERY,
+    DELIVER TO BEACON (picked up), AWAITING RESPAWN (beacon used), RESPAWNING IN ss.cc (the mode's own respawn); a
+    respawn gets bannerAt / banner / beaconAt from 2 reads in a row of each."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_respawn as P
+    assert set(P.STATUS) >= {'box', 'held', 'awaiting', 'craft', 'respawning', 'timer'}
+    for k in ('box', 'held', 'awaiting', 'craft'):
+        m = np.zeros((17, 250), bool); m[:, 6:6 + P.SW] = P.STATUS[k]
+        assert P.status_of(m) == k, k
+    m = np.zeros((17, 250), bool); m[:, 6:6 + P.SW] = P.STATUS['respawning']; m[3:14, 190:200] = True
+    assert P.status_of(m) == 'timer'                                          # the line runs on: a timer
+    assert P.status_of(np.zeros((17, 250), bool)) is None
+    noise = np.random.default_rng(1).random((17, 250)) > 0.5
+    assert P.status_of(noise) is None                                         # grass, not words
+    D = lambda t, st: (float(t), st)
+    steps = P.banner_steps([D(100, 'box'), D(101, 'box'), D(105, 'held'), D(106, None), D(107, 'held'),
+                            D(120, 'awaiting'), D(121, 'awaiting'), D(125, 'respawning')])
+    assert steps == {'bannerAt': 105.0, 'banner': 'picked', 'beaconAt': 120.0}, steps
+    steps = P.banner_steps([D(100, 'craft'), D(101, 'craft'), D(110, 'held'), D(111, 'held'), D(112, 'awaiting')])
+    assert steps == {'bannerAt': 110.0, 'banner': 'crafted'}, steps                 # one awaiting read: not trusted
+    assert P.banner_steps([D(1, 'timer'), D(2, 'timer')]) == {'modeRespawn': True}
+    assert P.banner_steps([D(1, None), D(2, None)]) == {}
+
+
 def _own_card_frame(state, tier=(40, 140, 240), shield=0, health=100, dx=0):
     """A 1440p frame with the player's own card bottom left: shield segments (25 points each, 63 px apart from x 236)
     over a white health bar (rows 1344..1359), or the knocked look (red name, thin yellow bleed-out bar)."""

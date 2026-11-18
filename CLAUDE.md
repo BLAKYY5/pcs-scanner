@@ -368,6 +368,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   spectator-layout ring reads (`ownDeaths`); own view again later in the same game = respawned (`who: self`,
   `how: dropship` when a free fall follows). The card can't tell a beacon from a mobile beacon or a mode's own
   respawn (`how: card`). 16:9 only. `games[].respawns` is always present (empty list = none seen).
+  Banner and beacon (plan item 7): each dead card's status line is matched (`status_of`) on its first 96 px against
+  shapes from our recordings (`pcs_banner.json` `status`: DEATHBOX RECOVERY, RECOVER BANNER, CRAFT BANNER, DELIVER TO
+  BEACON, AWAITING RESPAWN, RESPAWNING..., RESPAWNING IN ss.cc; IoU ≥ 0.45 with a margin, else none). A teammate respawn
+  gets `bannerAt` (first of 2 DELIVER TO BEACON reads in a row: a teammate holds the banner), `banner` (picked / crafted
+  by what came before), `beaconAt` (first AWAITING RESPAWN / RESPAWNING... run), `modeRespawn` (Wildcard timer); only
+  the steps read. Held-out (7 / 17 Nov): status reads 56 of 60 sampled named, all right, 4 left unnamed; beacon use
+  4 of 4 within 1 s; banner pickup 1 of 1 where the DELIVER line showed (in 3 respawns box -> awaiting came between
+  keyframes or off screen). GPU vs CPU: 89 of 92 keyframes the same, the rest named vs unnamed, never two names.
+  Review Events: "... respawned · back after m:ss · banner picked up at +m:ss · beacon at +m:ss".
   Cards are found by the line under the name (one-letter names exist); a status line is 17 rows from x 186 with many
   colour changes (grass behind the cards gives lime too). Card rows per game = the two rows read most (Wildcard sits
   at 1035 / 1149). A frame without a ring-clock read counts as own view unless inside a spectating run (Wildcard shows
