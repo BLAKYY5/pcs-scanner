@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -312,6 +313,7 @@ class Backend:
                 core.youtube_service(True)
                 self.youtube = "ok"
                 self.say("Signed in to YouTube. Scrim blocks will be uploaded to the channel you picked.")
+                self.google_to_hub(force=True)          # the team hub learns which Google account this is
             except Exception as e:
                 self.say(f"YouTube sign-in failed: {e}")
         threading.Thread(target=go, daemon=True).start()
@@ -816,9 +818,37 @@ class Backend:
         return weaponicons.from_hub(self.auto.s.hub_url if self.auto else "", core.ICONS_F)
 
     def _icons_soon(self) -> None:
-        """The hub (or its key) changed: look for its weapon icons now, in the background."""
+        """The hub (or its key) changed: look for its weapon icons now, in the background (and tell it which Google
+        account this player is)."""
         self._icons_thread = threading.Thread(target=self.sync_icons, args=(0, False), daemon=True)
         self._icons_thread.start()
+        threading.Thread(target=self.google_to_hub, daemon=True).start()
+
+    def google_to_hub(self, force: bool = False) -> str:
+        """Once per hub + key (and again after a new Google sign-in, `force`): send the Google ID token to the hub,
+        which records the player's Google account on the key (leaving-Drive plan step 7/8). Returns "sent", "done"
+        (already sent for this hub and key), "no_hub", "no_signin" (not signed in with Google, or an older
+        YouTube-only sign-in) or "failed: <why>". Never raises; the token is never logged nor kept."""
+        from pcs_recorder import hub
+        a = self.auto
+        url, key = (a.s.hub_url if a else ""), hub.get_key()
+        if not url or not key:
+            return "no_hub"
+        mark = hub._fp(url + "|" + key)
+        if not force and core.SETTINGS.get("google_hub") == mark:
+            return "done"
+        tok = core.google_id_token()
+        if not tok:
+            return "no_signin"
+        try:
+            hub.send_google(url, tok)
+        except Exception as e:                       # older hub (404), not turned on (503), offline: next start
+            logging.info("Google account not sent to the hub: %s", e)
+            return f"failed: {e}"
+        core.SETTINGS["google_hub"] = mark
+        core.save_settings()
+        logging.info("Google account sent to the hub")
+        return "sent"
 
     def _use_invite(self, url: str, code: str) -> None:
         """Redeem a single-use invite and keep the key it gives and the link's address (replacing an old address:

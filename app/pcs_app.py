@@ -454,6 +454,7 @@ def main():
         b.check_google()
         b.check_coach()
         b.check_youtube()
+        b.google_to_hub()                                  # once per hub + key: which Google account this player is
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)

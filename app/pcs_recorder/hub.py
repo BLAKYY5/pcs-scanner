@@ -333,6 +333,16 @@ def upload(url: str, files: list[Path], player: str = "") -> dict:
         return {}
 
 
+def send_google(url: str, id_token: str) -> dict:
+    """Tell the hub which Google account this key's player signed in with (hub 0.6 `POST /api/me/google`): the hub
+    checks the ID token with Google and keeps the account id and email on the key. Returns {"email", ...}.
+    Raises HubError (404 = older hub, 503 = the coach hasn't turned it on). The token is never logged."""
+    r = request(url, "POST", "/api/me/google", json={"id_token": id_token}, timeout=20)
+    _check(r)
+    d = r.json()
+    return d if isinstance(d, dict) else {}
+
+
 def summary(answer: dict) -> str:
     """The hub's answer in one line for the player: "Sent to hub: 11 games", or the hub's note on a failure."""
     imports = answer.get("imports") if isinstance(answer, dict) else None

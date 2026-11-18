@@ -156,6 +156,10 @@ def drive_service(interactive=True):
     return build('drive', 'v3', credentials=creds, cache_discovery=False)
 
 YT_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+# One Google sign-in (leaving-Drive plan step 8): who the player is (openid + email, sent once to the team hub) and
+# YouTube upload, in one consent. Sign-ins from before (YouTube only) keep working for uploads as they are; they give
+# no identity until the player signs in again.
+SIGNIN_SCOPES = ['openid', 'https://www.googleapis.com/auth/userinfo.email'] + YT_SCOPES
 YT_TOKEN_F = os.path.join(DATA, 'youtube_token.json')
 
 def youtube_service(interactive=True):
@@ -163,7 +167,7 @@ def youtube_service(interactive=True):
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
-    creds = _saved_creds(YT_TOKEN_F, YT_SCOPES)
+    creds = _saved_creds(YT_TOKEN_F, None)          # the scopes it was granted: refreshing never asks for more
     if creds and creds.expired and creds.refresh_token:
         try: creds.refresh(Request())
         except Exception: creds = None
@@ -171,10 +175,27 @@ def youtube_service(interactive=True):
         if not interactive: return None
         client = os.path.join(HERE, 'client.json')
         if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask your coach for a new build.')
-        creds = InstalledAppFlow.from_client_secrets_file(client, YT_SCOPES).run_local_server(port=0, open_browser=True,
-            success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
+        creds = InstalledAppFlow.from_client_secrets_file(client, SIGNIN_SCOPES).run_local_server(port=0, open_browser=True,
+            success_message='PCS Scanner is signed in with Google and can upload to the team YouTube channel. You can close this tab.')
         write_token(YT_TOKEN_F, creds.to_json())
     return build('youtube', 'v3', credentials=creds, cache_discovery=False)
+
+def google_id_token():
+    """The Google ID token of the player's sign-in (for the team hub to learn which Google account this player is), or
+    None: not signed in, a YouTube-only sign-in from an older version, or Google not reachable. A fresh one each
+    time (refreshed: valid about an hour). Never logged."""
+    from google.auth.transport.requests import Request
+    creds = _saved_creds(YT_TOKEN_F, None)
+    if not creds or 'openid' not in (creds.scopes or []) or not creds.refresh_token:
+        return None
+    try:
+        creds.refresh(Request())
+    except Exception as e:
+        logging.info('Google sign-in not refreshed for the hub (%s)', e.__class__.__name__)
+        return None
+    try: write_token(YT_TOKEN_F, creds.to_json())
+    except Exception: pass
+    return getattr(creds, 'id_token', None) or None
 
 def scans_folder(svc):
     q = f"name = '{FOLDER}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"

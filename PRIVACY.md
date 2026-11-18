@@ -18,6 +18,9 @@ removing PCS Scanner from <https://myaccount.google.com/permissions>.
 - **YouTube** (`youtube.upload`): if you turn on YouTube upload, the app uploads the videos of your scrim
   blocks to the YouTube channel you pick when signing in, with a title and description. It cannot read,
   change or delete any video.
+- **Who you are** (`openid`, `email`): the same Google sign-in tells the app your Google account id and email
+  address. If you are on your team's hub, the app sends it there once, so your coach sees which Google account
+  each hub key belongs to. Only your coach sees it; other players don't. It is not used for anything else.
 
 ## What stays on your PC
 

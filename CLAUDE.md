@@ -145,6 +145,13 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
 - **No secrets in app.log**: `obsws_python` logs its password at INFO; it is set to WARNING and every log line goes
   through `pcs_core.redact`. `scrub_log` cleans old lines at start; the obs-websocket password is renewed once
   (`obs.renew_password`, only while our OBS is closed).
+- **One Google sign-in** (leaving-Drive plan step 8): the YouTube sign-in asks `openid`, `userinfo.email` and
+  `youtube.upload` in one consent (`core.SIGNIN_SCOPES`); `youtube_token.json` is loaded with the scopes it was granted
+  (`_saved_creds(..., None)`), so older YouTube-only sign-ins keep uploading and are never refreshed with more.
+  `core.google_id_token()` refreshes it for a fresh ID token (None without `openid`). `Backend.google_to_hub` sends it
+  to the hub (`POST /api/me/google`, hub `hub/googleid.py`) once per hub + key (`google_hub` = fingerprint in
+  settings), again after a new sign-in; at start, after a join or key change. The token is never logged or kept.
+  The Drive sign-in (`drive.file`, `google_token.json`) is separate and only used without a hub.
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
