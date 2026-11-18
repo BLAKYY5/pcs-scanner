@@ -36,6 +36,8 @@
 .mm-k.kill,.mm-k.down{border-radius:0;background:linear-gradient(45deg,transparent 40%,#ff453a 40%,#ff453a 60%,transparent 60%),linear-gradient(-45deg,transparent 40%,#ff453a 40%,#ff453a 60%,transparent 60%)}
 .mm-k.down{background:linear-gradient(45deg,transparent 40%,#b8b5ad 40%,#b8b5ad 60%,transparent 60%),linear-gradient(-45deg,transparent 40%,#b8b5ad 40%,#b8b5ad 60%,transparent 60%)}
 .mm-k.note{background:#ffd60a;border-radius:1px}
+.mm-k.care{background:#121211;border:2px solid #f1efea;border-radius:1px;transform:rotate(45deg);width:7px;height:7px}
+.mm-k.sh{background:#e8365a;border-radius:2px}
 .mm-head .btn.on{border-color:var(--accent);color:var(--ink)}
 .mm-squad{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:12px}
 .mm-squad span{display:inline-flex;align-items:center;gap:5px}

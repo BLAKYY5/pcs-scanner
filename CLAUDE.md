@@ -344,6 +344,22 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   circle in round k + 1's wait; `rUnits` from the map scale in `CAL`), `ringSpeed` (`closing`: radius change per
   second while the player watches it close; `ends`: radius drop / closing time). Stage = the ring phase running at
   that moment (`games[].ring`), so rounds must be numbered for stages (None otherwise).
+- **Care packages and strongholds** (`pcs_mapicons.py`, every `ICONS_EVERY` = 2 s of full map, ~0.35 s a read):
+  care package = a light diamond (|dx| + |dy| ~ 23.5 px at 1440p, same size zoomed or not) with a helmet inside; the
+  helmet is compared with `CARE_SIGNS` (12 x 12 signs derived from the RSX `care_package_icon`, never the image).
+  Looks: white or yellow outline on a dark fill, and "opened" (yellow, a line across, see-through fill; glyph match only
+  0.45-0.58, accepted with the line). Strongholds: the red fill of `stronghold_map_available_icon` (can be taken; drawn
+  larger for a while, up to ~66 px) or its door light on black (taken), by `DOOR_SIGNS` (normalised correlation <= -0.5
+  plus a dark fill / light door test). The map's crosshair lines cross icons: the red mask is closed before labelling.
+  Per game: `carePackages` (grouped within 1.5 %, reads before ring 1 starts closing dropped, `n` 1-4 by the ring
+  phase of the first sight, `nSure` when first seen in its own announcement round; packages first seen together:
+  opened ones count as older), `strongholds` (within 2 %; a taken one never seen red needs 2 reads),
+  `carePackageRingCheck`. In scrims and pubs the packages are on the map from the drop; in ranked only once revealed
+  (17 Nov ranked: 1 game of 17). Checked by eye (3, 4, 7, 15, 17 Nov, 222 map frames): no false care package or
+  stronghold; every visible care package found (20 of 20 at the last frame of each map open; one hidden under player
+  arrows), strongholds 7 of 7 (one, drawn large, was missed until the size limit was raised).
+  First data on the coach's rule (packages 1-2 inside ring 2): in our scrims they landed inside ring 1's end circle
+  and outside ring 2's (see the PR); keep `inRings` for every read ring.
 - **Respawns** (`pcs_respawn.py`): teammate cards bottom left (names at x 184, rows 1058 / 1146 at 1440p in own
   view and on the full map; 85 px higher while spectating). Dead = a lime status line under the name (DEATHBOX
   RECOVERY, RECOVER BANNER, CRAFT BANNER, DELIVER TO BEACON, AWAITING RESPAWN, RESPAWNING); alive = the health bar.
