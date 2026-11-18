@@ -1043,6 +1043,88 @@ def test_sound_ring_moving():
         assert [round(c["t"]) for c in r["cues"]["ring_moving"]] == [30, 80], r
 
 
+def test_sound_ring_cross_check():
+    """Screen and sound check each other: a weak alarm right after a countdown read on screen confirms it (only
+    there: the same weak alarm elsewhere is ignored), and an alarm while the screen shows the ring closing is not a
+    ring start (kept apart with the reason)."""
+    import json
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_audio as A
+    # the alarm level per 64 ms frame (what tone_level gives): loud alarms at 30 and 120 s, weak ones (8 dB, under
+    # the normal 9 dB bar) at 70 and 160 s, background 2 dB
+    T = np.arange(0, 200, A.HOP / A.SR)
+    level = np.full(len(T), 2.0)
+    for start, db in ((30.0, 25.0), (70.0, 8.0), (120.0, 25.0), (160.0, 8.0)):
+        for k in range(3):
+            level[(T >= start + 1.75 * k) & (T < start + 1.75 * k + 1.0)] = db
+    c = A.TONE_CUES["ring_moving"]
+    found = {"seconds": 200.0, "cues": {"ring_moving": A.runs(T, level, c["min_db"], c["min_len"], c["merge"])},
+             "_ring": (T, level)}
+    assert [round(c["t"]) for c in found["cues"]["ring_moving"]] == [30, 120], found["cues"]
+    games = [{"tStart": 0, "ring": [
+        {"kind": "wait", "firstSeen": 10, "endsAt": 29.6},
+        {"kind": "wait", "firstSeen": 50, "endsAt": 69.8},         # weak alarm at 70: confirmed by the screen
+        {"kind": "closing", "firstSeen": 100, "endsAt": 140},      # alarm at 120 while closing: not a ring start
+    ]}]
+    A.attach(games, found)
+    r = games[0]["ring"]
+    assert abs(r[0]["soundAt"] - 30) < 0.5 and "soundWeak" not in r[0], r
+    assert abs(r[1]["soundAt"] - 70) < 0.6 and r[1]["soundWeak"] is True and r[1]["soundDb"] > 7, r
+    assert "soundAt" not in r[2], r
+    assert games[0]["ringSound"] == [], games[0]
+    assert [(round(x["t"]), x["why"]) for x in games[0]["ringSoundOther"]] == [(120, "closing")], games[0]
+    assert found["ringWeak"] == 1 and "_ring" not in found
+    json.dumps(found)                                         # what the scan saves stays plain JSON
+    # a countdown still running far from its end also rejects an alarm; no countdown: the alarm is kept
+    assert A.screen_says_not_ring([{"kind": "wait", "firstSeen": 0, "endsAt": 100}], 50) == "countdown"
+    assert A.screen_says_not_ring([{"kind": "wait", "firstSeen": 0, "endsAt": 100}], 99) is None
+    assert A.screen_says_not_ring([], 50) is None
+
+
+def test_sound_damage_single_read():
+    """A damage total that rests on one read is kept when the game was loud between the read before it and that
+    read (hits), and refused when it was quiet; totals read twice are never touched."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_audio as A
+    sr = A.SR
+    rng = np.random.default_rng(3)
+    a = rng.normal(0, 0.003, sr * 300).astype(np.float32)          # quiet game sound
+    a[int(98.5 * sr):int(99.5 * sr)] += rng.normal(0, 0.2, sr).astype(np.float32)   # gunfire before the read at 100
+    loud = A.loudness(a)
+    assert len(loud) == 300 / A.LOUD_STEP
+
+    def game(t, prev, single=True):
+        return {"tStart": 0, "tEndGame": 290, "own": {"kills": 1, "damage": 400, "damageAt": t, "damageLastRead": t,
+                                                      "damageSingleRead": single, "damagePrevReadAt": prev}}
+    games = [game(100, 98), game(200, 198), game(200, 198, single=False), game(100, 99.8)]
+    assert A.check_damage(games, loud) == 1
+    kept, refused, twice, close = (g["own"] for g in games)
+    assert kept["damage"] == 400 and kept["damageSoundDb"] > A.DAMAGE_QUIET_DB, kept
+    assert "damage" not in refused and refused["damageRefused"] == "quiet" and refused["kills"] == 1, refused
+    assert twice["damage"] == 400 and "damageSoundDb" not in twice, twice
+    assert close["damage"] == 400, close                     # the window starts 1 s before the previous read
+    # through attach (as the scan calls it)
+    found = {"cues": {"ring_moving": []}, "_loud": loud}
+    gs = [game(200, 198)]
+    A.attach(gs, found)
+    assert found["damageRefused"] == 1 and "_loud" not in found and "damage" not in gs[0]["own"]
+    # the developer tool that scores these checks on a scan
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import audio_cross
+    before = [{"tStart": 0, "tEndGame": 300, "ring": [{"kind": "wait", "endsAt": 100, "soundAt": 100.4},
+                                                       {"kind": "wait", "endsAt": 200}, {"kind": "wait", "endsAt": 400}],
+               "ringSound": [150.0], "own": {"damage": 400, "damageAt": 200, "damageSingleRead": True}}]
+    after = [{"tStart": 0, "tEndGame": 300, "ring": [{"kind": "wait", "endsAt": 100, "soundAt": 100.4},
+                                                      {"kind": "wait", "endsAt": 200, "soundAt": 200.5, "soundWeak": True},
+                                                      {"kind": "wait", "endsAt": 400}],
+              "ringSound": [], "ringSoundOther": [{"t": 150.0, "why": "closing"}], "own": {"damageRefused": "quiet"}}]
+    rows, tot = audio_cross.score(before, after)
+    assert tot == {"rings": 2, "heardBefore": 1, "heardAfter": 2, "weak": 1, "unexplainedBefore": 1, "unexplainedAfter": 0,
+                   "other": 1, "singleDamage": 1, "damageRefused": 1}, tot
+
+
 def test_scanner_no_function_defined_twice():
     """A second function with the same name silently replaces the first one (the scanner's files are long): a new
     helper once took the name of the pre-ring clock's helper and every scan failed. Caught here instead."""
@@ -1466,6 +1548,7 @@ def test_squads_left_counter():
     SCAN.timeline(games, [], own=own)
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
+    assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
 
 
 def test_game_end_time():
