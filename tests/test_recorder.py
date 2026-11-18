@@ -2377,6 +2377,43 @@ def test_fast_colour_masks_identical():
     assert HUD.read_ring(img) == HUD.read_ring(img.astype(np.int16)) and HUD.read_dbg(img) == HUD.read_dbg(img.astype(np.int16))
 
 
+def test_debug_overlay_misreads():
+    """The debug overlay's POS line: a clear line is read; an unreadable cell is never taken for a digit gap: a '?'
+    inside a number (15?63 for 15863.63) or where a minus sign or first digit was (?1607 for 11607) gives no position
+    from that frame instead of a wrong one. The decimal point read as '-' or '?' and the gap before a minus read as
+    '-' are fine."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    def frame(text, y=22):
+        img = np.zeros((1440, 2560, 3), np.uint8)
+        for i, ch in enumerate(text):
+            x = 3 + 8 * (6 + i)
+            if ch == '.':
+                img[40 + y + 7:40 + y + 9, x + 2:x + 4] = 255
+            elif ch == '#':                                        # an unreadable blob
+                img[40 + y:40 + y + 9, x:x + 7] = 255
+            elif ch != ' ':
+                g = np.array(HUD.DBG_T[ch], bool)
+                img[40 + y:40 + y + 9, x:x + 7][g] = 255
+        return img
+    assert HUD.read_dbg(frame("29619.14 -26234.44 1149.94")) == ([29619.14, -26234.44, 1149.94], None)
+    assert HUD.read_dbg(frame("29619#14 -26234.44 1149.94#"))[0] == [29619.14, -26234.44, 1149.94]   # a '?' point
+    assert HUD.read_dbg(frame("15#63.82 -5643.20 5882.23"))[0] is None            # not 15.63
+    assert HUD.read_dbg(frame("#1607.77 -30548.06 6348.02"))[0] is None           # not 1607.77
+    assert HUD.read_dbg(frame("#24217.65 33525.88 867.56"))[0] is None            # a lost minus sign
+    assert HUD.read_dbg(frame("100.00 200.00"))[0] is None                        # two numbers only
+    for line, xyz in (("28619-14--26234-44 1148-94   ?", (28619.14, -26234.44, 1148.94)),
+                      ("-28653?76--18149-44 707-08   -", (-28653.76, -18149.44, 707.08)),
+                      ("15830-75 -26232-44 1270-57?-  ", (15830.75, -26232.44, 1270.57))):
+        g = HUD.POSRX.match(line).groups()
+        assert tuple(float(g[2 * i] + '.' + g[2 * i + 1]) for i in range(3)) == xyz
+    for line in ("15?63-82--5643-20-5882-23  ---", "?1607-77--30548-06 6348-02   ?", "?28744-84--19830-08 545-97   -",
+                 "-7?77-31-27333-04-8092-86-----"):
+        assert HUD.POSRX.match(line) is None
+    assert HUD.read_dbg(frame("299.00", y=50))[1] == 299.0                        # VEL line as before
+
+
 def _tools():
     root = Path(__file__).resolve().parent.parent
     for p in (root / "scanner", root / "tools"):

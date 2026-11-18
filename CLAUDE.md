@@ -277,6 +277,18 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
   are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
   it goes first, a refusal keeps the folder) (`pcs_core.clean_old_unpacked`).
+- **Debug overlay POS reads** (`pcs_hud.read_dbg`, 18 Nov 2026): the glyphs are matched as 9 x 7 black / white cells,
+  and a cell that fits no digit is '?'. The POS line must be three numbers from the line's start with a gap cell
+  between them (`POSRX`): the decimal point may read '-' or '?', the gap '-'; any other '?' makes the line unread.
+  Before, '?' could stand for the decimal point anywhere (15?63 read as 15.63 for 15863.63), a '?' in place of a
+  minus or first digit was skipped (?1607 for 11607, lost signs), and numbers were picked from anywhere in the line.
+  Checked against the HUD minimap position on 4 recordings (4,950 moments): wrong POS reads (> 1500 units off) 82 ->
+  15 (1.9 % -> 0.4 %), POS read at 89 % -> 83 % of those moments; no value that both versions read differs.
+  8 / 9 confusions (3-4 pixels apart; ties are common) are still possible: 10 of the 15 left are on 7 Nov.
+  `landing` takes VEL also from frames whose POS was refused (the free-fall start was found through them), and
+  `clean_pos` no longer flips the sign of values within 3000 of 0 (a landing at x 748 was turned to -748).
+  47 landings on the 4 recordings: no place name changed, one landing 6,471 units off is now 202 off, two moved by
+  0.5 % within the same place.
 - **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
   → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
   minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
