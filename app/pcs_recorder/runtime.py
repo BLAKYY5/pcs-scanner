@@ -770,7 +770,9 @@ class AutoRecorder:
         self.thread = threading.Thread(target=loop, daemon=True)
         self.thread.start()
 
-    def tray(self, show_window, quit_app, open_settings=None) -> None:
+    def tray(self, show_window, quit_app, open_settings=None, update=None) -> None:
+        """update: (text(), run(), can_run(), shown()) for the menu's Update item ("Update to vX" / "Updating…",
+        greyed out while an update runs); call self.ui.icon.update_menu() when they change."""
         try:
             import pystray
             from PIL import Image, ImageDraw
@@ -785,9 +787,15 @@ class AutoRecorder:
             d = ImageDraw.Draw(img)
             d.ellipse((6, 6, 58, 58), fill=(186, 28, 20))
             d.ellipse((24, 24, 40, 40), fill=(255, 255, 255))
+        extra = []
+        if update:
+            text, run, can_run, shown = update
+            extra.append(pystray.MenuItem(lambda _: text(), lambda: run(), enabled=lambda _: can_run(),
+                                          visible=lambda _: shown()))
         menu = pystray.Menu(
             pystray.MenuItem(lambda _: ("● " if self.s.enabled else "○ ") + self.rec.status, None, enabled=False),
             pystray.MenuItem("Open PCS Scanner", lambda: self.ui.on_main(show_window), default=True),
+            *extra,
             pystray.MenuItem("Settings…", lambda: self.ui.on_main(open_settings or self.open_settings)),
             pystray.MenuItem("Open recordings folder", lambda: os.startfile(self.s.folder_path) if os.name == "nt" else None),
             pystray.MenuItem("Quit", lambda: (self.ui.icon.stop(), self.ui.on_main(quit_app))),

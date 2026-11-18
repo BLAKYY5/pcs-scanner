@@ -335,18 +335,25 @@ class _HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
             raise urllib.error.URLError('update download redirected to an unexpected address')
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
-def download(url, dest):
-    """Download to dest over HTTPS only. -> SHA-256 (hex) of what was written."""
+def download(url, dest, progress=None, size=None):
+    """Download to dest over HTTPS only. -> SHA-256 (hex) of what was written. progress(done, total) after each
+    chunk (total: the server's length, else size, else 0 = unknown)."""
     import hashlib
     opener = urllib.request.build_opener(_HttpsOnlyRedirect)
     h = hashlib.sha256()
     req = urllib.request.Request(url, headers={'User-Agent': APP})
     with opener.open(req, timeout=60) as r, open(dest, 'wb') as out:
+        try: total = int(r.headers.get('Content-Length') or 0) or int(size or 0)
+        except (TypeError, ValueError, AttributeError): total = int(size or 0)
+        done = 0
+        if progress: progress(0, total)
         while True:
             chunk = r.read(1 << 20)
             if not chunk: break
             h.update(chunk)
             out.write(chunk)
+            done += len(chunk)
+            if progress: progress(done, total)
     return h.hexdigest()
 
 def ulog(msg):
@@ -358,11 +365,13 @@ def staged_path(cur=None):
     cur = cur or sys.executable
     return os.path.join(os.path.dirname(cur), 'PCS-Scanner.update.exe')
 
-def install_update(url, log, size=None, show=False, digest=None):
+def install_update(url, log, size=None, show=False, digest=None, step=None):
     """Download the new exe next to the current one and start it with --finish-update: once this app has
     closed, the new exe copies itself over the old one and starts it (log in update.log). show = the player pressed
     Update in the open window: the new version opens its window; otherwise it starts in the tray. digest = GitHub's
-    "sha256:<hex>" of the release file: the download must match it."""
+    "sha256:<hex>" of the release file: the download must match it. step(name, done=0, total=0) tells the window's
+    "Updating" screen where it is: 'download' (bytes so far, of total), 'check' (size + SHA-256), 'restart'."""
+    step = step or (lambda name, done=0, total=0: None)
     if not getattr(sys, 'frozen', False): return False
     if not update_url_ok(url):
         ulog(f'refused: not a release address of this app: {url}')
@@ -375,11 +384,12 @@ def install_update(url, log, size=None, show=False, digest=None):
     ulog(f'download {url} -> {new}')
     tmp = new + '.part'
     try:
-        sha = download(url, tmp)
+        sha = download(url, tmp, progress=lambda done, total: step('download', done, total), size=size)
     except Exception:
         if os.path.exists(tmp): os.remove(tmp)
         raise
     got = os.path.getsize(tmp)
+    step('check', got, size or got)
     with open(tmp, 'rb') as f: head = f.read(2)
     if head != b'MZ' or (size and got != size):
         os.remove(tmp)
@@ -392,6 +402,7 @@ def install_update(url, log, size=None, show=False, digest=None):
     ulog(f'SHA-256 {sha}' + (' matches the release' if want else ' (the release lists none: size checked only)'))
     os.replace(tmp, new)
     ulog(f'downloaded {got} bytes; starting the finisher')
+    step('restart', got, size or got)
     spawn_detached([new, '--finish-update', cur, str(os.getpid())] + (['--show'] if show else []))
     log('Update downloaded: PCS Scanner restarts in a few seconds.')
     return True
