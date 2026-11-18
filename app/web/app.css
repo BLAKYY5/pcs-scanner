@@ -303,4 +303,9 @@ input:disabled{opacity:.5}
 .steps .act{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
 .steps .act input{flex:1;min-width:150px}
 .steps .msg{grid-column:2/-1;font-size:13.5px}
-@media(max-width:900px){.steps>li{grid-template-columns:30px minmax(0,1fr)}.steps .act{grid-column:2;justify-content:flex-start}}
+.steps .choices{grid-column:2/-1;display:grid;gap:2px}
+.steps .choice{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 14px;align-items:center;padding:7px 0;border-top:1px dashed var(--line)}
+.steps .choice b{font-weight:600}.steps .choice .pill{margin-left:6px;font-size:11.5px}
+.steps .choice .act{flex-wrap:nowrap}.steps .choice .btn{min-width:56px}
+@media(max-width:900px){.steps>li{grid-template-columns:30px minmax(0,1fr)}.steps .act{grid-column:2;justify-content:flex-start}
+  .steps .choice{grid-template-columns:minmax(0,1fr)}.steps .choice .act{grid-column:1}}

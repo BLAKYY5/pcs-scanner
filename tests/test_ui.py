@@ -208,6 +208,7 @@ class _S:            # recorder settings stand-in
     encoder, gb_per_hour = "av1_texture_amf", 5.5
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     mic_device = "default"
+    share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -1576,13 +1577,18 @@ def test_tailscale_state():
 
 
 def test_setup_card_page():
-    """Home's "Get set up" card: the four steps in order (auto-record second, so its setup runs while the player does
-    the rest), the join call, and the consent line: comms are never switched on from the card."""
+    """Home's "Get set up" card: name, the choices (auto-record, mic sharing, transcripts: one screen, one line each),
+    hub, Google; the join call; the choices go through /api/setup/choice. Done once both questions are answered."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
-    order = [setup.index(t) for t in ("Your EEC name", "Record Apex by itself", "Join the team hub", "Google Drive")]
+    order = [setup.index(t) for t in ("Your EEC name", "Your choices", "Record Apex by itself",
+                                      "Share mic tracks with my team", "Comms transcripts", "Join the team hub",
+                                      "Google Drive")]
     assert order == sorted(order), order
-    assert "/api/hub/join" in js and "comms_consent" not in setup and "not recorded until you turn them on" in setup
+    assert "/api/hub/join" in js and "/api/setup/choice" in js
+    assert "Only if your team agreed that comms are recorded" in setup and "Coming later" in setup
+    done = js[js.index("function setupDone"):js.index("function choiceHTML")]
+    assert "choicesDone(st)" in done and "st.rec" not in done           # auto-record off is a valid answer
     b = pcs_server.Backend(_Auto(str(TMP / "setuprecs")))
     assert b.state()["recorder"]["settingUp"] is False
     b.auto._setting_up = True
@@ -3508,6 +3514,234 @@ def test_hub_backup_failure_message_rule():
     finally:
         hubbackup.system_drive = real_sd
         _backup_done(srv, fake)
+
+
+# ---------------------------------------------------------------- setup choices, teammates' mic tracks
+
+def test_setup_choices():
+    """The setup step's three choices, applied at once. Mic sharing yes = comms consent, mic recorded and sent, shared;
+    no = only the answer kept (nothing switched on). Transcripts: only the answer. Auto-record: on / off."""
+    from pcs_recorder import settings as st
+    st_save = st.save
+    st.save = lambda s: None
+    b = pcs_server.Backend(_Auto(str(TMP / "choicerecs")))
+    b._sync_sharing = lambda: None
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        s = b.auto.s
+        s.send_mic, s.mic_audio = False, False                  # turned off earlier by the player
+        code, r, _ = call(srv, "/api/setup/choice", {"choice": "share", "on": False})
+        assert code == 200 and s.share_asked and not s.share_tracks and not s.comms_consent and not s.send_mic
+        assert r["recorder"]["settings"]["share_asked"] is True
+        code, r, _ = call(srv, "/api/setup/choice", {"choice": "share", "on": True})
+        assert code == 200 and s.share_tracks and s.comms_consent and s.mic_audio and s.send_mic   # Send my mic: on
+        assert s.transcript_asked is False and s.transcript_consent is False
+        call(srv, "/api/setup/choice", {"choice": "transcripts", "on": True})
+        assert s.transcript_asked and s.transcript_consent
+        call(srv, "/api/setup/choice", {"choice": "transcripts", "on": False})
+        assert s.transcript_asked and not s.transcript_consent
+        said = []
+        b.say = said.append
+        call(srv, "/api/setup/choice", {"choice": "autorecord", "on": False})
+        assert s.enabled is False and said == ["Auto-record is off."]
+        assert call(srv, "/api/setup/choice", {"choice": "bogus", "on": True})[0] == 500
+        # Settings: changing a switch counts as an answer too
+        s2 = pcs_server.Backend(_Auto(str(TMP / "choicerecs2")))
+        s2._sync_sharing = lambda: None
+        s2.save_settings({"transcript_consent": True})
+        assert s2.auto.s.transcript_asked and not s2.auto.s.share_asked
+    finally:
+        srv.stop()
+        st.save = st_save
+    assert st.Settings().transcript_consent is False and st.Settings().share_tracks is False   # off until yes
+
+
+def test_new_install_autorecord_on():
+    """Auto-record is on for a new install (no recorder.json yet); an existing install keeps its own choice."""
+    from pcs_recorder import settings as st
+    real = st.SETTINGS_FILE
+    try:
+        st.SETTINGS_FILE = TMP / "newinstall" / "recorder.json"
+        st.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        st.SETTINGS_FILE.unlink(missing_ok=True)
+        assert st.load().enabled is True
+        s = st.load()
+        s.enabled = False
+        st.save(s)
+        assert st.load().enabled is False
+        assert st.Settings().enabled is False                   # the dataclass default is unchanged
+    finally:
+        st.SETTINGS_FILE = real
+    app = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+    assert "b.auto.s.enabled and not b.auto.s.encoder" in app and "b.auto.enable()" in app   # first start: setup
+
+
+MIC_BYTES = b"\x00\x00\x00\x18ftypM4A " + bytes(range(256)) * 2000
+
+
+class TeamHub:
+    """A hub with mic track sharing: PUT /api/me/sharing, GET /api/team-tracks, GET /api/scans/<id>/file.
+    One teammate (Zed) shares his track (scan id 7) for both games of `rec`."""
+
+    def __init__(self, rec):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        import threading
+        self.calls, self.shared, self.rec = [], [], rec
+        hub = self
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def _json(self, code, obj):
+                data = json.dumps(obj).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def _go(self):
+                hub.calls.append((self.command, urllib.parse.unquote(self.path)))
+                if self.headers.get("Authorization") != "Bearer " + GOOD_KEY:
+                    return self._json(401, {"error": "bad_key"})
+                if self.path == "/api/me/sharing" and self.command == "PUT":
+                    n = int(self.headers.get("Content-Length") or 0)
+                    hub.shared.append(json.loads(self.rfile.read(n))["share_tracks"])
+                    return self._json(200, {"share_tracks": hub.shared[-1]})
+                if self.path.startswith("/api/team-tracks"):
+                    q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                    if q["recording"][0] != hub.rec:
+                        return self._json(200, {"recording": q["recording"][0], "games": []})
+                    t = {"player": "Zed", "recording": "zed-rec", "scan_id": 7, "name": "zed-rec.mic.m4a",
+                         "size": len(MIC_BYTES)}
+                    return self._json(200, {"recording": hub.rec, "player": "Moe", "games": [
+                        {"gameKey": "g-1", "jumpAt": 200.0, "start": 50.0, "end": 1550.0,
+                         "tracks": [{**t, "jumpAt": 340.0}], "skipped": [{"player": "Kai", "reason": "not_shared"}]},
+                        {"gameKey": "g-2", "jumpAt": 1700.0, "start": 1550.0, "end": None,
+                         "tracks": [{**t, "jumpAt": 1840.0}], "skipped": []}]})
+                if self.path == "/api/scans/7/file":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "audio/mp4")
+                    self.send_header("Content-Length", str(len(MIC_BYTES)))
+                    self.end_headers()
+                    self.wfile.write(MIC_BYTES)
+                    return
+                return self._json(404, {"error": "not_found"})
+
+            do_GET = do_PUT = _go
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        self.httpd.daemon_threads = True
+        self.url = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def _tt_wait(tt, s=10):
+    end = time.time() + s
+    while tt.running and time.time() < end:
+        time.sleep(0.02)
+    assert not tt.running
+
+
+def test_team_tracks_download():
+    """Agreed: the answer goes to the hub, teammates' shared tracks of the app's own uploaded recordings come into the
+    app's folder (team-tracks/), once; the review gets them with their time offset. Never during Apex (no request at
+    all); stopped when Apex starts mid-download (no partial file left). A player who said no or never answered gets
+    nothing; "no" is told to the hub. Removed with the recording; nothing else in the folder is touched."""
+    from pcs_recorder import retention, teamtracks
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    shutil.rmtree(teamtracks.base_dir(), ignore_errors=True)
+    teamtracks.state_file().unlink(missing_ok=True)
+    folder = TMP / "ttrecs"
+    folder.mkdir(exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    rec.write_bytes(b"video")
+    old = folder / "Apex Legends_2026.11.01-20.00.mp4"
+    old.write_bytes(b"video")
+    fake = TeamHub(rec.stem)
+    s = _S(str(folder))
+    s.hub_url = fake.url
+    now = time.time()
+    idx = {"a": retention.Entry(str(rec), now - 3600, "uploaded"),
+           "b": retention.Entry(str(old), now - 10 * 86400, "uploaded"),       # too old: never asked
+           "c": retention.Entry(str(folder / "missing.mp4"), now, "uploaded")}  # not on disk
+    busy = {"why": None}
+    clock = {"t": now}
+    tt = teamtracks.TeamTracks(lambda: s, lambda: idx, lambda: busy["why"], now=lambda: clock["t"])
+    try:
+        # never asked: nothing sent, nothing fetched
+        assert teamtracks.sharing_answer(s) is None and not tt.tick() and fake.calls == []
+        # said no: the hub is told, nothing is fetched
+        s.share_asked = True
+        assert not tt.tick() and fake.shared == [False]
+        assert not any(c[1].startswith("/api/team-tracks") for c in fake.calls)
+        # agreed (setup step): told once, the teammate's track downloaded for the recording
+        s.share_tracks = s.comms_consent = s.mic_audio = s.send_mic = True
+        busy["why"] = "Apex is running"
+        n = len(fake.calls)
+        assert not tt.tick() and len(fake.calls) == n                # during Apex: not even a request
+        busy["why"] = None
+        assert tt.tick()
+        _tt_wait(tt)
+        assert fake.shared == [False, True]
+        asked = [c[1] for c in fake.calls if c[1].startswith("/api/team-tracks")]
+        assert asked == ["/api/team-tracks?recording=" + rec.stem], asked   # not the old one, not the missing one
+        got = teamtracks.base_dir() / rec.stem / "Zed-7.mic.m4a"
+        assert got.read_bytes() == MIC_BYTES and not list(got.parent.glob("*.part"))
+        assert [c for c in fake.calls if c[1] == "/api/scans/7/file"] == [("GET", "/api/scans/7/file")]   # once
+        # what the review player gets: the teammate's time = this recording's time + off, per game
+        tr = tt.for_recording(str(rec))
+        assert [(t["id"], t["player"]) for t in tr] == [("7", "Zed")], tr
+        assert tr[0]["parts"] == [{"start": 50.0, "end": 1550.0, "off": 140.0},
+                                  {"start": 1550.0, "end": None, "off": 140.0}], tr
+        assert tt.file(str(rec), "7") == got and tt.file(str(rec), "8") is None
+        # asked again only after an hour; the file isn't downloaded twice
+        assert not tt.tick()
+        clock["t"] += 3700
+        assert tt.tick()
+        _tt_wait(tt)
+        assert len([c for c in fake.calls if c[1] == "/api/scans/7/file"]) == 1
+        # Apex starting during a download: stopped, no partial file, tried again later
+        got.unlink()
+        tt.st["recs"][rec.stem]["checked"] = 0
+        real_every, teamtracks.BUSY_EVERY_S = teamtracks.BUSY_EVERY_S, 0
+        looks = []
+        tt.busy = lambda: (looks.append(1), None if len(looks) <= 3 else "Apex is running")[1]
+        try:
+            assert tt.tick()
+            _tt_wait(tt)
+        finally:
+            teamtracks.BUSY_EVERY_S = real_every
+        assert not got.exists() and not list(got.parent.glob("*.part")) and tt.next_try > clock["t"]
+        tt.busy = lambda: busy["why"]
+        # recording gone (retention): its tracks go; a file the player put there stays, with its folder
+        (got.parent / "my notes.txt").write_text("mine")
+        got.write_bytes(MIC_BYTES)
+        del idx["a"]
+        assert tt.cleanup() == ["Zed-7.mic.m4a"]
+        assert (got.parent / "my notes.txt").read_text() == "mine" and rec.stem not in tt.st["recs"]
+        assert GOOD_KEY not in teamtracks.state_file().read_text()
+    finally:
+        fake.stop()
+        _fresh_hub()
+
+
+def test_team_tracks_in_review_page():
+    """The review player plays teammates' tracks (from /teamtrack/) next to the recording's own, in their game only."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    audio = js[js.index("function setupAudio"):js.index("function applyMix")]
+    assert "d.teamAudio" in audio and "/teamtrack/" in audio and "x.t.parts" in audio and "p.off" in audio
+    srv_py = (Path(pcs_server.WEB).parent / "pcs_server.py").read_text(encoding="utf-8")
+    assert '"/teamtrack/"' in srv_py and 'it["teamAudio"]' in srv_py
+    build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_recorder.teamtracks" in build
 
 
 if __name__ == "__main__":
