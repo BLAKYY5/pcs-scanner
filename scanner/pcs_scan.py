@@ -679,8 +679,10 @@ def mode_seen(g, R, emblem, starts, gi):
     seen = {'badge': 'ranked' if badge else None, 'drop': 'scrim' if g.get('drop') else None,
             'select': 'ranked' if sel else None, 'banner': word, 'emblem': emode or other}
     named = {k: v for k, v in seen.items() if v}
+    if 'ranked' in named.values() and named.get('emblem') == 'other':
+        named.pop('emblem')         # rank badges are round emblems too: an unnamed emblem never outvotes ranked signs
     if badge:                       # the RP panel: ranked, as before, unless the banner or emblem names another mode
-        if any(v in ('wildcard', 'pubs', 'other') for v in named.values()):
+        if any(v in ('wildcard', 'pubs') for v in named.values()):
             out['conflict'] = True; out['from'] = sorted(named); return out
         out['mode'] = 'ranked'; out['from'] = sorted(k for k, v in named.items() if v == 'ranked'); return out
     if seen['drop']:                # scrim proof: the drop screen, no RP panel (rule unchanged)

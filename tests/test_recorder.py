@@ -1969,6 +1969,9 @@ def test_mode_from_playlist_emblem():
     g1, g2 = game(100), game(900, banner={"mode": "ranked", "map": "ED"})
     SCAN.timeline([g1, g2], [], rank=[(t, True) for t in range(100, 400, 10)])
     assert (g1["mode"], g2["mode"]) == ("ranked", "ranked") and g1["modeSeen"]["from"] == ["badge"], (g1["modeSeen"], g2["modeSeen"])
+    g4 = game(4950, select={"tFirst": 4950, "tLast": 4980, "ranked": True, "squad": []})
+    SCAN.timeline([g4], [], emblem=[r for r in reads if r[1] == other])                # rank badge read as another emblem
+    assert g4["mode"] == "ranked" and not g4["modeSeen"]["conflict"], g4["modeSeen"]
     g3 = game(100)
     SCAN.timeline([g3], [], mode="scrim", emblem=reads)                                 # --mode still wins
     assert g3["mode"] == "scrim"
