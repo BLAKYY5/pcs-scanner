@@ -4,6 +4,11 @@ The player (or coach) can set it by hand in the app; otherwise it comes from the
 means scrims, the ranked badge means ranked, the loading banner's mode word means wildcard or pubs (pubs trios
 only so far: other playlists show another word and stay unlabelled until it is taught to the scanner). The
 label decides what goes to YouTube and the word in the video title.
+
+EEC drops confirm scrims (coach, 18 Nov 2026): when a block's EEC results fit its games by map and time and the
+EEC drops agree with where we landed (eec.check_block "match"), the block is scrims with source "eec", even when the
+drop screen wasn't read. When they disagree ("mismatch", e.g. a tournament the same evening), the block is not that
+scrim: its label comes from the scan alone and the EEC results are not used for it. `explain_block` says why.
 """
 from __future__ import annotations
 
@@ -67,14 +72,47 @@ def of(path: str, scan: dict) -> tuple[str | None, bool]:
     return (m, True) if m else (auto(scan), False)
 
 
-def of_block(paths: list[str], scans: list[dict]) -> tuple[str | None, bool]:
-    """A block's label: what was set by hand on its recordings (most common), else what the scans say."""
+def of_block(paths: list[str], scans: list[dict], eec_check: dict | None = None) -> tuple[str | None, bool]:
+    """A block's label: what was set by hand on its recordings (most common), else EEC's drops when they confirm
+    the block (eec_check), else what the scans say."""
+    r = explain_block(paths, scans, eec_check)
+    return r["label"], r["source"] == "hand"
+
+
+def _scan_why(kind: str | None) -> str:
+    return {"scrims": "the scrim drop screen was read", "ranked": "the ranked badge was seen",
+            "wildcard": "the loading banner said wildcard", "pubs": "the loading banner said trios (pubs)"}.get(
+        kind or "", "nothing in the scan tells")
+
+
+def explain_block(paths: list[str], scans: list[dict], eec_check: dict | None = None) -> dict:
+    """{"label", "source": "hand" | "eec" | "scan" | None, "why"} for a block of recordings."""
     d = load()
     hand = [d[_norm(p)] for p in paths if _norm(p) in d]
     if hand:
-        return Counter(hand).most_common(1)[0][0], True
+        return {"label": Counter(hand).most_common(1)[0][0], "source": "hand", "why": "set by hand"}
+    verdict = (eec_check or {}).get("verdict")
+    if verdict == "match":
+        return {"label": "scrims", "source": "eec", "why": eec_check.get("why") or "EEC drops agree"}
     found = [auto(s) for s in scans]
-    for k in ("scrims", "ranked"):
-        if k in found:
-            return k, False
-    return None, False
+    label = next((k for k in ("scrims", "ranked") if k in found), None)
+    why = _scan_why(label)
+    if verdict == "mismatch":
+        why += f"; not the EEC lobby: {eec_check.get('why') or 'drops differ'}"
+    elif verdict == "unknown" and eec_check.get("why") and eec_check.get("lobby"):
+        why += f"; EEC lobby by time only: {eec_check['why']}"
+    return {"label": label, "source": "scan" if label else None, "why": why}
+
+
+def explain(path: str, scan: dict, eec_check: dict | None = None) -> dict:
+    """One recording: {"label", "source", "why"} (eec_check: its block's, when there is one)."""
+    m = manual(path)
+    if m:
+        return {"label": m, "source": "hand", "why": "set by hand"}
+    if (eec_check or {}).get("verdict") == "match":
+        return {"label": "scrims", "source": "eec", "why": eec_check.get("why") or "EEC drops agree"}
+    label = auto(scan)
+    why = _scan_why(label)
+    if (eec_check or {}).get("verdict") == "mismatch":
+        why += f"; not the EEC lobby: {eec_check.get('why') or 'drops differ'}"
+    return {"label": label, "source": "scan" if label else None, "why": why}

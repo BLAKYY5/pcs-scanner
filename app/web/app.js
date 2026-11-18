@@ -297,10 +297,11 @@ function gameChips(it) {
 /* ------------------------------------------------------------------ recordings */
 let filter = 'all', kindFilter = '', selected = new Set();
 const KINDS = {scrims: 'Scrims', ranked: 'Ranked', pubs: 'Pubs', wildcard: 'Wildcard'};
-function labelSelect(label, byHand, attrs) {
+function labelSelect(label, byHand, attrs, why, source) {
   const auto = !byHand;
-  return `<select class="label k-${label || 'none'} ${auto ? 'auto' : ''}" ${attrs} title="Session type. Auto = from the scan (scrim drop screen → Scrims, ranked badge → Ranked). Pubs and Wildcard are set by hand.">
-    <option value="" ${auto ? 'selected' : ''}>${label ? KINDS[label] + ' · auto' : 'Type?'}</option>
+  const tip = 'Session type. Auto = from the scan (scrim drop screen → Scrims, ranked badge → Ranked) or from EEC (drops agree). Pubs and Wildcard are set by hand.' + (why ? ' Now: ' + why + '.' : '');
+  return `<select class="label k-${label || 'none'} ${auto ? 'auto' : ''}" ${attrs} title="${esc(tip)}">
+    <option value="" ${auto ? 'selected' : ''}>${label ? KINDS[label] + (source === 'eec' ? ' · EEC' : ' · auto') : 'Type?'}</option>
     ${Object.entries(KINDS).map(([k, v]) => `<option value="${k}" ${byHand && k === label ? 'selected' : ''}>${v}</option>`).join('')}</select>`;
 }
 async function loadLibrary() {
@@ -350,7 +351,7 @@ function drawList() {
     el.innerHTML = `<div class="recrow head"><span></span><span>Recording</span><span class="c3">Recorded</span><span class="c4">Size</span><span class="c5">Status</span><span></span></div>` +
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="Select ${esc(it.name)}">
-        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label')}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${hubNote(it)}</div></div>
+        <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label', it.label_why, it.label_source)}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">auto-recorded</span>' : ''}${hubNote(it)}</div></div>
         <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings">No game</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">Scan</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="Scan this recording again">Scan again</button>`}
@@ -482,7 +483,9 @@ function buildEvents(d) {
     else if (!sel && g.tStart != null) ev.push({t: g.tStart, k: 'start', g: gi, title: 'Game start', sub: map !== '?' ? map : ''});
     const L = g.landing || {};
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: 'Jumped from the ship'});
-    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: ours ? 'at ' + poiName(ours.poi) : ''});
+    const ee = eecOf(d, gi), here = (ours && ours.poi) || L.poi;
+    const landSub = ee ? 'EEC drop ' + ee.eecDrop + (ee.check === 'different' ? ' · scan says ' + ee.ourDrop : '') : (here ? 'at ' + poiName(here) : '');
+    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: 'Landed', sub: landSub});
     (g.ring || []).forEach(r => {
       const n = r.round ? ' ' + r.round : '', after = r.endsAfterGame ? ' · after your game ended' : '';
       if (r.kind === 'wait') {
@@ -705,16 +708,24 @@ function drawSide() {
   $$('[data-t]', body).forEach(el => el.onclick = () => seek(+el.dataset.t));
   onTime(true);
 }
+// EEC's drop for a game of this recording, when EEC's results were compared with it (EEC wins for display; ours stays)
+function eecOf(d, gi) { return ((d && d.eecGames) || []).find(x => x.i === gi && x.eecDrop) || null; }
+function eecDropHTML(g, i) {
+  const e = eecOf(RV && RV.d, i);
+  if (!e) return '';
+  const diff = e.check === 'different';
+  return `<div class="eecdrop" title="${esc(e.why || '')}">EEC drop: <b>${esc(e.eecDrop)}</b>${diff ? ` <span class="pill warn" title="Our scan says ${esc(e.ourDrop)} (${esc(e.ourFrom || 'scan')}). EEC is shown; check it in the review.">scan: ${esc(e.ourDrop)}</span>` : ''}</div>`;
+}
 function dropHTML(g, i) {
   const spots = (g.drop && g.drop.spots) || [];
-  if (!spots.length) return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))}</div><div class="muted" style="padding:6px">The drop map wasn't seen in this game.</div>`;
+  if (!spots.length) return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))}</div>${eecDropHTML(g, i)}<div class="muted" style="padding:6px">The drop map wasn't seen in this game.</div>`;
   const byPoi = {};
   spots.forEach(s => { const k = poiName(s.poi) || 'Open ground'; (byPoi[k] = byPoi[k] || {n: 0, ours: false}).n++; if (s.kind === 'ours') byPoi[k].ours = true; });
   const rows = Object.entries(byPoi).sort((a, b) => b[1].ours - a[1].ours || b[1].n - a[1].n);
   const grid = [20, 40, 60, 80].map(p => `<line x1="${p}" y1="0" x2="${p}" y2="100"/><line x1="0" y1="${p}" x2="100" y2="${p}"/>`).join('');
   const dots = spots.slice().sort((a, b) => (a.kind === 'ours') - (b.kind === 'ours')).map(s =>
     `<circle cx="${s.x}" cy="${s.y}" r="${s.kind === 'ours' ? 2.6 : 1.7}" fill="${s.kind === 'ours' ? '#e5392d' : '#d9d6cf'}" stroke="#121211" stroke-width=".6"><title>${esc(poiName(s.poi) || 'Open ground')}${s.kind === 'ours' ? ' (us)' : ''}</title></circle>`).join('');
-  return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))} · ${spots.length} squads</div>
+  return `<div class="gamehead">Game ${i + 1} · ${esc(mapName(g.map))} · ${spots.length} squads</div>${eecDropHTML(g, i)}
     <svg class="dropmap" viewBox="0 0 100 100" role="img" aria-label="Drop spots"><g stroke="#24231f" stroke-width=".3">${grid}</g>${dots}</svg>
     <div class="faint" style="font-size:12px;margin-top:4px">Positions on the map as shown on the drop screen. Red = your squad.</div>
     <div class="pois">${rows.map(([k, v]) => `<div class="${v.ours ? 'ours' : ''}"><span>${esc(k)}${v.ours ? ' · you' : ''}</span><span class="mono">${v.n} squad${v.n > 1 ? 's' : ''}</span></div>`).join('')}</div>`;
@@ -1471,7 +1482,7 @@ async function loadQueue() {
         <div class="row"><button class="btn small brand" data-a="save">Save</button><button class="btn small ghost" data-a="cancel">Cancel</button></div></div>` : '';
     return `<div class="ytrow" data-id="${esc(b.id)}">
       <div style="min-width:0"><div class="name">${fmtDate(b.start)} <span class="faint">→ ${new Date(b.end * 1000).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit'})}</span></div>
-        <div class="sub">${done || busy ? (b.label ? `<span class="chip">${KINDS[b.label]}</span>` : '') : labelSelect(b.label, b.label_by_hand, 'data-label')}
+        <div class="sub">${done || busy ? (b.label ? `<span class="chip">${KINDS[b.label]}</span>` : '') : labelSelect(b.label, b.label_by_hand, 'data-label', b.label_why, b.label_source)}
           <span class="faint" style="font-size:12px">${b.games} game${b.games === 1 ? '' : 's'}${b.maps.length ? ' · ' + esc(b.maps.join(', ')) : ''} · ${b.recordings} recording${b.recordings === 1 ? '' : 's'}${res}${b.eec && !b.res ? ' · EEC link' : ''}</span></div>${custom}</div>
       <div class="ytstate"><span class="pill ${cls}">${word}</span><small class="muted">${esc(busy ? b.progress : b.why)}</small></div>
       <div class="acts">${acts}</div>${form}</div>`;
