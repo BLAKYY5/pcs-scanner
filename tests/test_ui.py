@@ -198,6 +198,7 @@ def test_review_page_texts():
     assert "Your microphone is never recorded" not in js                       # Settings offers mic recording
     assert "Changes apply right away" not in js                                # most fields need Save changes
     assert "'Legend select'" in js and "'Game start'" in js and "Unsaved changes" in js
+    assert "'banner picked up'" in js and "'banner crafted'" in js and "'beacon' + at(r.beaconAt)" in js   # respawn steps
     assert "+ 480)" not in js and "r.gbPerHour + ' GB" not in js               # GB per hour: one formula (gbHour)
     assert "File missing" in js and "Video format not supported" in js
 

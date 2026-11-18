@@ -589,7 +589,16 @@ function respawnEvent(r, g, gi) {
   if (r.who !== 'self') { who = squadWho({hue: r.hue}, g); if (!who || who === 'You') who = 'Teammate'; }
   const away = typeof r.deadSince === 'number' && r.t > r.deadSince ? 'back after ' + fmtT(r.t - r.deadSince) : '';
   return {t: r.t, k: 'respawn', g: gi, title: `${who} respawned`,
-          sub: [away, r.how === 'dropship' ? 'dropship' : ''].filter(Boolean).join(' · ')};
+          sub: [away, r.how === 'dropship' ? 'dropship' : '', bannerText(r)].filter(Boolean).join(' · ')};
+}
+/* the banner's way back, read on the card's status line (scanner: bannerAt, banner, beaconAt, modeRespawn) */
+function bannerText(r) {
+  const at = t => typeof t === 'number' && typeof r.deadSince === 'number' && t >= r.deadSince ? ' at +' + fmtT(t - r.deadSince) : '';
+  const parts = [];
+  if (typeof r.bannerAt === 'number') parts.push((r.banner === 'crafted' ? 'banner crafted' : 'banner picked up') + at(r.bannerAt));
+  if (typeof r.beaconAt === 'number') parts.push('beacon' + at(r.beaconAt));
+  else if (r.modeRespawn) parts.push('mode respawn');
+  return parts.join(' · ');
 }
 function gameSpans(d) {
   return (d.games || []).map(g => {
