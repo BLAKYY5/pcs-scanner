@@ -2161,6 +2161,28 @@ def test_audio_tracks_cut_after_recording():
     assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
 
 
+def test_failed_recording_never_deletes_other_files():
+    """A recording without a file (path "") is older than the keep limit: retention removes the entry only, never the
+    files of the folder the app runs in (Path("") is the working folder; its glob matched every file there)."""
+    work = TMP / f"workdir-{time.time_ns()}"
+    work.mkdir()
+    keep = [make_file(work, n, 10) for n in ("PCS-Scanner.exe", "notes.txt", ".gitignore")]
+    old_cwd = os.getcwd()
+    os.chdir(work)
+    try:
+        idx = {"f": retention.Entry(path="", started=time.time() - 30 * 86400, status="failed"),
+               "g": retention.Entry(path="relative.mp4", started=time.time() - 30 * 86400, status="failed")}
+        assert retention.files_of(idx["f"]) == [] and retention.files_of(idx["g"]) == []
+        removed = retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert all(p.exists() for p in keep), [p.name for p in work.iterdir()]
+        assert [n for n, _ in removed] == [""] and idx == {}                # entries gone, no file deleted
+        idx = {"new": retention.Entry(path="", started=time.time() - 3600, status="failed")}
+        retention.enforce(idx, keep_days=7, max_gb=0.0)
+        assert "new" in idx                                                 # a fresh failure stays listed
+    finally:
+        os.chdir(old_cwd)
+
+
 def _scanner():
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
     import pcs_scan
