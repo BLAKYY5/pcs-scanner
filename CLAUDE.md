@@ -148,9 +148,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
-- **Results to hub and Drive**: a recording is "uploaded" once the hub OR Drive took its results; where they went is
-  kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
-  that reached only Drive stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
+- **Results to hub and Drive**: with a hub address set, results go to the hub only (Drive is not used, even signed
+  in: leaving-Drive plan, coach's decision 18 Nov 2026; Home shows "Results: Team hub", setup has no Drive step,
+  Settings hides the Drive sign-in and the coach's address); without one, to Drive. A recording is "uploaded" once its
+  destination took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+  that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
 - **Silent voice / mic track**: after a recording of 5 min or more, tracks 2 and 3 (when on, with consent, not muted
