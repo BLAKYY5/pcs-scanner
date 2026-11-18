@@ -1,6 +1,6 @@
 # PCS Scanner: privacy policy
 
-_Last updated: 7 November 2026_
+_Last updated: 18 November 2026_
 
 PCS Scanner is a free Windows app used by the players of the PCS Apex Legends team to record their
 games, scan the recordings for coaching, and share the results with their coach. It is not sold and
@@ -27,6 +27,13 @@ automatically according to the limits you set (number of days and maximum folder
 
 Voice (Discord and microphone) is only recorded after you confirm in the app that your team agreed to
 it. Only the tracks you choose are sent, and only to your team (its Drive folder or its own server).
+
+If you choose "Share mic tracks with my team" (first-run setup or Settings), your microphone track is
+shared with your teammates on the team's server, and the app downloads your teammates' shared microphone
+tracks of the games you played into its own folder (`%LOCALAPPDATA%\PCS Scanner\team-tracks`), deleted
+with your recording. Players of another team never get them. You can turn it off at any time in Settings;
+your teammates then no longer get your track. Comms transcripts are not made yet; the app only keeps your
+answer (off until you say yes).
 
 ## What is never done
 

@@ -31,6 +31,7 @@ def selftest(out):
         import pcs_recorder.tracks   # noqa: F401
         import pcs_recorder.minimaps   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
+        import pcs_recorder.teamtracks   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
@@ -389,7 +390,9 @@ def main():
                 pass
             b.auto.ui.notify('PCS Scanner updated', f'Version {v} is installed and running in the tray. '
                              'Click the tray icon to open it.')
-        if b.auto.s.enabled:
+        if b.auto.s.enabled and not b.auto.s.encoder:
+            b.auto.enable()                                # new install (auto-record on by default): OBS + encoder test
+        elif b.auto.s.enabled:
             b.auto.run_loop()
     tk_thread = TkThread(setup)
 
@@ -449,6 +452,8 @@ def main():
             except Exception: logging.exception('team link')
             try: b.hub_backup_tick()                       # coach's hub key: the hub's nightly zip, once a day
             except Exception: logging.exception('hub backup copy')
+            try: b.team_tracks_tick()                      # teammates' mic tracks, when the player agreed
+            except Exception: logging.exception('team tracks')
             # tell the player once per new version with a corner message (not during a game: it waits)
             if b.update and told != b.update[0] and b.auto and not b.update_blocked():
                 told = b.update[0]

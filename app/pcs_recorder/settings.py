@@ -51,6 +51,10 @@ class Settings:
     mic_audio: bool = True                             # track 3: the player's microphone (needs comms_consent)
     mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
+    share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
+    share_asked: bool = False                          # the player answered the mic sharing question (setup step)
+    transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes
+    transcript_asked: bool = False                     # the player answered the transcripts question (setup step)
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"
     hk_mute_mic: str = "ctrl+alt+3"
@@ -144,7 +148,9 @@ class Settings:
 def load() -> Settings:
     APP_DIR.mkdir(parents=True, exist_ok=True)
     s = Settings()
-    if SETTINGS_FILE.exists():
+    if not SETTINGS_FILE.exists():
+        s.enabled = True                               # new install: auto-record on (coach, 18 Nov 2026); setup step can turn it off
+    else:
         try:
             for k, v in json.loads(SETTINGS_FILE.read_text(encoding="utf-8")).items():
                 if hasattr(s, k):

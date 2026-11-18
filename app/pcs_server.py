@@ -33,7 +33,8 @@ UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
-              "mic_audio", "mic_device", "send_mic",
+              "mic_audio", "mic_device", "send_mic", "share_tracks", "transcript_consent", "share_asked",
+              "transcript_asked",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
@@ -531,6 +532,10 @@ class Backend:
             except Exception:
                 pass
         it["audio"] = audio_tracks(it["path"])
+        try:                                               # teammates' mic tracks the app downloaded (shared by them)
+            it["teamAudio"] = self.teamtracks.for_recording(it["path"]) if self.auto else []
+        except Exception:
+            it["teamAudio"] = []
         return it
 
     # ------------------------------------------------------------- sound analysis for the review
@@ -759,6 +764,7 @@ class Backend:
                 "recorder": rec, "messages": list(self.messages)[-60:],
                 "hub": self.hub_state(),
                 "hubBackup": self.hubbackup.public() if a and a.s.hub_url else None,   # coach's hub key only
+                "teamTracks": self.teamtracks.public() if a else None,
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
@@ -1077,9 +1083,14 @@ class Backend:
             before = (a.s.start_with_windows,)
             yt_before = getattr(a.s, "yt_enabled", False)
             hub_before = a.s.hub_url
+            share_before = (a.s.share_tracks, a.s.transcript_consent)
             for k in REC_FIELDS:
                 if k in body:
                     setattr(a.s, k, body[k])
+            if "share_tracks" in body and a.s.share_tracks != share_before[0]:
+                a.s.share_asked = True                       # answered in Settings: the setup step stops asking
+            if "transcript_consent" in body and a.s.transcript_consent != share_before[1]:
+                a.s.transcript_asked = True
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st
@@ -1097,9 +1108,51 @@ class Backend:
                 self.set_start_with_windows(a.s.start_with_windows)
             if bk:
                 self.hubbackup.set(*bk)
+            self._sync_sharing()
             removed = a.rec.cleanup()
             if removed:
                 self.say(f"{len(removed)} old recording(s) removed to stay within your limits.")
+
+    def setup_choice(self, choice: str, on: bool) -> None:
+        """Home → Get set up → Your choices. Each one is applied at once and can be changed later in Settings.
+        share: yes = the team agreed that comms are recorded, the mic is recorded and sent ("Send my mic track" on),
+        shared with the team, and the teammates' tracks come by themselves; no = nothing changes but the answer.
+        transcripts: only the answer is kept (the feature isn't built yet). autorecord: on / off."""
+        a = self.auto
+        if not a:
+            raise RuntimeError("Auto-record isn't available in this build")
+        from pcs_recorder import settings as st
+        if choice == "autorecord":
+            return self.set_autorecord(on)
+        if choice == "share":
+            a.s.share_asked, a.s.share_tracks = True, on
+            if on:
+                a.s.comms_consent = a.s.mic_audio = a.s.send_mic = True
+        elif choice == "transcripts":
+            a.s.transcript_asked, a.s.transcript_consent = True, on
+        else:
+            raise ValueError("unknown choice")
+        st.save(a.s)
+        self._sync_sharing()
+
+    def _sync_sharing(self) -> None:
+        """The player's mic sharing answer to the hub, in the background (never during a game: the next tick)."""
+        if not (self.auto and self.auto.s.hub_url) or self._backup_busy():
+            return
+        threading.Thread(target=self.teamtracks.sync_sharing, daemon=True, name="share-sync").start()
+
+    @property
+    def teamtracks(self):
+        """pcs_recorder.teamtracks.TeamTracks: teammates' mic tracks, fetched when the player agreed."""
+        if getattr(self, "_teamtracks", None) is None:
+            from pcs_recorder import teamtracks
+            self._teamtracks = teamtracks.TeamTracks(lambda: self.auto.s, lambda: self.auto.rec.idx if self.auto else {},
+                                                     self._backup_busy)
+        return self._teamtracks
+
+    def team_tracks_tick(self) -> None:
+        if self.auto and self.auto.s.hub_url:
+            self.teamtracks.tick()
 
     def set_autorecord(self, on: bool) -> None:
         a = self.auto
@@ -1279,7 +1332,7 @@ class Server:
                 u = urlparse(self.path)
                 q = parse_qs(u.query)
                 path = unquote(u.path)
-                if not path.startswith(("/api/", "/video/", "/audio/", "/talk/", "/minimap/")):
+                if not path.startswith(("/api/", "/video/", "/audio/", "/talk/", "/minimap/", "/teamtrack/")):
                     if not self._ok_origin():
                         return self._json({"error": "forbidden"}, 403)
                     return self._static(path)
@@ -1297,6 +1350,11 @@ class Server:
                     if path.startswith("/audio/"):
                         parts = path.split("/")
                         return self._audio(parts[2], parts[3])
+                    if path.startswith("/teamtrack/"):          # a teammate's mic track, downloaded from the hub
+                        parts = path.split("/")
+                        it = b.find(parts[2]) if len(parts) > 3 else None
+                        f = b.teamtracks.file(it["path"], parts[3]) if it else None
+                        return self._video(None, str(f)) if f else self._json({"error": "not found"}, 404)
                     if path.startswith("/video/"):
                         return self._video(path.split("/")[2])
                     if path == "/api/state":
@@ -1445,6 +1503,9 @@ class Server:
                         threading.Thread(target=retest, daemon=True).start()
                         b.say("Testing the graphics card's encoders again (a few seconds)…")
                         return self._json({"ok": True})
+                    if path == "/api/setup/choice":            # first-run setup: one choice, applied at once
+                        b.setup_choice(str(body.get("choice") or ""), bool(body.get("on")))
+                        return self._json(b.state())
                     if path == "/api/quit":
                         threading.Timer(0.3, b.quit).start()
                         return self._json({"ok": True})

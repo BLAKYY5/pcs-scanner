@@ -153,16 +153,25 @@ function homeKey(s) { return JSON.stringify([s.recorder, s.google, s.player, s.m
 let setupMsg = '';
 function setupHidden() { try { return localStorage.getItem('pcs-setup-hidden') === '1'; } catch (e) { return false; } }
 function setupSteps() {
-  const r = S.recorder, h = S.hub || {}, last = h.last || {};
+  const r = S.recorder, h = S.hub || {}, last = h.last || {}, s = (r && r.settings) || {};
   const hubOk = !!(h.url && h.key && !h.refused && last.ok !== false);
   return {
     name: !!S.player,
-    rec: !!(r && r.enabled && r.encoder && !r.settingUp), recBusy: !!(r && r.settingUp),
+    rec: !!(r && r.enabled), recBusy: !!(r && r.settingUp),
     hub: hubOk, hubName: last.ok && last.name ? last.name : '',
     google: S.google === 'ok',
+    // the choices: auto-record has a default (on for new installs); the two consent questions need an answer
+    share: s.share_asked ? !!(s.share_tracks && s.comms_consent && s.send_mic && s.mic_audio) : null,
+    transcripts: s.transcript_asked ? !!s.transcript_consent : null,
   };
 }
-function setupDone(st) { return st.name && st.rec && (st.hub || st.google); }
+function choicesDone(st) { return st.share !== null && st.transcripts !== null; }
+function setupDone(st) { return st.name && (st.hub || st.google) && choicesDone(st); }
+/* one choice of the setup step: two buttons, the current answer highlighted (none before the first answer) */
+function choiceHTML(key, title, hint, value, yes, no, extra) {
+  const b = (on, label) => `<button class="btn small ${value === on ? 'brand' : ''}" data-choice="${key}" data-on="${on ? 1 : 0}" aria-pressed="${value === on}">${label}</button>`;
+  return `<div class="choice"><div><b>${title}</b>${extra || ''}<small>${hint}</small></div><div class="act">${b(true, yes)}${b(false, no)}</div></div>`;
+}
 function tailscaleHelp(ts) {
   if (ts === 'missing') return 'The hub is reached through Tailscale. <a href="https://tailscale.com/download/windows" target="_blank" rel="noopener">Install Tailscale</a>, sign in with the invite from your coach, then press Join again.';
   if (ts === 'off') return 'Tailscale is installed but not connected. Open Tailscale, sign in, then press Join again.';
@@ -172,24 +181,29 @@ function tailscaleHelp(ts) {
 function setupHTML() {
   const st = setupSteps(), r = S.recorder;
   if (!r || setupHidden() || setupDone(st)) return '';
-  const n = [st.name, st.rec, st.hub, st.google].filter(Boolean).length;
+  const n = [st.name, st.hub, st.google, choicesDone(st)].filter(Boolean).length;
   const li = (done, busy, i, title, hint, act, msg) => `<li class="${done ? 'done' : busy ? 'busy' : ''}"><span class="num">${done ? '✓' : i}</span>
     <div><b>${title}</b><small>${hint}</small></div><div class="act">${act}</div>${msg ? `<div class="msg">${msg}</div>` : ''}</li>`;
+  const recPill = st.recBusy ? ' <span class="pill info">Setting up…</span>' : '';
   return `<section class="card setup" id="setup"><div class="row between"><h2>Get set up</h2>
       <span class="row"><span class="faint" style="font-size:13px">${n} of 4 done</span><button class="btn small ghost" id="su-hide">Hide</button></span></div>
     <ol class="steps">
       ${li(st.name, false, 1, 'Your EEC name', 'Labels your scans for the coach.',
         st.name ? `<span class="pill good">${esc(S.player)}</span>` : `<input id="su-name" type="text" placeholder="EEC name" maxlength="40" value="${esc(st.hubName)}"><button class="btn small brand" id="su-name-save">Save</button>`)}
-      ${li(st.rec, st.recBusy, 2, 'Record Apex by itself', st.recBusy ? 'Setting up the recorder: download and graphics card test, about a minute. Keep going below.' : 'Sets up a private recorder (your own OBS is never touched).',
-        st.rec ? '<span class="pill good">On</span>' : st.recBusy ? '<span class="pill info">Setting up…</span>' : '<button class="btn small brand" id="su-rec">Turn on</button>')}
+      <li class="${choicesDone(st) ? 'done' : ''} choices-step"><span class="num">${choicesDone(st) ? '✓' : 2}</span>
+        <div><b>Your choices</b><small>Change them any time in Settings.</small></div>
+        <div class="choices">
+          ${choiceHTML('autorecord', 'Record Apex by itself', 'On: every Apex session is recorded and scanned. Off: nothing is recorded.', st.rec, 'On', 'Off', recPill)}
+          ${choiceHTML('share', 'Share mic tracks with my team', 'Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.', st.share, 'Yes', 'No')}
+          ${choiceHTML('transcripts', 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.', st.transcripts, 'Yes', 'No')}
+        </div></li>
       ${li(st.hub, false, 3, 'Join the team hub', 'Paste the link your coach sent you.',
         st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
           : '<input id="su-link" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the link from your coach"><button class="btn small brand" id="su-join">Join</button>',
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
       ${li(st.google, false, 4, 'Google Drive', st.hub ? 'Optional: a backup copy of your results in your Drive.' : 'Your results go to your Drive, shared with the coach.',
         st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>')}
-    </ol>
-    <p class="faint" style="margin:10px 0 0;font-size:12.5px">Voice comms and your mic are not recorded until you turn them on in <a href="#settings">Settings</a>, once your team agreed.</p></section>`;
+    </ol></section>`;
 }
 function wireSetup() {
   const hide = $('#su-hide'); if (hide) hide.onclick = () => { try { localStorage.setItem('pcs-setup-hidden', '1'); } catch (e) {} renderHome(null, true); };
@@ -199,11 +213,12 @@ function wireSetup() {
     renderHome(null, true);
   };
   const nm = $('#su-name'); if (nm) nm.onkeydown = e => { if (e.key === 'Enter') ns.click(); };
-  const rec = $('#su-rec'); if (rec) rec.onclick = async () => {
-    rec.disabled = true;
-    try { S = await api('/api/autorecord', {enabled: true}); } catch (e) { toast(e.message, true); rec.disabled = false; return; }
+  $$('#setup [data-choice]').forEach(btn => btn.onclick = async () => {
+    $$('#setup [data-choice]').forEach(x => x.disabled = true);
+    try { S = await api('/api/setup/choice', {choice: btn.dataset.choice, on: btn.dataset.on === '1'}); }
+    catch (e) { toast(e.message, true); }
     renderTop(); renderHome(null, true);
-  };
+  });
   const join = $('#su-join'), link = $('#su-link');
   if (link) link.onkeydown = e => { if (e.key === 'Enter') join.click(); };
   if (join) join.onclick = async () => {
@@ -1048,19 +1063,31 @@ window.addEventListener('resize', () => { if (page === 'review') drawSound(); })
 /* ------------------------------------------------------------------ separate sound tracks in review */
 function setupAudio(d, v) {
   clearInterval(setupAudio.h); RV.aud = null;
-  const tracks = d.audio || [];
-  if (tracks.length < 2) return;                       // one track: the video plays it itself
-  v.muted = true;
-  const url = t => `/audio/${d.id}/${t.n}?t=${encodeURIComponent(TOKEN)}`;
+  const tracks = d.audio || [], team = d.teamAudio || [];
+  const own = tracks.length >= 2;                      // one track: the video plays it itself
+  if (!own && !team.length) return;
+  if (own) v.muted = true;
+  // teammates' mic tracks (downloaded from the hub when the player agreed): their time = this video's time + off,
+  // played only inside the part of the recording that game covers (start..end)
+  const url = x => x.team ? `/teamtrack/${d.id}/${x.t.id}?t=${encodeURIComponent(TOKEN)}` : `/audio/${d.id}/${x.t.n}?t=${encodeURIComponent(TOKEN)}`;
   // each track is its own file, cut from the recording in the background: until it is ready the server answers
   // 503 and the mixer says "Preparing…"; the track joins at the video's position as soon as it is there
-  const aud = RV.aud = tracks.map(t => ({t, a: null, vol: 1, mute: false, prep: false, err: false}));
+  const aud = RV.aud = (own ? tracks.map(t => ({t, team: false})) : []).concat(team.map(t => ({t: {...t, label: t.player + ' mic', key: 'team'}, team: true})))
+    .map(x => ({...x, a: null, vol: 1, mute: false, prep: false, err: false}));
   const live = () => page === 'review' && RV && RV.aud === aud;
-  const all = f => aud.forEach(x => { if (x.a) try { f(x.a); } catch (e) {} });
-  const sync = a => {               // to the video's time, speed and play state (a no-op until the track has data)
+  const at = x => {                 // where a track should be for the video's moment, or null (outside its games)
+    if (!x.team) return v.currentTime;
+    const t = v.currentTime;
+    const p = (x.t.parts || []).find(p => (p.start == null || t >= p.start) && (p.end == null || t < p.end));
+    return p && t + p.off >= 0 ? t + p.off : null;
+  };
+  const all = f => aud.forEach(x => { if (x.a) try { f(x.a, x); } catch (e) {} });
+  const sync = (a, x) => {          // to the video's time, speed and play state (a no-op until the track has data)
     if (!live() || a.readyState < 1) return;
     try {
-      if (Math.abs(a.currentTime - v.currentTime) > 0.2) a.currentTime = v.currentTime;
+      const p = at(x);
+      if (p === null) { if (!a.paused) a.pause(); return; }
+      if (Math.abs(a.currentTime - p) > 0.2) a.currentTime = p;
       a.playbackRate = v.playbackRate;
       if (v.paused) a.pause(); else if (a.paused) a.play().catch(() => {});
     } catch (e) {}
@@ -1070,28 +1097,28 @@ function setupAudio(d, v) {
     a.preload = 'auto'; a.volume = x.vol; a.muted = x.mute;
     a.addEventListener('error', () => { x.err = true; drawMixer(); });
     // a time set before the track's data arrived is ignored: set it again once it can be used
-    ['loadedmetadata', 'canplay'].forEach(n => a.addEventListener(n, () => sync(a)));
-    a.src = url(x.t);
+    ['loadedmetadata', 'canplay'].forEach(n => a.addEventListener(n, () => sync(a, x)));
+    a.src = url(x);
     drawMixer();
   };
   const check = async x => {
     if (!live()) return;
     let st = 0;
-    try { st = (await fetch(url(x.t), {method: 'HEAD'})).status; } catch (e) { st = -1; }
+    try { st = (await fetch(url(x), {method: 'HEAD'})).status; } catch (e) { st = -1; }
     if (!live()) return;
     if (st === 200 || st === 206) return attach(x);
     if (st === 503 || st === -1) { if (!x.prep) { x.prep = true; drawMixer(); } setTimeout(() => check(x), 3000); return; }
     x.err = true; x.prep = false; drawMixer();
   };
   aud.forEach(check);
-  v.addEventListener('play', () => all(a => { a.currentTime = v.currentTime; a.playbackRate = v.playbackRate; a.play().catch(() => {}); }));
+  v.addEventListener('play', () => all((a, x) => { const p = at(x); if (p === null) return; a.currentTime = p; a.playbackRate = v.playbackRate; a.play().catch(() => {}); }));
   v.addEventListener('pause', () => all(a => a.pause()));
-  v.addEventListener('seeking', () => all(a => a.currentTime = v.currentTime));
+  v.addEventListener('seeking', () => all((a, x) => { const p = at(x); if (p !== null) a.currentTime = p; }));
   v.addEventListener('ratechange', () => all(a => a.playbackRate = v.playbackRate));
-  v.addEventListener('volumechange', () => { if (!v.muted) v.muted = true; });   // sound comes from the tracks
+  if (own) v.addEventListener('volumechange', () => { if (!v.muted) v.muted = true; });   // sound comes from the tracks
   setupAudio.h = setInterval(() => {
     if (!live()) { clearInterval(setupAudio.h); all(a => { a.pause(); a.removeAttribute('src'); a.load(); }); return; }
-    all(a => { if (!v.paused || !a.paused) sync(a); });
+    all((a, x) => { if (!v.paused || !a.paused) sync(a, x); });
   }, 500);
   applyMix(); drawMixer();
 }
@@ -1193,7 +1220,9 @@ function renderSettings() {
         <label class="field"><span>Microphone</span><select id="f-mic_device"><option value="${esc(s.mic_device || 'default')}">Loading…</option></select>
           <small>Takes effect the next time Apex starts.</small></label>
         <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
+        <div class="field">${switchHTML('f-share_tracks', s.share_tracks, 'Share mic tracks with my team', 'Your mic track goes to your teammates, theirs come to you by themselves while Apex is closed' + (S.teamTracks && S.teamTracks.tracks ? ` (${S.teamTracks.tracks} here)` : ''))}</div>
       </div>
+      ${switchHTML('f-transcript_consent', s.transcript_consent, 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.')}
       <h3>Hotkeys while recording</h3>
       <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).
         Controller players can use a single key like F5 or a numpad key. While recording, a key used for a hotkey doesn't reach the game, so keyboard players should pick keys they don't play with.</p>
@@ -1276,6 +1305,12 @@ function renderSettings() {
   const cc = $('#f-comms_consent'), box = $('#commsBox');
   const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input, select', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
+  // sharing needs the mic recorded and sent: switching one off switches sharing off, sharing on switches them on
+  const sh = $('#f-share_tracks'), sm = $('#f-send_mic'), ma = $('#f-mic_audio');
+  if (sh && sm && ma) {
+    sh.onchange = () => { if (sh.checked) { sm.checked = true; ma.checked = true; } };
+    [sm, ma].forEach(x => x.addEventListener('change', () => { if (!x.checked) sh.checked = false; }));
+  }
   const en = $('#f-enabled'); if (en) en.onchange = async () => {
     try { S = await api('/api/autorecord', {enabled: en.checked}); toast(en.checked ? 'Auto-record on.' : 'Auto-record off.'); renderTop(); }
     catch (e) { toast(e.message, true); en.checked = !en.checked; }
@@ -1307,7 +1342,7 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
     const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }

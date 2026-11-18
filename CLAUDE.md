@@ -112,11 +112,22 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   for whole sessions. Now: no endless CSS animation (a test checks `app.css`), the web view is set invisible and
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
-- **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, auto-record (second, so the OBS download and
-  encoder test run while the player does the rest), team hub (one paste of the coach's sign-in link →
-  `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one), Google (optional once
-  on the hub). Shown until name + auto-record + (hub or Google) are done, or hidden. Never switches comms on: consent
-  stays in Settings. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
+- **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, "Your choices", team hub (one paste of the
+  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one),
+  Google (optional once on the hub). Choices (coach's decisions 18 Nov 2026), each applied at once by
+  `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
+  start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
+  mic recorded, "Send my mic track" on, `share_tracks`), comms transcripts Yes / No (`transcript_consent`, default
+  off; only the answer is kept, nothing is built yet). Shown until name + (hub or Google) + both questions answered
+  (`share_asked`, `transcript_asked`; changing either switch in Settings counts too), or hidden.
+- **Teammates' mic tracks** (`pcs_recorder/teamtracks.py`, hub `/api/team-tracks`, `PUT /api/me/sharing`): with
+  `share_tracks` (plus comms consent, mic on, "Send my mic track" on) the answer goes to the hub and the teammates'
+  shared mic tracks of the app's own uploaded recordings (last 7 days; asked again hourly for 3 days) are downloaded
+  into `team-tracks/<recording>/<player>-<scan id>.mic.m4a` in the data folder: one at a time, background priority,
+  never while Apex runs, records or scans (Apex starting stops the download, partial removed). Said no = the hub is
+  told (teammates then get 403 for this player's track); never answered = nothing sent. Removed with the recording.
+  The review player plays them in the mixer ("<name> mic"), each game of the recording with its own offset
+  (their jump − own jump), only inside that game. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
   (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
