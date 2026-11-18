@@ -243,7 +243,7 @@ def care_packages(reads, g):
         op = [r[0] for r in grp if r[3]['style'] == 'opened']
         if op: e['openedAt'] = op[0]
         out.append(e)
-    out.sort(key=lambda e: e['t'])
+    out.sort(key=lambda e: (e['t'], 'openedAt' not in e))      # first seen together: an opened one is older
     # numbers by timing: 1 and 2 first, then 3, then 4; a package first seen in round k can't be a later one
     used = 0
     for e in out:
