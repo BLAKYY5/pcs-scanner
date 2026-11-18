@@ -199,6 +199,9 @@ select.label:disabled{opacity:.5;cursor:default}
 .tick.knock::before{content:"";position:absolute;left:50%;top:-7px;width:8px;height:8px;margin-left:-4px;border:2px solid #8a877f;background:var(--bg);box-sizing:border-box;pointer-events:none}
 .tick.knock:hover::before{background:#8a877f}
 .ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
+.mk.heal,.mk.ult,.mk.tac{width:8px;height:8px;border-width:1px;top:78%;font-size:0}   /* heals and abilities: small, low in the lane */
+.mk.heal{background:#5fd0c8}.mk.ult{background:#4aa3ff;width:10px;height:10px;border-radius:2px;transform:translate(-50%,-50%) rotate(45deg)}.mk.tac{background:#9db8d9;top:22%}
+.mk.ult:hover,.mk.ult:focus-visible{transform:translate(-50%,-50%) rotate(45deg) scale(1.25)}
 .mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */
 .wrap:has(> .review.theatre){max-width:none}
