@@ -411,6 +411,23 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   own state and tier the same on all 1620 keyframes, values within 2 on 1617 (3 health reads 3-7 apart on a damaged
   bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review player shows own knocks like respawns (a grey tick with a
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
+- **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
+  opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
+  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, feedLines [t]}] and
+  `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
+  damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
+  lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
+  has is not ours), own knocks (and their end), shield + health lost; joined when < 25 s apart (45 s with gunfire in
+  between: `pcs_audio` loudness 14 dB over the game's median), ends stretched along gunfire. Result: kills decide (the
+  player's own death in the fight counts as a kill on us), then a lead of 2 knocks, a squad wiped in it = lost.
+  Third party: more than 3 enemy names, a name first seen >= 20 s after the first enemy line knocking one of
+  us, or hits / gunfire going on after every opponent met died. Ring: `read_storm` = share of red-tinted pixels in four
+  thin edge strips (outside the ring 3-4 strips 0.5-1.0, normal play 0-0.05, low health tints one or two); ring ticks =
+  health drops of one size with the shield unchanged (ring damage skips shields; 1.5 s tick from the deathfield script;
+  3 a tick seen in rounds 1-2). Damage = ticks lasted x tick size (else the round's / game's tick size). Truths:
+  `pcs-handoff\checkset\checkset-fights.json` (dev 7 Nov, held 17 Nov; labelled on the feed line images + own card).
+  The review player draws fights as bands on the kill feed lane (green won, grey lost, amber even, dashed = third party)
+  and time outside the ring as an orange bar on the rings lane, both in Events.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
   Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a

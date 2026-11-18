@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -476,6 +476,8 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                                + (pos if pos else [None, None, None]) + [vel, bool(rg and rg['fine']), bool(rg and rg.get('pre'))])
             try: feed.read(view_top_once() if st else img, t)
             except Exception: pass
+            try: perf.setdefault('_storm', []).append((round(t, 2), pcs_fights.read_storm(img)))   # ring damage: red screen edges
+            except Exception: pass
             if not st:          # "N SQUADS LEFT" (16:9 only so far)
                 try: sq = HUD.SquadsLeft.read(img)
                 except Exception: sq = None
@@ -601,10 +603,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []
+    rings = []; cards = []; icons = []; bars = []; storm = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
-        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -619,6 +621,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
     perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0])
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
+    perf['_storm'] = sorted(storm, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -748,15 +751,17 @@ def main():
         except Exception as e: perf['mapIconsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_respawn.attach(games, perf.pop('_cards', []), samples)    # respawns, the player's own deaths
         except Exception as e: perf['respawnError'] = f'{type(e).__name__}: {e}'[:200]
-        try: pcs_bars.attach(games, perf.pop('_bars', []), samples)     # own knocks, shield / health timelines
+        bar_reads = perf.pop('_bars', [])
+        try: pcs_bars.attach(games, bar_reads, samples)     # own knocks, shield / health timelines
         except Exception as e: perf['barsError'] = f'{type(e).__name__}: {e}'[:200]
         perf['refine'] = time.time() - t_tl
-        audio = None
+        audio = None; loud = None
         if kind == 'video':     # sound cues from the game track back up what was read on screen
             t_au = time.time()
             try:
                 import pcs_audio
                 audio = pcs_audio.scan(path)
+                loud = audio.get('_loud')
                 pcs_audio.attach(games, audio)
             except Exception as e:      # never lose a scan to the sound check
                 audio = {'error': f'{type(e).__name__}: {e}'[:200]}
@@ -775,6 +780,8 @@ def main():
             for i, gm in enumerate(games):          # a game's lines: from 60 s before it starts to 60 s before the next
                 t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
                 gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1, (gm.get('select') or {}).get('squad'))
+        try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
+        except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines},
                       open(os.path.join(A.out, name + '.feed.json'), 'w'))
