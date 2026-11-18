@@ -2258,6 +2258,73 @@ def test_banner_pickup_and_beacon_from_status_lines():
     assert P.banner_steps([D(1, None), D(2, None)]) == {}
 
 
+def _own_card_frame(state, tier=(40, 140, 240), shield=0, health=100, dx=0):
+    """A 1440p frame with the player's own card bottom left: shield segments (25 points each, 63 px apart from x 236)
+    over a white health bar (rows 1344..1359), or the knocked look (red name, thin yellow bleed-out bar)."""
+    import numpy as np
+    a = np.full((1440, 2560, 3), 40, np.uint8)
+    a[1300:1370, 200:600] = (60, 52, 58)                                      # the card's dark plate
+    x0 = 236 + dx
+    if state == 'alive':
+        for k in range(4):                                                    # 4 segments: dark when empty
+            a[1328:1340, x0 + 63 * k:x0 + 63 * k + 58] = (70, 70, 75)
+        full, part = divmod(shield, 25)
+        for k in range(full): a[1328:1340, x0 + 63 * k:x0 + 63 * k + 58] = tier
+        if part: a[1328:1340, x0 + 63 * full:x0 + 63 * full + round(58 * part / 25)] = tier
+        a[1344:1360, x0:x0 + round(317 * health / 100)] = (250, 250, 250)
+    else:
+        a[1290:1316, x0:x0 + 160:3] = (230, 30, 30)                            # red name strokes
+        a[1348:1356, x0:x0 + 300] = (200, 157, 0)
+    return a
+
+
+def test_own_bars_and_knocks():
+    """The player's own card: tier, shield points and health are read from the bars; a knocked card (yellow bleed-out
+    bar, red name) is told apart; per game, a knock needs 2 reads, menus inside it are fine, an alive card soon after =
+    revived; bar values enter the timeline only when two reads agree."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_bars as B
+    r = B.read_own(_own_card_frame('alive', (40, 140, 240), 50, 60))
+    assert r['state'] == 'alive' and r['tier'] == 'blue' and abs(r['shield'] - 50) <= 1 and abs(r['health'] - 60) <= 1, r
+    r = B.read_own(_own_card_frame('alive', (175, 45, 235), 88, 100, dx=3))   # the card shakes a few px when hit
+    assert r['tier'] == 'purple' and abs(r['shield'] - 88) <= 2 and r['health'] == 100, r
+    r = B.read_own(_own_card_frame('alive', (198, 196, 200), 50, 100))        # the white tier is a light grey
+    assert r['tier'] == 'white' and r['shield'] == 50, r
+    r = B.read_own(_own_card_frame('alive', None, 0, 30))
+    assert r['tier'] is None and r['shield'] == 0 and abs(r['health'] - 30) <= 1, r
+    pink = _own_card_frame('alive', None, 0, 100); pink[1344:1360, 236 + 100:236 + 317] = (249, 207, 208)
+    assert B.read_own(pink)['health'] == 100                                  # pink health after a revive counts
+    assert B.read_own(_own_card_frame('knocked')) == {'state': 'knocked', 'y': 1348}
+    import numpy as np
+    assert B.read_own(np.zeros((1440, 2560, 3), np.uint8)) is None
+    # teammates: the bars under an alive card found by pcs_respawn.read_cards
+    f = _card_frame([(1146, 'alive', (240, 150, 30), 8)])
+    f[1146 + 24:1146 + 32, 185:420] = 40
+    f[1146 + 24:1146 + 32, 185:185 + 42 + 39] = (40, 140, 240)                # 2 segments blue
+    f[1146 + 33:1146 + 43, 185:420] = 40; f[1146 + 33:1146 + 43, 185:185 + 108] = 240    # health half full
+    m = B.read_mates(f, [{'y': 1146, 'state': 'alive', 'hue': 35}])
+    assert m[0]['tier'] == 'blue' and abs(m[0]['shield'] - 50) <= 1 and abs(m[0]['health'] - 50) <= 1, m
+    # knocks per game
+    K, A = {'state': 'knocked'}, {'state': 'alive', 'tier': 'blue', 'shield': 75, 'health': 100}
+    reads = [(10, A), (11, K), (12, K), (13, None), (20, K), (22, A),        # knocked, a menu, revived
+             (40, K), (41, A),                                               # one knocked read: not trusted
+             (60, K), (61, K), (62, None)]                                   # never up again: died
+    ks = B.own_knocks(reads, 0, 100)
+    assert ks == [{'t': 11.0, 'end': 20.0, 'reads': 3, 'outcome': 'revived'},
+                  {'t': 60.0, 'end': 61.0, 'reads': 2, 'outcome': 'died'}], ks
+    tl = B.timeline([(1, A), (2, dict(A, shield=74)), (3, dict(A, shield=30)), (4, dict(A, shield=40)), (5, dict(A, shield=41)),
+                     (6, K), (7, K), (8, dict(A, shield=0)), (9, dict(A, shield=0))])
+    assert tl == [[1.0, 'blue', 75, 100], [4.0, 'blue', 40, 100], [6.0, 'knocked'], [8.0, 'blue', 0, 100]], tl
+    games = [{'tStart': 0.0}, {'tStart': 50.0}]
+    bar_reads = [(float(t), K if 11 <= t <= 13 else A, [{'y': 1058, 'tier': 'blue', 'shield': 75, 'health': 100}], False)
+                 for t in range(5, 60)]
+    B.attach(games, bar_reads, [])
+    assert games[0]['ownKnocks'][0]['t'] == 11.0 and games[0]['ownKnocks'][0]['outcome'] == 'revived', games[0]
+    st = games[0]['shieldTimeline']
+    assert st['cols'] == ['t', 'tier', 'shield', 'health'] and st['self'][0] == [5.0, 'blue', 75, 100], st
+    assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
