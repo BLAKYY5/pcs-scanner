@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_minimap
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -498,6 +498,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             except Exception: own_bar, mate_bars = None, []
             if own_bar or mate_bars:
                 perf.setdefault('_bars', []).append((round(t, 2), own_bar, mate_bars, bool(hud[2]['spec']) if hud and hud[2] else None))
+            if not d:                                                       # own HUD only (no map, drop or select)
+                try: us = pcs_usage.read(img, t, perf)                   # heal panel, ult and tactical icons
+                except Exception: us = None
+                if us: perf.setdefault('_usage', []).append(us)
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -607,10 +611,11 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; minimap = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
-        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', []); minimap += pf.pop('_minimap', [])
+        rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
+        usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); pf.pop('_usageMaskAt', None)
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -626,6 +631,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0])
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
+    perf['_usage'] = sorted(usage, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     return events, samples, labels, perf
 
@@ -763,6 +769,9 @@ def main():
         try: pcs_minimap.attach(games, mm)                                 # position from the HUD minimap (no debug overlay needed)
         except Exception as e: perf['minimapError'] = f'{type(e).__name__}: {e}'[:200]
         perf['minimap'] = time.time() - t_mm; perf['minimapReads'] = len(mm)
+        perf.pop('_usageMaskAt', None)
+        try: pcs_usage.attach(games, pcs_usage.unpack(perf.pop('_usage', [])), bar_reads)    # heals, ult / tactical uses
+        except Exception as e: perf['usageError'] = f'{type(e).__name__}: {e}'[:200]
         perf['refine'] = time.time() - t_tl
         audio = None; loud = None
         if kind == 'video':     # sound cues from the game track back up what was read on screen

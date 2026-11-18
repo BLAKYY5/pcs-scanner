@@ -2476,6 +2476,84 @@ def test_fights_and_ring_damage():
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
 
 
+def _usage_frame(item=None, bar=(40, 140, 240), p=0.4, tac=None, ult=None):
+    """A frame with the heal panel (item icon + progress bar) and / or the ability icons bottom centre."""
+    import numpy as np
+    a = np.full((1440, 2560, 3), 60, np.uint8)
+    if item:
+        a[928:930, 1790:2200] = 235; a[1023, 1790:2200] = 235                   # the panel's frame lines
+        a[991:1010, 1800:2172] = 25                                            # dark track
+        a[991:1010, 1800:1800 + int(p * 372)] = bar                            # fill
+        a[945:1012, 1640:1716] = 30
+        if item == 'cell': a[958:998, 1660:1692] = (40, 60, 200)
+        if item == 'battery': a[951:988, 1660:1692] = (40, 60, 200); a[990:1004, 1658:1696:3] = 240
+        if item == 'medkit': a[956:1000, 1647:1708] = (210, 30, 30)
+        if item == 'syringe': a[960:996, 1650:1700] = 240; a[975:985, 1672:1680] = (210, 30, 30)
+        if item == 'phoenix': a[950:1000, 1655:1700] = 240; a[1000:1008, 1655:1700] = (240, 140, 30)
+        if item == 'revive': a[935:1016, 1580:1626] = (40, 90, 230); a[950:1000, 1650:1700] = 240
+    def hint(x0, y0=1383):
+        a[y0:y0 + 24, x0:x0 + 28] = 240; a[y0 + 6:y0 + 18, x0 + 10:x0 + 18] = 20
+    def text(x0, x1, y0=1386):
+        a[y0:y0 + 19, x0:x1:3] = 240
+    if tac == 'ready': a[1313:1355, 784:827:2] = 240; hint(806)
+    if tac == 'cooldown': a[1313:1355, 784:827:2] = 110; text(801, 866)
+    if ult == 'ready':
+        a[1212:1366, 1193:1200] = (30, 140, 250); a[1212:1366, 1360:1367] = (30, 140, 250); a[1212:1219, 1193:1367] = (30, 140, 250)
+        a[1260:1336, 1250:1308:2] = 240; hint(1266)
+    if ult == 'charging': a[1260:1336, 1250:1308:2] = 120; text(1256, 1304)
+    return a
+
+
+def test_usage_heals_and_abilities():
+    """Heal panel: the item from its icon (cell, battery, syringe, med kit, phoenix), the bar's colour and fill; a revive
+    is not a heal. Ult / tactical: ready (key hint) vs charging / cooldown (text). Per game: a heal needs 2 panel reads or
+    the bars going up after it; a use = ready, then the other state read twice soon after; spectating frames are left
+    out; the legend comes from the legend select screen."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_usage as U
+    for item, bar in (('cell', (40, 140, 240)), ('battery', (40, 140, 240)), ('medkit', (250, 10, 10)),
+                      ('syringe', (250, 10, 10)), ('phoenix', (40, 140, 240))):
+        h = U.read_heal(_usage_frame(item, bar, 0.4))
+        assert h and h['item'] == item and abs(h['p'] - 0.4) < 0.02, (item, h)
+    assert U.read_heal(_usage_frame('cell', (250, 10, 10)))['item'] is None   # a shield icon with a red bar: not trusted
+    assert U.read_heal(_usage_frame('revive'))['item'] == 'revive'
+    assert U.read_heal(_usage_frame()) is None and U.read_heal(np.zeros((1440, 2560, 3), np.uint8)) is None
+    ab = U.read_abilities(_usage_frame(tac='ready', ult='ready'))
+    assert ab['tac'] == 'ready' and ab['ult'] == 'ready' and ab['ultMask'].sum() > 0, ab
+    ab = U.read_abilities(_usage_frame(tac='cooldown', ult='charging'))
+    assert ab['tac'] == 'cooldown' and ab['ult'] == 'charging', ab
+    assert U.read_abilities(_usage_frame()) == {'tac': None, 'ult': None}
+    # packing for the scan's chunks keeps the masks
+    row = U.read(_usage_frame('cell', tac='ready', ult='ready'), 5.0, {})
+    back = U.unpack([row])[0]
+    assert back[1]['item'] == 'cell' and back[2]['tacMask'].shape == (U.TAC_ICON[1] - U.TAC_ICON[0], U.TAC_ICON[3] - U.TAC_ICON[2])
+    # per game
+    C = lambda p: {'item': 'cell', 'bar': 'blue', 'p': p, 'dy': 0}
+    B = lambda p: {'item': 'battery', 'bar': 'blue', 'p': p, 'dy': 0}
+    R, Ch, T, Cd = {'tac': 'ready', 'ult': 'ready'}, {'tac': 'ready', 'ult': 'charging', 'ultText': 24}, {'tac': 'cooldown', 'tacText': True, 'ult': 'ready'}, {'tac': None, 'ult': None}
+    usage = [(10.0, C(0.2), R), (11.0, C(0.6), R), (12.0, None, R),           # a cell, 2 reads
+             (20.0, B(0.2), R), (21.0, B(0.4), R), (22.0, B(0.6), R), (23.0, B(0.8), R), (24.0, B(0.1), R), (25.0, B(0.3), R),
+             (30.0, C(0.5), R),                                               # one read, no bars: not trusted
+             (40.0, None, R), (41.0, None, T), (42.0, None, T), (50.0, None, Cd),    # tactical used at 41
+             (60.0, None, R), (61.0, None, Ch), (62.0, None, Ch),                    # ult used at 61
+             (70.0, None, R), (71.0, None, T),                                       # one cooldown read only
+             (80.0, None, R), (81.0, None, T), (82.0, None, T)]                      # spectating: someone else's HUD
+    alive = lambda s: {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': 100}
+    bars = [(9.0, alive(25), [], False), (13.0, alive(50), [], False), (19.0, alive(0), [], False), (26.0, alive(100), [], False)] +            [(t, {'state': 'spectating'}, [], True) for t in (80.0, 81.0, 82.0)]
+    games = [{'tStart': 0.0, 'select': {'squad': [{'legend': 'seer', 'self': True}, {'legend': 'lifeline', 'self': False}]}},
+             {'tStart': 100.0}]
+    U.attach(games, usage, bars)
+    hs = [(h['item'], h['done']) for h in games[0]['heals']]
+    assert hs == [('cell', True), ('battery', True), ('battery', False)], games[0]['heals']   # 2nd battery: no bars, bar 0.3
+    assert abs(games[0]['heals'][0]['t'] - 9.5) < 0.01, games[0]['heals'][0]     # started before the first read
+    assert games[0]['abilities'] == [{'t': 41.0, 'kind': 'tactical', 'legend': 'seer'}, {'t': 61.0, 'kind': 'ult', 'legend': 'seer'}], games[0]['abilities']
+    assert games[1]['heals'] == [] and games[1]['abilities'] == []
+    # legend signs: a sign compared with itself is that legend
+    leg, iou, margin = U.legend_of('ult', U._bits([s for s in U.SIGNS if s[:2] == ('ult', 'seer')][0][2]))
+    assert leg == 'seer' and iou == 1.0, (leg, iou, margin)
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""

@@ -445,6 +445,37 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   lines on a red plate (+RP) are read with both sides 'squad' (pcs_hud.kill_parts): such a fight is missed.
   The review player draws fights as bands on the kill feed lane (green won, grey lost, amber even, dashed = third party)
   and time outside the ring as an orange bar on the rings lane, both in Events.
+- **Heals, ult and tactical uses** (`pcs_usage.py`, 16:9 only, ~1 ms per keyframe, read only on own-HUD frames: no map,
+  drop or select screen). Heal panel right of centre (frame lines rows 928 / 1023, progress bar from x 1800 rows 991..1009,
+  icon x 1636..1718): the item by its icon's colours and shape (cell = narrow blue down to row ~997, battery = blue
+  951..987 with white stripes, syringe = white with a small red cross, med kit = red, phoenix = orange), never by its
+  name (players' languages differ); the bar's colour must suit the item. A revive uses the same panel with a blue / green
+  frame: not a heal. Per game `heals` = [{t, item, done, reads}]: a heal needs 2 panel reads (runs split at a gap over
+  3.5 s, a bar that fills slower than half its usual rate, or starts again: a queued second heal); t = first read minus
+  the part already filled; done = the bar would be full within 1.2 s of its last read (else it vanished with time left:
+  cancelled). Measured fill times (S31): cell 2.5 s, battery 5, syringe 4, med kit 8. The own shield / health bars
+  can't confirm a heal: shields regenerate on their own and were seen rising during cancelled heals. Single-read heals
+  (mostly cancelled ones and cells caught once) are not reported.
+  Abilities, bottom centre: a key hint box (about 28 px, more than half white, centred under the icon) = ready; the
+  charge / cooldown text under it (sparse, any language) = charging / cooldown; tactical icon dimmed with the hint still
+  shown = in use (Seer's wind-up, the countdown follows); ult glow (any saturated colour: blue for Seer, red for Sparrow)
+  without hint or text = running. The full map's black key bar hides them (checked first). Per game `abilities` =
+  [{t, kind: ult | tactical, legend}]: tactical = ready, then within 4 s a dimmed read, 2 reads before it is ready
+  again, a cooldown text among them; ult = ready, then running / unseen, then the charge text twice within 90 s, with the
+  running glow seen or the first charge text one digit wide ('1%'); t = the first read after the last ready one.
+  Legend: the legend select screen's own slot, else the icon signs (`SIGNS`: 12 x 12 signs of the white shape of each
+  `ultimate_*` / `tactical_*` UI image, derived once with a private tool; the images are not in the repo) against the
+  averaged ready icon of the game (IoU >= 0.5, 0.15 ahead of the next legend). Abilities with charges (Sparrow's ult)
+  stay "ready" after a use while a charge is left: not detected. Spectating frames are left out. Region cache boxes
+  `heal` and `abil`; check set `pcs-handoff\checkset\checkset-usage.json` (split before tuning: dev 17 Nov, held
+  7 + 13 Nov). Held-out: heals 29 of 37 found, item 29 / 29, done 28 / 28, no false heal; the 8 missed were each on one
+  keyframe only (6 cancelled). Before a fix found on held-out data (the panel's edge glows blue as a cell finishes and
+  read as a revive) it was 23 of 36. Tactical 3 / 3, ult 2 / 2, none false (small sample). Dev: heals 26 / 33, tactical
+  4 / 5 (Seer's tactical read 10 s late once: its icon over a white wall still looked ready), ult 2 / 2. On 7 Nov the
+  Bangalore ult showed its glow without a key hint while ready, so no ult use could be read there. CPU vs GPU decoding
+  (17 Nov, 360 keyframes): 352 the same, the rest read vs not read on one keyframe, never two items. The review player draws
+  heals (small teal dots), ult uses (blue diamonds) and tacticals (small grey dots) on the events lane; heals and ults
+  also in Events ("Shield battery", "Ultimate used · Seer").
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:
@@ -483,7 +514,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
 - **Region cache** (`tools/region_cache.py`): decodes a recording once with the scanner's own `keyframes()` and keeps,
   per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, HUD minimap (`minimap`), top-left block for legend select /
   banner / ring clock, rest of the banner words, top-right counters, kill feed, squad cards + own bars `squad`, added
-  18 Nov 2026: older caches lack it; `--boxes squad,left` for the cards, bars and spectating), as lossless WebP (bit-identical: lossy
+  18 Nov 2026: older caches lack it; `--boxes squad,left` for the cards, bars and spectating; `heal`, `abil` for
+  pcs_usage), as lossless WebP (bit-identical: lossy
   formats were tried and changed reader results). `build "<rec>" --verify` (about 1.5 GB per hour of recording),
   then `run "<rec>" --readers squads,own --per game` re-runs readers in seconds to a minute; `verify` compares with the
   reads taken on the real frames. `Cache(dir).frames()` gives full-size frames (black outside the boxes), so readers

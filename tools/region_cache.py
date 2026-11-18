@@ -44,6 +44,8 @@ BOXES = {
     'feed':     (260, 640, 1820, 2470),   # Feed: a[260:640, 1820:2470]
     'squad':    (860, 1400, 0, 600),      # pcs_respawn cards a[860:1330, 0:430]; pcs_bars own card and bars
                                           #   (rows 1290..1365, x 230..560) and teammate bars
+    'heal':     (900, 1060, 1560, 2300),  # pcs_usage: the heal panel right of centre (icon, name, progress bar)
+    'abil':     (1180, 1440, 600, 1440),  # pcs_usage: heal slot, tactical icon, ult icon + charge % (bottom centre)
     'minimap':  (56, 396, 56, 396),       # pcs_minimap: the HUD minimap a[66:386, 66:388] with a margin
 }
 CODEC = 'webp-lossless'
@@ -86,6 +88,8 @@ READERS = {
     'ring':    (('left',), _ring),
     'dbg':     (('dbg',), _dbg),
     'ownbar':  (('squad',), lambda a: __import__('pcs_bars').read_own(a)),    # own card: shield, health, knocked
+    'heal':    (('heal',), lambda a: __import__('pcs_usage').read_heal(a)),   # heal panel: item, bar colour, progress
+    'abil':    (('abil',), lambda a: {k: v for k, v in __import__('pcs_usage').read_abilities(a).items() if 'Mask' not in k and v} or None),
 }
 VERIFY = ('legends', 'banner', 'squads', 'own', 'ranked', 'ring', 'dbg')   # stored by build --verify
 
@@ -242,6 +246,8 @@ def _short(r, v):
     if r == 'ring': return f"{'pre ' if v['pre'] else ''}{v['v']}"
     if r == 'dbg': return 'pos' if v['pos'] else 'vel'
     if r == 'feed': return v.get('event', 'line')
+    if r == 'heal': return f"{v['item'] or '?'} {v['p']:.1f}"
+    if r == 'abil': return f"tac {v.get('tac') or '-'} ult {v.get('ult') or '-'}"
     if r == 'ownbar': return v['state'] if v['state'] != 'alive' else f"{v['tier'] or '-'} {v['shield']}/{v['health']}"
     return str(v)
 
