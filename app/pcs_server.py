@@ -33,7 +33,7 @@ UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
-              "mic_audio", "mic_device", "send_mic",
+              "mic_audio", "mic_device", "send_mic", "crash_reports",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
@@ -149,7 +149,8 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 
 # what the review player shows of each game, beside the drop / rings / landing it always had
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
-               "select", "banner", "squadsLeft", "own", "feedStats")
+               "select", "banner", "squadsLeft", "own", "feedStats",
+               "respawns")   # scanner PR #52: [{t, who: teammate | self, hue, deadSince, how}], shown like kills
 
 
 def _same_sig(a, b) -> bool:
