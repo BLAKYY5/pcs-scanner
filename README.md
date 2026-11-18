@@ -1,8 +1,8 @@
 # PCS Scanner
 
 Scans Apex Legends recordings for Project Conquerors (PCS): drop spots, landing, ring timings, EVO harvesters,
-ranked/scrim mode and the kill feed. Results upload to the team's Google Drive and are imported into the
-Conquerors Loot Book overnight.
+ranked/scrim mode and the kill feed. Results go to the team hub (the coach's own server) and from there into the
+Conquerors Loot Book. Google Drive is optional and only gets the small result files, never voice or video.
 
 ## Install (players)
 
@@ -18,13 +18,14 @@ Conquerors Loot Book overnight.
    3. **Join the team hub**: paste the link your coach sent you, **Join**. The hub is reached through
       [Tailscale](https://tailscale.com/download/windows): if the app says so, install it, sign in with the invite
       from your coach, and press **Join** again.
-   4. **Google Drive** (optional once you're on the hub): **Sign in with Google**. Google may say "Google hasn't
+   4. **Google** (optional once you're on the hub; needed only for YouTube uploads or without a hub): **Sign in with Google**. Google may say "Google hasn't
       verified this app": click **Advanced**, then the **Go to …** link, then **Continue**.
 4. **Play Apex.** Recording starts and stops by itself. The app waits in the tray (bottom right) and starts with
    Windows; closing the window keeps it there, **Quit** is in the tray menu.
 
 Voice comms and your mic are never recorded until you turn them on in Settings → Sound and comms, once your team
-agreed. Weapon names in the kill feed need the team link from your coach (Settings → Team link).
+agreed. Weapon names in the kill feed come from the team hub once you joined it (without a hub: the team link
+from your coach, Settings → Team link).
 
 ### For the coach: invite a player
 On the team hub's **Keys** page, make a key for the player and press **Copy link**. Send that link to the player
@@ -78,8 +79,10 @@ and tests your graphics card for a few seconds. From then on:
 - **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
   8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 
-The app only has Google's `drive.file` permission: it can see and change only the files it creates
-(a "PCS Scans" folder in your Drive, shared read-only with the coach).
+Google Drive (optional): the app only has Google's `drive.file` permission, so it can see and change only the
+files it creates (a "PCS Scans" folder in your Drive with the small result files, shared read-only with the coach's
+address you typed in Settings). Your mic track never goes to Drive: with "Send my mic track" on it goes to the team
+hub only. See [PRIVACY.md](PRIVACY.md).
 
 ## Layout
 - `scanner/` — the scanner (`pcs_scan.py`, `pcs_hud.py`) and its data files. Also runs from the command line:
@@ -88,7 +91,7 @@ The app only has Google's `drive.file` permission: it can see and change only th
   `pcs_core.py` has paths, settings, Google Drive, updates; `pcs_server.py` is the local server the window talks
   to (127.0.0.1, random port and token); `web/` is the interface. API tests: `python tests/test_ui.py`.
 - `app/pcs_recorder/` — Auto-record: Apex detection, private OBS driven over obs-websocket, scan prompt,
-  folder limits, uploads to the team hub and/or Drive. Logic tests: `python tests/test_recorder.py`.
+  folder limits, uploads to the team hub (or to Drive when no hub is set). Logic tests: `python tests/test_recorder.py`.
 - `.github/workflows/build.yml` — builds `PCS-Scanner.exe` on every push; a `v*` tag publishes a release.
 
 ## Build settings (repository Settings → Secrets and variables → Actions)

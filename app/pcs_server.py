@@ -153,6 +153,7 @@ def recorded_at(path: str, scan: dict | None = None) -> float | None:
 GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "rankedShare", "clockStart", "harvesters",
                "select", "banner", "squadsLeft", "own", "feedStats",
                "ringCircles", "respawns",   # scanner PR #52: respawns [{t, who: teammate | self, hue, deadSince, how}], shown like kills
+               "ownDeaths",                 # the recording player's deaths [t]: dead time and lives in the game bar
                "ownKnocks")   # own knocks [{t, end, reads, outcome}], shown like respawns
 
 
