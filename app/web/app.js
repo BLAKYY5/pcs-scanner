@@ -481,9 +481,29 @@ function gameHeadHTML(g, i, total) {
     const v = (k, tip) => `<span class="gstat"${tip ? ` title="${esc(tip)}"` : ''}><small>${k[0].toUpperCase() + k.slice(1)}</small><b>${own[k] != null ? own[k] : '–'}</b></span>`;
     stats.push(v('kills'), v('assists'), v('knocks'), v('damage', own.damageSingleRead ? 'Read once, at the very end of the game' : ''));
   }
+  const lv = livesOf(g);
+  if (lv) stats.push(`<span class="gstat" title="Lives in this game: 1 + your respawns${lv.lives > 1 ? ' (' + lv.each.map(fmtT).join(', ') + ' each)' : ''}"><small>Lives</small><b>${lv.lives}</b></span>`,
+    `<span class="gstat" title="Time dead: from each death to the respawn, and after the last death until the game ended for you (spectating)"><small>Dead</small><b>${fmtT(lv.dead)}</b></span>`);
   if (sl.length) stats.push(`<span class="gstat" title="The last count read in this game. Not always your placement: it keeps going down while you spectate."><small>Squads left (last read)</small><b>${sl[sl.length - 1][1]}</b></span>`);
   if (stats.length) parts.push(`<span class="gstats">${stats.join('')}</span>`);
   return parts.join('');
+}
+/* lives and dead time of the recording player in one game (scans with respawn reads: `respawns` + `ownDeaths`); null
+   for older scans (never shown as 0). Same rule as the hub's replay page: a life ends at a death, a respawn starts the
+   next one; dead = death to respawn, and after the last death the rest of the game (spectating the squad). */
+function livesOf(g) {
+  if (!Array.isArray(g.respawns) || g.tEndGame == null) return null;
+  const L = g.landing || {}, jump = L.exitAtExact ?? L.exitAt ?? g.tStart, end = g.tEndGame;
+  const backs = g.respawns.filter(r => r && r.who === 'self' && typeof r.t === 'number').sort((a, b) => a.t - b.t);
+  const each = []; let dead = 0, start = jump;
+  for (const d of (g.ownDeaths || []).filter(x => typeof x === 'number').sort((a, b) => a - b)) {
+    if (start == null || d < start) continue;
+    const b = backs.find(r => r.deadSince != null && Math.abs(r.deadSince - d) <= 1.5) || backs.find(r => r.t > d);
+    each.push(d - start);
+    if (b) { dead += b.t - d; start = b.t; } else { dead += Math.max(0, end - d); start = null; }
+  }
+  if (start != null) each.push(Math.max(0, end - start));
+  return {lives: each.length, dead, each};
 }
 function drawGameBar(t) {
   const el = $('#gameBar'), games = (RV && RV.d.games) || [];

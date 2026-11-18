@@ -2783,6 +2783,10 @@ def test_minimap_layers_and_quiet_drawing():
         assert text in js, text
     assert "requestAnimationFrame" not in js and "setInterval" not in js
     assert "ringCircles" in pcs_server.GAME_FIELDS                                   # passed to the page when the scan has it
+    assert "ownDeaths" in pcs_server.GAME_FIELDS and "respawns" in pcs_server.GAME_FIELDS   # lives / dead time in the game bar
+    app = (web / "app.js").read_text(encoding="utf-8")
+    assert "function livesOf(g)" in app and "<small>Dead</small>" in app and "<small>Lives</small>" in app
+    assert "if (!Array.isArray(g.respawns) || g.tEndGame == null) return null;" in app   # older scans: nothing, never 0
     ses = (web / "session.js").read_text(encoding="utf-8")
     assert 'id="wtMap"' in ses and "wtMapSetup($('#wtMap'), st," in ses
     tick = ses[ses.index("function syncTick"):]
