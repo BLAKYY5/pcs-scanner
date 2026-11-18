@@ -46,11 +46,19 @@ ROWS_MAP = np.clip(np.round(204 + (_Y[:1340] - 40) * 0.75), 0, H - 1).astype(int
 ROWS_DROP = np.clip(np.round(337 + (_Y[88:1088] - 88) * 0.75), 0, H - 1).astype(int)     # panel 337..1087 -> 88..1088
 ST_MAP_M0 = np.array([[100 / 1264, 0], [0, 100 / 1264], [-648 * 100 / 1264, -40 * 100 / 1264]])
 
-def view_top(img): return img[ROWS_TOP]
+# Each view fills only the boxes its readers look at (left black elsewhere; a new zero frame costs nothing until
+# written): the whole remapped frame used to be built 3 to 4 times per keyframe. Boxes, by reader:
+#   top:  ring clock rows 417..563 (spectating +85) x 0..400, debug overlay 40..110 x 0..300, ranked badge
+#         120..190 x 2480..2545, kill feed 260..640 x 1820..2470  -> rows 0..640, whole width
+#   map:  full map 0..1340 x 560..1960 (remapped), key-hint bar 1362..1430 (not remapped)
+#   drop: map panel 88..1088 x 1520..2520 (remapped), legend 1125..1180 x 1740..2075 (moved right)
+TOP_ROWS = 640
+def view_top(img):
+    b = np.zeros_like(img); b[:TOP_ROWS] = img[ROWS_TOP[:TOP_ROWS]]; return b
 def view_map(img):
-    b = img.copy(); b[:1340] = img[ROWS_MAP]; return b
+    b = np.zeros_like(img); b[:1340, 560:1960] = img[ROWS_MAP, 560:1960]; b[1340:] = img[1340:]; return b
 def view_drop(img):
-    b = img.copy(); b[88:1088, 1520:2520] = img[ROWS_DROP, 1520:2520]
+    b = np.zeros_like(img); b[88:1088, 1520:2520] = img[ROWS_DROP, 1520:2520]
     b[1125:1180, 1740:2075] = img[1140:1195, 1983:2318]    # legend ('Your / Enemy Drop Point') moves right
     return b
 
@@ -358,15 +366,29 @@ def pick_decoder(path):
     except Exception: pass
     return DECODER
 
+# How the decoded frames get from ffmpeg to the scanner. Each 1440p keyframe is 11 MB. Until 1.10.11 the pipe was read
+# through a 100 MB Python buffer (bufsize=10**8, then .read(n)): 134 ms and 0.18 CPU-s per keyframe, 3/4 of it kernel
+# time. Read straight into one buffer per frame (no Python buffer in between): 25 to 30 ms and 0.08 CPU-s, the same
+# bytes. Measured 18 Nov 2026, also against a socket on 127.0.0.1 (29 ms, ~12 % more CPU than this pipe).
+def _read_full(f, buf):
+    """Fill buf from the unbuffered stream f. False if the stream ended first."""
+    mv = memoryview(buf); got = 0; n = len(buf)
+    while got < n:
+        r = f.readinto(mv[got:])
+        if not r: return False
+        got += r
+    return True
+
 def keyframes(path, start=0.0, end=None):
-    """Keyframes (about 1 per second) between start and end, as (time, RGB image)."""
+    """Keyframes (about 1 per second) between start and end, as (time, RGB image). The images are read-only."""
     name, dec = pick_decoder(path)
     w, h = probe(path)
     vf = 'showinfo' if (w, h) == (W, H) else f'scale={W}:{H},showinfo'
     cmd = ['ffmpeg', '-hide_banner', '-nostats', '-v', 'info'] + dec + ['-skip_frame', 'nokey', '-copyts'] + \
           (['-ss', f'{start:.2f}'] if start > 0 else []) + \
           ['-i', path, '-fps_mode', 'passthrough', '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
-    pr = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=10 ** 8)
+    pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+                          creationflags=0x08000000 if os.name == 'nt' else 0)       # no console window
     import threading, queue
     ts = queue.Queue()
     def rd():
@@ -377,14 +399,15 @@ def keyframes(path, start=0.0, end=None):
     n = W * H * 3; i = 0
     try:
         while True:
-            buf = pr.stdout.read(n)
-            if len(buf) < n: break
+            buf = bytearray(n)                          # a new buffer per frame: a reader may keep the previous one
+            if not _read_full(pr.stdout, buf): break
             try: t = ts.get(timeout=10)
             except Exception: t = start + float(i)
             i += 1
             if t < start - 0.01: continue
             if end is not None and t >= end: break
-            yield t, np.frombuffer(buf, np.uint8).reshape(H, W, 3)
+            img = np.frombuffer(buf, np.uint8).reshape(H, W, 3); img.flags.writeable = False    # read-only, as before
+            yield t, img
     finally:
         if pr.poll() is None: pr.kill()
         pr.wait()
@@ -402,8 +425,11 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     for t, img in frames:
         tp = time.time(); perf['decode'] = perf.get('decode', 0) + tp - tw
         cands = [mode] if mode is not None else ([True, False] if votes[True] > votes[False] else [False, True])
-        d = None; hud = None
-        if False in cands:      # legend select screen (16:9 only so far): start of a game, the squad's legends
+        d = None; hud = None; top = []
+        def view_top_once():    # 4:3 stretched: the remapped top, built once per keyframe
+            if not top: top.append(view_top(img))
+            return top[0]
+        if False in cands:     # legend select screen (16:9 only so far): start of a game, the squad's legends
             try: d = legends.read(img)
             except Exception: d = None
             if d: events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
@@ -422,7 +448,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
-                a = view_top(img) if st else img
+                a = view_top_once() if st else img
                 rg = HUD.read_ring(a); pos, vel = HUD.read_dbg(a)
                 if rg or pos: hud = (st, a, rg, pos, vel); votes[st] += 1; break
             st = hud[0] if hud else (mode if mode is not None else votes[True] > votes[False])
@@ -431,7 +457,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 perf.setdefault('_rank', []).append((round(t, 2), HUD.ranked(a)))
                 samples.append([round(t, 2), labels.id(rg['lab']) if rg else -1, rg['v'] if rg else None, bool(rg and rg['spec'])]
                                + (pos if pos else [None, None, None]) + [vel, bool(rg and rg['fine']), bool(rg and rg.get('pre'))])
-            try: feed.read(view_top(img) if st else img, t)
+            try: feed.read(view_top_once() if st else img, t)
             except Exception: pass
             if not st:          # "N SQUADS LEFT" (16:9 only so far)
                 try: sq = HUD.SquadsLeft.read(img)
@@ -462,21 +488,92 @@ def _segment(args):
     ev, sm, lb = scan_frames(keyframes(path, start, end), snap, quiet=True, perf=perf)
     return start, ev, sm, [(r, n) for r, n in zip(lb.reps, lb.n)], perf
 
-def scan_video(path, snap=None, workers=0):
-    """Split the recording into chunks and scan them in parallel; merge the results in time order."""
+# Processes scanning at the same time. 54-min recording, 18 Nov 2026 (peak memory of the whole scan / wall time):
+# 8 (old, buffered pipe) 4.5 GB / 151 s; 2: 0.85 GB / 134 s; 3: 1.2 GB / 106 s; 4: 1.6 GB / 99 s (~360 MB each).
+WORKERS = 2
+
+def default_chunks(total):
+    """How many pieces a recording is cut into. Results depend on where the cuts are (each piece starts its readers
+    afresh), so this is the same split as before 1.10.12, whatever the number of worker processes."""
+    return 1 if total < 300 else max(1, min(8, (os.cpu_count() or 2) // 2))
+
+class Resume:
+    """Finished chunks of an unfinished scan, kept on disk so a scan stopped while Apex runs (the app stops it instead
+    of keeping it paused in memory) goes on later from the chunks still to do. A chunk is used again only for the same
+    file (size, time), the same cuts, decoder, layout and scanner build: then its results are what a rescan would give."""
+    def __init__(self, folder, path, edges, dec, snap):
+        self.folder = folder
+        try: stt = os.stat(path); f = [os.path.basename(path), stt.st_size, stt.st_mtime_ns]
+        except OSError: f = [os.path.basename(path)]
+        self.key = json.dumps({'file': f, 'edges': [round(e, 3) for e in edges], 'decoder': list(dec[1]), 'layout': LAYOUT,
+                               'snaps': bool(snap), 'build': build_stamp()}, sort_keys=True)
+    def _f(self, k): return os.path.join(self.folder, f'chunk{k:02d}.pkl')
+    def load(self):
+        """-> {chunk number: result} of the chunks finished earlier (nothing when anything differs)."""
+        import pickle
+        try:
+            with open(os.path.join(self.folder, 'key.json'), encoding='utf-8') as fh:
+                if fh.read() != self.key: return {}
+        except OSError: return {}
+        done = {}
+        for name in sorted(os.listdir(self.folder)):
+            m = re.fullmatch(r'chunk(\d+)\.pkl', name)
+            if not m: continue
+            try:
+                with open(os.path.join(self.folder, name), 'rb') as fh: done[int(m.group(1))] = pickle.load(fh)
+            except Exception: pass                      # half-written or damaged: that chunk is scanned again
+        return done
+    def save(self, k, res):
+        import pickle
+        try:
+            os.makedirs(self.folder, exist_ok=True)
+            kf = os.path.join(self.folder, 'key.json')
+            if not os.path.exists(kf):
+                with open(kf + '.tmp', 'w', encoding='utf-8') as fh: fh.write(self.key)
+                os.replace(kf + '.tmp', kf)
+            with open(self._f(k) + '.tmp', 'wb') as fh: pickle.dump(res, fh, protocol=pickle.HIGHEST_PROTOCOL)
+            os.replace(self._f(k) + '.tmp', self._f(k))          # all or nothing: a stop mid-write leaves no chunk
+        except OSError: pass
+    def reset(self):
+        """A different key on disk (other file, cuts or build): its chunks are not ours to use."""
+        try:
+            with open(os.path.join(self.folder, 'key.json'), encoding='utf-8') as fh: same = fh.read() == self.key
+        except OSError: same = True
+        if not same: self.clear()
+    def clear(self):
+        import shutil
+        shutil.rmtree(self.folder, ignore_errors=True)
+
+def _segment_k(args):
+    return args[0], _segment(args[1])
+
+def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
+    """Split the recording into chunks and scan them in parallel; merge the results in time order.
+    workers: processes at the same time (default WORKERS); chunks: pieces (default: as before, see default_chunks);
+    resume: a folder for finished chunks (Resume), so a stopped scan goes on from there."""
     import multiprocessing as mp
     total = duration(path); dec = pick_decoder(path)
-    workers = workers or max(1, min(8, (os.cpu_count() or 2) // 2))
-    if total < 300: workers = 1
-    edges = [total * k / workers for k in range(workers + 1)]; edges[-1] = total + 5
-    jobs = [(path, edges[k], edges[k + 1], snap, dec, LAYOUT) for k in range(workers)]
-    print(f'  scanning {total / 60:.0f} min of video in {workers} parallel chunk(s) ...', flush=True)
-    t0 = time.time(); out = []
-    if workers == 1: out = [_segment(jobs[0])]
-    else:
-        with mp.Pool(workers) as pool:
-            for k, r in enumerate(pool.imap_unordered(_segment, jobs), 1):
-                out.append(r); print(f'  chunk {k}/{workers} done  [{time.time() - t0:.0f}s]', flush=True)
+    chunks = chunks or default_chunks(total)
+    workers = max(1, min(workers or WORKERS, chunks))
+    edges = [total * k / chunks for k in range(chunks + 1)]; edges[-1] = total + 5
+    jobs = [(path, edges[k], edges[k + 1], snap, dec, LAYOUT) for k in range(chunks)]
+    rs = Resume(resume, path, edges, dec, snap) if resume else None
+    done = {}
+    if rs:
+        rs.reset(); done = rs.load()
+        if done: print(f'  going on with an earlier scan: {len(done)} of {chunks} chunk(s) already done', flush=True)
+    todo = [(k, jobs[k]) for k in range(chunks) if k not in done]
+    print(f'  scanning {total / 60:.0f} min of video in {chunks} chunk(s), {workers} at a time ...', flush=True)
+    t0 = time.time(); out = list(done.values())
+    def got(k, r):
+        out.append(r)
+        if rs: rs.save(k, r)
+        print(f'  chunk {len(out)}/{chunks} done  [{time.time() - t0:.0f}s]', flush=True)
+    if workers == 1 or len(todo) <= 1:
+        for k, j in todo: got(k, _segment(j))
+    elif todo:
+        with mp.Pool(min(workers, len(todo))) as pool:
+            for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
     for start, ev, sm, reps, pf in out:
@@ -492,7 +589,7 @@ def scan_video(path, snap=None, workers=0):
     HUD.STRETCH = LAYOUT if LAYOUT is not None else v43 > v169; HUD.LOOSE = HUD.STRETCH
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
-    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
+    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -590,7 +687,9 @@ def main():
     ap.add_argument('files', nargs='*'); ap.add_argument('--image', action='append', default=[])
     ap.add_argument('--out', default=os.path.join(HERE, 'pcs_scan')); ap.add_argument('--snaps', action='store_true')
     ap.add_argument('--cpu', action='store_true', help='do not try hardware decoding')
-    ap.add_argument('--workers', type=int, default=0, help='parallel chunks (default: half your CPU threads, max 8)')
+    ap.add_argument('--workers', type=int, default=0, help=f'processes scanning at the same time (default {WORKERS})')
+    ap.add_argument('--chunks', type=int, default=0, help='pieces the recording is cut into (default: half your CPU threads, max 8; results depend on it)')
+    ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
     ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
     A = ap.parse_args(); os.makedirs(A.out, exist_ok=True)
@@ -606,7 +705,9 @@ def main():
             img = np.array(Image.open(path).convert('RGB').resize((W, H)))
             perf = {}; events, samples, labels = scan_frames([(0.0, img)], snap, perf=perf)
         else:
-            events, samples, labels, perf = scan_video(path, snap, A.workers)
+            resume = os.path.join(A.out, name + '.partial')       # finished chunks, until the scan is complete
+            if A.fresh: Resume(resume, path, [], ('', []), snap).clear()
+            events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume)
         t_tl = time.time()
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
@@ -647,10 +748,11 @@ def main():
         if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)
+        if kind == 'video': Resume(resume, path, [], ('', []), snap).clear()     # complete: the kept chunks go
         print(f'  -> {len(games)} game(s): ' + '; '.join(f"{g['map']} drop={'yes' if g['drop'] else 'no'} harvesters={len(g['harvesters'])} ring phases={len(g.get('ring', []))} landing={'yes' if g.get('landing') else 'no'}" for g in games))
         print(f'  saved {op}')
         if perf.get('frames'):
-            print(f"  time: {perf.get('wall', 0) / 60:.1f} min scanning ({perf['workers']} chunks, decoder {perf['decoder']}); "
+            print(f"  time: {perf.get('wall', 0) / 60:.1f} min scanning ({perf['chunks']} chunks, {perf['workers']} at a time, decoder {perf['decoder']}); "
                   f"per keyframe {1000 * perf['decode'] / perf['frames']:.0f} ms decoding + {1000 * perf['analysis'] / perf['frames']:.0f} ms analysis "
                   f"(summed over chunks); 60 fps refinement {perf['refine']:.0f} s", flush=True)
 

@@ -315,7 +315,7 @@ def test_scan_queue_waits_for_apex():
     started = []
 
     class P:
-        def wait(self):
+        def wait(self, timeout=None):
             return 0
     real_running, real_proc = rcore.apex_running, runtime.scan_process
     rcore.apex_running = lambda: apex[0]
@@ -338,6 +338,40 @@ def test_scan_queue_waits_for_apex():
         assert any("done, sent to Google Drive" in m["text"] for m in b.messages), list(b.messages)
     finally:
         rcore.apex_running, runtime.scan_process, core.drive_upload_quiet = real_running, real_proc, core_upload
+
+
+def test_scan_by_hand_stops_when_apex_starts():
+    """A scan asked for by hand that is running when Apex starts is stopped (not left running or paused in memory
+    during the game) and goes on when Apex closes."""
+    import subprocess
+    from pcs_recorder import core as rcore
+    b = pcs_server.Backend()
+    apex = [False]
+    stopped = []
+
+    class P:
+        def __init__(self):
+            self.n = 0
+
+        def wait(self, timeout=None):
+            self.n += 1
+            if self.n >= 2:
+                apex[0] = True                       # Apex starts while it runs
+            raise subprocess.TimeoutExpired("scan", timeout)
+    real_running, real_stop = rcore.apex_running, rcore.stop_tree
+    rcore.apex_running = lambda: apex[0]
+    rcore.stop_tree = lambda p, **k: stopped.append(p)
+    try:
+        p = P()
+        assert b._run_scan(p, every_s=0.01) is None and stopped == [p]
+        apex[0] = False
+
+        class Done:
+            def wait(self, timeout=None):
+                return 0
+        assert b._run_scan(Done()) == 0 and stopped == [p]
+    finally:
+        rcore.apex_running, rcore.stop_tree = real_running, real_stop
 
 
 def test_audio_tracks():

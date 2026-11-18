@@ -219,6 +219,19 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.11 i
   min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
   which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
   region caches (0 differences) and the check set table.
+- **Scan plumbing** (18 Nov 2026, to keep the scan unnoticeable): `keyframes()` reads ffmpeg's pipe unbuffered
+  (`bufsize=0`, `readinto` one new buffer per frame). The old `bufsize=10**8` + `.read(n)` cost 134 ms and 0.18 CPU-s
+  per keyframe, mostly kernel time; now 25-30 ms and 0.08 CPU-s, same bytes. A 127.0.0.1 socket was measured too: no
+  faster, ~12 % more CPU, so not used (the study blamed the pipe; it was the buffer). A recording is cut into the same chunks as
+  before (`default_chunks`: half the CPU threads, max 8; results depend on the cuts) but only `WORKERS` (2) run at a time (~360 MB each; whole scan < 1 GB).
+  Each finished chunk is kept in `<out>/<name>.partial/` (pickle, keyed by file size/time, cuts, decoder, layout,
+  build) until the scan completes: when Apex starts, the app stops the scan (`core.stop_tree`, nothing stays in
+  memory) instead of suspending it, and the next run goes on from the chunks still to do. `result_files` never
+  sends `.partial`. 4:3 stretched views fill only the boxes their readers look at (`view_top` rows 0..640).
+- **Leftover unpacked copies**: the onefile exe unpacks ~600 MB to `%TEMP%\_MEI*` per start (and per scan); a crash or
+  forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
+  are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
+  it goes first, a refusal keeps the folder) (`pcs_core.clean_old_unpacked`).
 - **Landing place**: the debug overlay's world position (`POS`) at landing → map % (`pcs_hud.to_map`, `CAL` per map)
   → POI (`pcs_scan.landing_poi`). The app's map pictures (`pcs_maps.json` space) are framed like the game's own
   minimap, so a map's game transform (`_game_tx`) works directly. WE / SP use values fitted in Oct 2026, BM the
