@@ -17,6 +17,24 @@ Answers
   Network errors: the caller retries later, as before.
 - A hub from before keys (0.2) ignores the header and has no /api/ping or /api/me: everything else works as
   before, with or without a key set.
+
+Addresses
+- `http://` (home network, Tailscale) and `https://` (the public hub behind Cloudflare, `https://hub.<domain>`)
+  both work for every request, the invite / sign-in links and the Watch together websocket (`wss://`). Certificates
+  are always checked (requests' and websocket-client's defaults; nothing here ever turns that off).
+- Why the hub can't be reached is told in four words a player understands (`reach`): no internet, hub address
+  wrong (name not found, or a certificate that isn't the hub's), hub down (nothing answers, or Cloudflare says the
+  hub behind it is off), key refused. Settings → Team hub shows the latest one; the recorder writes one Activity
+  line per change. "No internet" is told apart from "address wrong" by looking up Windows' own connectivity-check
+  name (`www.msftconnecttest.com`, a name lookup only: nothing is sent to it).
+
+Uploads in parts (hub 0.6 `/api/uploads`, contract in the hub's AGENT.md)
+- Cloudflare refuses request bodies over 100 MB. A file over `PART_FILE` (50 MB, the hub's part size), or a set of
+  small files together over `ONESHOT_MAX` (90 MB), goes in parts of at most 50 MB; smaller ones keep the one-shot
+  routes (`POST /api/scans`, `POST /api/session-audio`). A hub without the route (404 / 405) gets the one-shot route.
+- A lost connection or a restarted app goes on where it stopped: the upload id is kept in `hub-uploads.json` (the
+  file's path, size and time; never the key) and the hub says how much it already has.
+- `stop()` (Apex started) is asked between parts: the upload pauses (`HubError` kind `paused`) and goes on later.
 """
 from __future__ import annotations
 
@@ -43,23 +61,109 @@ _ENTROPY = b"PCS Scanner team hub key"
 
 
 class HubError(Exception):
-    """The hub couldn't be reached or said no. `kind`: network | refused | wait | http."""
+    """The hub couldn't be reached or said no. `kind`: network | refused | wait | http | paused.
+    `reach`: why it couldn't be reached ("offline" | "address" | "down" | "refused"), "" = not known / not that.
+    `code`: the hub's error code (`bad_checksum`, `too_many_uploads`...), "" when none."""
 
-    def __init__(self, text: str, kind: str, status: int = 0):
+    def __init__(self, text: str, kind: str, status: int = 0, reach: str = "", code: str = ""):
         super().__init__(text)
-        self.kind, self.status = kind, status
+        self.kind, self.status, self.reach, self.code = kind, status, reach, code
+
+
+# why the hub can't be reached: the text in Settings / Activity, and the few words on a recording
+REACH_TEXT = {
+    "offline": "No internet connection",
+    "address": "Hub address not found: check it in Settings → Team hub",
+    "cert": "Hub address wrong: its certificate isn't valid. Check it in Settings → Team hub",
+    "down": "Hub down: the hub PC is off or the hub is stopped",
+    "refused": "The team hub refused your key: paste a new one in Settings → Team hub",
+}
+REACH_SHORT = {"offline": "No internet", "address": "Hub address wrong", "down": "Hub down", "refused": "Key refused"}
+DOWN_CODES = {502, 503, 504} | set(range(520, 531))     # Cloudflare: the hub behind it is off or not answering
 
 
 def reason(e: Exception) -> str:
     """Why the hub didn't take a recording's results, as the player reads it on the recording."""
     kind = getattr(e, "kind", "network")
+    reach = getattr(e, "reach", "")
     if kind == "refused":
         return "Key refused"
     if kind == "wait":
         return "Hub asks to wait"
+    if kind == "paused":
+        return "Waits for Apex to close"
+    if reach in REACH_SHORT:
+        return REACH_SHORT[reach]
     if kind == "http":
         return f"Hub error {getattr(e, 'status', '')}".strip()
     return "Hub not reachable"
+
+
+# ------------------------------------------------------------------ why the hub can't be reached
+
+PROBE_HOST = "www.msftconnecttest.com"        # Windows' own connectivity check name: looked up, never contacted
+_probe = {"at": 0.0, "up": True}
+
+
+def internet_up() -> bool:
+    """Does this PC reach the internet at all? A name lookup of Windows' connectivity-check host (no request is
+    made to it), at most every 30 s, 3 s at most. Tests replace this function."""
+    import socket
+    now = time.time()
+    if now - _probe["at"] < 30:
+        return _probe["up"]
+    res = {"up": False}
+
+    def look():
+        try:
+            socket.getaddrinfo(PROBE_HOST, 443)
+            res["up"] = True
+        except OSError:
+            pass
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(3)
+    _probe.update(at=now, up=res["up"])
+    return res["up"]
+
+
+def _chain(e: BaseException) -> list[BaseException]:
+    """The exception and those inside it (requests wraps urllib3, which wraps the socket error)."""
+    seen, todo = [], [e]
+    while todo and len(seen) < 20:
+        x = todo.pop(0)
+        if not isinstance(x, BaseException) or any(x is y for y in seen):
+            continue
+        seen.append(x)
+        todo += [x.__cause__, x.__context__, getattr(x, "reason", None)] + list(getattr(x, "args", ()))
+    return seen
+
+
+def classify(e: BaseException) -> tuple[str, str]:
+    """A failed request's exception → (reach, text for the player): "offline" | "address" | "down"."""
+    import socket
+    import ssl
+    import requests
+    parts = _chain(e)
+    text = " ".join(f"{x.__class__.__name__} {x}" for x in parts)
+    if isinstance(e, requests.exceptions.SSLError) or any(isinstance(x, ssl.SSLError) for x in parts):
+        return "address", REACH_TEXT["cert"]
+    refused = any(isinstance(x, ConnectionRefusedError) for x in parts) or "10061" in text \
+        or "Connection refused" in text
+    if refused:                                   # something answered "nobody here": the network works
+        return "down", REACH_TEXT["down"]
+    name = any(isinstance(x, socket.gaierror) for x in parts) or "NameResolution" in text \
+        or "getaddrinfo failed" in text or "Name or service not known" in text or "nodename nor servname" in text
+    if not internet_up():
+        return "offline", REACH_TEXT["offline"]
+    if name:
+        return "address", REACH_TEXT["address"]
+    return "down", REACH_TEXT["down"]
+
+
+def _set_reach(url: str, state: str, text: str = "") -> None:
+    with S.lock:
+        S.reach = {"url": url, "state": state, "text": text, "at": time.time()}
 
 
 # ------------------------------------------------------------------ the key: parsing, storage
@@ -115,7 +219,14 @@ def redeem(url: str, code: str) -> str:
     try:
         r = requests.post(url + "/api/invites/redeem", json={"code": code}, timeout=TIMEOUT, allow_redirects=False)
     except requests.RequestException as e:
-        raise HubError(f"the team hub didn't answer ({e.__class__.__name__})", "network") from None
+        reach, text = classify(e)
+        _set_reach(url, reach, text)
+        raise HubError(text, "network", reach=reach) from None
+    if r.status_code in DOWN_CODES:
+        _set_reach(url, "down", REACH_TEXT["down"])
+        raise HubError(REACH_TEXT["down"], "http", r.status_code, reach="down")
+    if r.status_code in (301, 302, 303, 307, 308):
+        raise HubError(_redirect_text(url, r), "http", r.status_code, reach="address")
     detail, error = "", ""
     try:
         d = r.json()
@@ -181,6 +292,7 @@ class _State:
         self.wait_until = 0.0                           # 429: nothing before this time
         self.last: dict = {}                            # last Test result (shown in Settings and Team)
         self.old: str | None = None                     # hub address known to be a version without keys
+        self.reach: dict = {}                           # last request's outcome: {url, state, text, at}
 
 
 S = _State()
@@ -235,14 +347,18 @@ def set_key(key: str | None) -> None:
 def reset() -> None:
     """Forget what the hub said (tests; and a changed hub address)."""
     with S.lock:
-        S.refused, S.wait_until, S.last, S.old = None, 0.0, {}, None
+        S.refused, S.wait_until, S.last, S.old, S.reach = None, 0.0, {}, None, {}
 
 
 def public_state(url: str) -> dict:
     """What the app's page may see: never the key itself."""
     key = get_key()
-    return {"url": url or "", "key": mask(key),
-            "refused": bool(url and S.refused == (url, _fp(key))),
+    refused = bool(url and S.refused == (url, _fp(key)))
+    reach = S.reach if url and S.reach.get("url") == url else {}
+    if refused:
+        reach = {"state": "refused", "text": REACH_TEXT["refused"], "at": reach.get("at", 0)}
+    return {"url": url or "", "key": mask(key), "refused": refused,
+            "reach": {k: reach[k] for k in ("state", "text", "at") if k in reach},
             "wait": max(0, int(S.wait_until - time.time())),
             "last": {k: v for k, v in S.last.items() if k != "url"} if S.last.get("url") == url else {}}
 
@@ -268,12 +384,20 @@ def request(url: str, method: str, path: str, *, timeout: float = TIMEOUT, force
     try:
         r = requests.request(method, url + path, headers=headers, timeout=timeout, allow_redirects=False, **kw)
     except requests.RequestException as e:
-        raise HubError(f"the team hub didn't answer ({e.__class__.__name__})", "network") from None
+        reach, text = classify(e)
+        _set_reach(url, reach, text)
+        raise HubError(text, "network", reach=reach) from None
+    if r.status_code in DOWN_CODES:
+        _set_reach(url, "down", REACH_TEXT["down"])
+    elif r.status_code != 401:
+        _set_reach(url, "ok")
     if r.status_code == 401:
         with S.lock:
             S.refused = (url, _fp(key))
         log.info("team hub: key refused (%s)", _code(r))
-        raise HubError(REFUSED if key else NO_KEY, "refused", 401)
+        raise HubError(REFUSED if key else NO_KEY, "refused", 401, reach="refused")
+    if r.status_code == 429 and _code(r) == "too_many_uploads":
+        return r                                     # not the wrong-key limit: the caller says what to do
     if r.status_code == 429:
         try:
             wait = max(1, int(r.headers.get("Retry-After") or 60))
@@ -294,15 +418,36 @@ def _code(r) -> str:
 
 
 def _check(r) -> None:
+    if r.status_code in DOWN_CODES:
+        raise HubError(REACH_TEXT["down"], "http", r.status_code, reach="down")
     if r.status_code >= 400:
-        detail = ""
+        detail, code = "", ""
         try:
             d = r.json()
             detail = d.get("detail") if isinstance(d.get("detail"), str) else ""
+            code = str(d.get("error") or "")[:40]
         except Exception:
             pass
         raise HubError(f"the team hub answered {r.status_code}" + (f": {detail[:120]}" if detail else ""), "http",
-                       r.status_code)
+                       r.status_code, code=code)
+
+
+def _redirect_text(url: str, r) -> str:
+    """A 3xx where the hub should answer: http → https of the same name (use the https address), or a page that
+    isn't the hub (Cloudflare Access sign-in, a router page...)."""
+    to = _https_of(url, r)
+    return f"Use {to} as the hub address" if to else "No team hub at this address"
+
+
+def _https_of(url: str, r) -> str:
+    """The https address of the same host when the hub's answer sends there (Cloudflare does for http://), else ""."""
+    try:
+        loc, here = urlsplit(r.headers.get("Location") or ""), urlsplit(url)
+    except ValueError:
+        return ""
+    if here.scheme == "http" and loc.scheme == "https" and loc.hostname and loc.hostname == here.hostname:
+        return f"https://{loc.netloc}"
+    return ""
 
 
 def get_json(url: str, path: str, timeout: float = TIMEOUT):
@@ -316,9 +461,31 @@ def report(url: str, data: dict) -> None:
     _check(request(url, "POST", "/api/recorder/sessions", json=data, timeout=5))
 
 
-def upload(url: str, files: list[Path], player: str = "") -> dict:
-    """The scan results of one recording, all files in one request (the hub imports the scan with its feed).
-    Returns the hub's answer. A 200 means the hub stored them, even if its import failed: never sent again."""
+def upload(url: str, files: list[Path], player: str = "", stop=None) -> dict:
+    """The scan results of one recording. Small files go in one request (the hub imports the scan with its feed);
+    a file over PART_FILE (a mic track, a huge feed), or small files together over ONESHOT_MAX, go in parts
+    (`send_in_parts`; a hub without /api/uploads gets them one-shot). Returns the hub's answers merged. A 200 means
+    the hub stored them, even if its import failed: never sent again. `stop()` true = pause between parts."""
+    files = [Path(f) for f in files]
+    sizes = {f: f.stat().st_size for f in files}
+    big = [f for f in files if sizes[f] > PART_FILE]
+    small = [f for f in files if f not in big]
+    if sum(sizes[f] for f in small) > ONESHOT_MAX:
+        big, small = files, []
+    answers = []
+    for f in big:                                    # parts first: a pause or failure leaves nothing half-imported
+        a = send_in_parts(url, "scan", f, {"uploader": player} if player else {}, stop=stop)
+        if a is None:                                # hub before 0.6: one request for this file
+            small.append(f)
+        else:
+            answers.append(a)
+    if small:
+        answers.append(_one_shot(url, small, player))
+    _forget_done(url, "scan", big)
+    return _merge(answers)
+
+
+def _one_shot(url: str, files: list[Path], player: str) -> dict:
     handles = [("files", (Path(f).name, open(f, "rb"))) for f in files]
     try:
         r = request(url, "POST", "/api/scans", files=handles, data={"uploader": player}, timeout=300)
@@ -331,6 +498,194 @@ def upload(url: str, files: list[Path], player: str = "") -> dict:
         return d if isinstance(d, dict) else {}
     except ValueError:
         return {}
+
+
+def _merge(answers: list[dict]) -> dict:
+    """Several answers of the hub for one recording as one (lists joined: `scan_ids`, `imports`)."""
+    out: dict = {}
+    for a in answers:
+        for k, v in (a or {}).items():
+            if isinstance(v, list):
+                out.setdefault(k, []).extend(v)
+            else:
+                out.setdefault(k, v)
+    return out
+
+
+# ------------------------------------------------------------------ uploads in parts (hub 0.6 /api/uploads)
+
+PART_FILE = 50 * 1024 * 1024          # a file over this goes in parts (the hub's default part size)
+ONESHOT_MAX = 90 * 1024 * 1024        # one request stays under this (Cloudflare refuses bodies over 100 MB)
+PART_MAX = 50 * 1024 * 1024           # never a bigger part, whatever the hub says
+UPLOADS_FILE = APP_DIR / "hub-uploads.json"
+PAUSED = "Paused while Apex runs: goes on when it closes"
+_up_lock = threading.Lock()
+
+
+def _ident(url: str, kind: str, f: Path) -> str:
+    st = f.stat()
+    return f"{url}|{kind}|{f.resolve()}|{st.st_size}|{st.st_mtime_ns}"
+
+
+def _load_ups() -> dict:
+    try:
+        d = json.loads(UPLOADS_FILE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_up(ident: str, value: dict | None) -> None:
+    """Upload ids in progress (and finished ones of a recording not fully sent yet), by file. Never the key."""
+    with _up_lock:
+        d = _load_ups()
+        if value is None:
+            d.pop(ident, None)
+        else:
+            d[ident] = value
+        week = time.time() - 7 * 86400              # the hub forgets unfinished parts after 24 h anyway
+        d = {k: v for k, v in d.items() if isinstance(v, dict) and float(v.get("at") or 0) > week}
+        UPLOADS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UPLOADS_FILE.with_suffix(".part")
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        os.replace(tmp, UPLOADS_FILE)
+
+
+def _forget_done(url: str, kind: str, files: list[Path]) -> None:
+    """Everything of that upload reached the hub: its finished parts uploads are forgotten."""
+    for f in files:
+        try:
+            _save_up(_ident(url, kind, Path(f)), None)
+        except OSError:
+            pass
+
+
+def _sha256(f: Path) -> str:
+    h = hashlib.sha256()
+    with open(f, "rb") as fh:
+        for block in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(block)
+    return h.hexdigest()
+
+
+def _json(r) -> dict:
+    try:
+        d = r.json()
+        return d if isinstance(d, dict) else {}
+    except ValueError:
+        return {}
+
+
+class _Stopped(Exception):
+    """Raised from inside a part being sent: stops the request at once (not a network error)."""
+
+
+class _PartBody:
+    """One part's bytes, read by http.client in small blocks while it sends: `stop()` (Apex started) is asked at
+    most every 0.2 s and stops the request in flight, so a 50 MB part on a slow line never holds a game start."""
+
+    def __init__(self, data: bytes, stop=None):
+        self.data, self.pos, self.stop, self.asked = data, 0, stop, 0.0
+
+    def __len__(self) -> int:                       # requests sends Content-Length (no chunked encoding)
+        return len(self.data)
+
+    def read(self, n: int = -1) -> bytes:
+        if self.stop is not None and time.monotonic() - self.asked >= 0.2:
+            self.asked = time.monotonic()
+            if self.stop():
+                raise _Stopped()
+        n = len(self.data) - self.pos if n is None or n < 0 else n
+        out = self.data[self.pos:self.pos + n]
+        self.pos += len(out)
+        return out
+
+
+def send_in_parts(url: str, kind: str, f: Path, fields: dict | None = None, stop=None, tries: int = 3):
+    """One file through /api/uploads: start (or carry on with the upload id kept from an earlier try), parts of at
+    most 50 MB from where the hub is, finish. Returns the finish answer (= the one-shot route's answer), or None when
+    the hub has no /api/uploads (404 / 405 at the start: the caller sends it one-shot). Raises HubError: network
+    (the id is kept: the next try goes on from there), http (the hub said no), paused (`stop()` said so)."""
+    f = Path(f)
+    ident = _ident(url, kind, f)
+    size = f.stat().st_size
+    kept = _load_ups().get(ident) or {}
+    if kept.get("done") is not None:                 # finished on an earlier try of the same recording
+        return kept["done"]
+    uid, received, part = kept.get("id"), 0, PART_MAX
+    if uid:
+        r = request(url, "GET", f"/api/uploads/{uid}", timeout=TIMEOUT)
+        if r.status_code == 200:
+            d = _json(r)
+            received, part = int(d.get("received") or 0), int(d.get("part_max") or PART_MAX)
+            log.info("team hub: %s goes on at %d MB", f.name, received // (1024 * 1024))
+        else:                                        # finished, deleted or expired: start again
+            uid = None
+    if not uid:
+        if stop is not None and stop():
+            raise HubError(PAUSED, "paused")
+        body = {"kind": kind, "name": f.name, "size": size, "sha256": _sha256(f), **(fields or {})}
+        r = request(url, "POST", "/api/uploads", json=body, timeout=TIMEOUT)
+        if r.status_code == 405 or (r.status_code == 404 and _code(r) != "not_found"):
+            return None                              # no /api/uploads (hub before 0.6); not_found = no such session
+        if r.status_code == 429:
+            raise HubError("The team hub has too many unfinished uploads from this PC: try later", "http", 429,
+                           code="too_many_uploads")
+        _check(r)
+        d = _json(r)
+        uid = str(d.get("id") or "")
+        if not re.fullmatch(r"up-[0-9a-f]{32}", uid):
+            raise HubError("The team hub's answer had no upload id", "http", r.status_code)
+        part = int(d.get("part_max") or PART_MAX)
+        _save_up(ident, {"id": uid, "at": time.time()})
+        log.info("team hub: %s in parts (%d MB)", f.name, size // (1024 * 1024))
+    part = max(1024 * 1024, min(part, PART_MAX))
+    fails = 0
+    with open(f, "rb") as fh:
+        while True:
+            while received < size:
+                if stop is not None and stop():
+                    raise HubError(PAUSED, "paused")
+                fh.seek(received)
+                data = _PartBody(fh.read(min(part, size - received)), stop)
+                try:
+                    r = request(url, "PUT", f"/api/uploads/{uid}?offset={received}", data=data, timeout=120,
+                                headers={"Content-Type": "application/octet-stream"})
+                except _Stopped:                     # Apex started during the part: the hub keeps what it got
+                    raise HubError(PAUSED, "paused") from None
+                except HubError as e:
+                    if e.kind != "network" or fails + 1 >= tries:
+                        raise                        # the id is kept: the next try goes on from the hub's count
+                    fails += 1
+                    time.sleep(min(8, 2 ** fails))
+                    r = request(url, "GET", f"/api/uploads/{uid}", timeout=TIMEOUT)   # where the hub is now
+                    if r.status_code != 200:
+                        _check(r)
+                        _save_up(ident, None)
+                        raise HubError("The upload was lost on the hub: it starts again", "http", r.status_code)
+                    received = int(_json(r).get("received") or 0)
+                    continue
+                d = _json(r)
+                if r.status_code in (200, 409) and "received" in d:      # 409 offset_mismatch: go on from there
+                    received = int(d.get("received") or 0)
+                    continue
+                if r.status_code == 404:                                   # expired on the hub: from the start
+                    _save_up(ident, None)
+                    raise HubError("The upload expired on the hub: it starts again", "http", 404)
+                _check(r)
+                raise HubError(f"the team hub answered {r.status_code}", "http", r.status_code)
+            r = request(url, "POST", f"/api/uploads/{uid}/finish", timeout=300)
+            d = _json(r)
+            if r.status_code == 409 and d.get("error") == "incomplete" and fails + 1 < tries:
+                fails += 1
+                received = int(d.get("received") or 0)
+                continue
+            if r.status_code in (400, 404):
+                _save_up(ident, None)                # bad checksum / gone: the next try sends it again
+            _check(r)
+            _save_up(ident, {"id": uid, "done": d, "at": time.time()})
+            log.info("team hub: %s received", f.name)
+            return d
 
 
 def summary(answer: dict) -> str:
@@ -362,7 +717,13 @@ def _test(url: str) -> dict:
     try:
         r = request(url, "GET", "/api/ping", timeout=5, force=True)
     except HubError as e:
-        return {"ok": False, "text": "Hub not reachable" if e.kind == "network" else str(e)}
+        return {"ok": False, "text": str(e), "reach": e.reach}
+    if r.status_code in (301, 302, 303, 307, 308):  # http:// of a public hub: Cloudflare sends to https://
+        to = _https_of(url, r)
+        _set_reach(url, "address", _redirect_text(url, r))
+        return {"ok": False, "text": _redirect_text(url, r), "reach": "address", **({"https": to} if to else {})}
+    if r.status_code in DOWN_CODES:
+        return {"ok": False, "text": REACH_TEXT["down"], "reach": "down"}
     if r.status_code == 404:                         # a hub from before keys has no /api/ping
         try:
             r2 = request(url, "GET", "/api/status", timeout=5, force=True)
@@ -381,7 +742,7 @@ def _test(url: str) -> dict:
     except HubError as e:
         if e.kind == "refused":
             return {"ok": False, "text": "Key refused" if key else "Key needed: paste the key from your coach"}
-        return {"ok": False, "text": "Hub not reachable" if e.kind == "network" else str(e)}
+        return {"ok": False, "text": str(e), "reach": e.reach}
     if me.status_code == 404:                        # ping but no /api/me: treat as a hub without keys
         return {"ok": True, "old": True, "text": "Hub is an older version: no key needed"}
     if not me.ok:

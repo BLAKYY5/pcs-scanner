@@ -221,14 +221,23 @@ class Sent(list):
 hub_reason = hubmod.reason
 
 
+class NotTaken(ConnectionError):
+    """The hub didn't take the results: its HubError's `kind`, `reach`, `status` kept for the recorder."""
+
+    def __init__(self, text: str, e: "hubmod.HubError"):
+        super().__init__(text)
+        self.kind, self.reach, self.status = e.kind, e.reach, e.status
+
+
 class Sender:
     """Results go to the team hub when one is set; Google Drive only when no hub is set and the player is signed in
     (leaving-Drive plan, coach's decision 18 Nov 2026: the hub is the destination, Drive is not used once on the hub).
     If the destination didn't take the files, the recorder retries later.
     Hub requests carry the player's key (pcs_recorder.hub); a refused key stops hub uploads until it changes."""
 
-    def __init__(self, s: st.Settings, drive_upload):
+    def __init__(self, s: st.Settings, drive_upload, stop=None):
         self.s, self.drive_upload = s, drive_upload
+        self.stop = stop                    # () -> True while Apex runs: uploads in parts pause between parts
 
     def report(self, data: dict) -> None:
         if not self.s.hub_url:
@@ -242,14 +251,16 @@ class Sender:
         if not files:
             return Sent()
         sent, errors, where = False, [], Sent()
+        hub_error = None
         if self.s.hub_url:
             where.hub_ok = False
             try:
-                answer = hubmod.upload(self.s.hub_url, files, self.s.player)   # all files in one request
+                answer = hubmod.upload(self.s.hub_url, files, self.s.player, stop=self.stop)
                 sent = True
                 where.append("the team hub")
                 where.hub_note, where.hub_ok = hubmod.summary(answer), True
             except hubmod.HubError as e:
+                hub_error = e
                 errors.append(str(e))
                 where.hub_note = "Not sent to hub: " + ("key refused" if e.kind == "refused" else str(e))
                 where.hub_why = hub_reason(e)
@@ -269,6 +280,8 @@ class Sender:
                 where.drive_ok = False
                 errors.append(f"Google Drive upload failed ({e})")
         if not sent:
+            if hub_error is not None:        # the hub is the only destination: its reason (reach, paused) goes up
+                raise NotTaken(str(hub_error), hub_error)
             raise ConnectionError("; ".join(errors) or "No destination set")
         return where
 
@@ -292,7 +305,7 @@ class Sender:
         if not url:
             raise hubmod.HubError("No team hub address set", "network")
         hubmod.request(url, "GET", "/api/ping", timeout=5)          # any answer (even 404: older hub) = reachable
-        return hubmod.summary(hubmod.upload(url, files, self.s.player))
+        return hubmod.summary(hubmod.upload(url, files, self.s.player, stop=self.stop))
 
 
 def scan_process(video: str, out: str) -> subprocess.Popen:
@@ -361,6 +374,15 @@ class UI:
             except Exception:
                 pass
         self.on_main(lambda: self._toast(title, text, sticky, action))
+
+    def activity(self, text: str) -> None:
+        """One line in Home → Activity (and the app's log), no corner message: for things that sort themselves out."""
+        log.info("%s", text)
+        if self.log_line:
+            try:
+                self.log_line(f"[Auto-record] {text}")
+            except Exception:
+                pass
 
     actions: dict = {}          # name -> (button label, callback), e.g. "signin" -> ("Sign in with Google", fn)
 
@@ -709,6 +731,7 @@ class AutoRecorder:
             self.ui.actions["signin"] = ("Sign in with Google", signin)
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
+        self.sender.stop = lambda: self.rec.is_apex_running()     # same rule as every upload: never during a game
         from .talk import Talk
         self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
         self.thread = None

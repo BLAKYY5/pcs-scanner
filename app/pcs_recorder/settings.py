@@ -101,9 +101,7 @@ class Settings:
             self.bitrate_mbps = default_mbps(self.encoder)
         self.bitrate_mbps = max(MIN_MBPS, min(MAX_MBPS, int(self.bitrate_mbps)))
         self.scan_delay_s = max(5, min(600, int(self.scan_delay_s)))
-        self.hub_url = (self.hub_url or "").strip().rstrip("/")
-        if self.hub_url and "://" not in self.hub_url:
-            self.hub_url = "http://" + self.hub_url
+        self.hub_url = hub_address(self.hub_url)
         for k in ("hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark"):
             v = (getattr(self, k) or "").strip().lower().replace(" ", "")
             setattr(self, k, v if v == "" or parse_hotkey(v) else "")
@@ -169,6 +167,35 @@ class Settings:
         p = Path(self.folder)
         p.mkdir(parents=True, exist_ok=True)
         return p
+
+
+def hub_address(text) -> str:
+    """The hub address as typed or pasted → `scheme://host[:port]`. Without a scheme: `https://` for a public name
+    (`hub.example.com`: the public hub is https only), `http://` for the home network and Tailscale (an IP address,
+    a port given, a one-word name, `.local` / `.lan` / `.home` / `.ts.net` names). A pasted page address
+    (`https://hub.x/coach/`) keeps only the hub's address. Anything unreadable is kept as typed (the Test says so)."""
+    import ipaddress
+    from urllib.parse import urlsplit
+    t = str(text or "").strip().rstrip("/")
+    if not t:
+        return ""
+    if "://" not in t:
+        host = t.split("/", 1)[0]
+        name, _, port = host.rpartition(":") if host.count(":") == 1 else (host, "", "")
+        name = name.strip("[]").lower()
+        try:
+            ipaddress.ip_address(name)
+            local = True
+        except ValueError:
+            local = bool(port) or "." not in name or name.endswith((".local", ".lan", ".home", ".internal", ".ts.net"))
+        t = ("http://" if local else "https://") + t
+    try:
+        u = urlsplit(t)
+        if u.scheme in ("http", "https") and u.netloc and "@" not in u.netloc:
+            return f"{u.scheme}://{u.netloc}"
+    except ValueError:
+        pass
+    return t
 
 
 def load() -> Settings:

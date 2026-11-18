@@ -37,7 +37,7 @@ function minimapSetup(d, v) {
       <button class="btn small ghost" id="mmHide" title="Hide the map (M)">Hide</button></div>
     <div class="mm-box" id="mmBox"><canvas id="mmCv"></canvas><div class="mm-msg" id="mmMsg" hidden></div></div>
     <div class="mm-squad faint" id="mmSquad" hidden></div>
-    <div class="mm-legend faint" id="mmLegend"><span><i class="mm-k now"></i>Now</span><span><i class="mm-k land"></i>Landing</span><span><i class="mm-k harv"></i>Harvester</span><span><i class="mm-k ring"></i>Ring</span><span><i class="mm-k kill"></i>Knock / kill</span><span><i class="mm-k down"></i>We went down</span><span><i class="mm-k note"></i>Coach note</span><span>Click the path or a mark to go there · wheel to zoom · drag to move</span></div>`;
+    <div class="mm-legend faint" id="mmLegend"><span><i class="mm-k now"></i>Now</span><span><i class="mm-k land"></i>Landing</span><span><i class="mm-k harv"></i>Harvester</span><span><i class="mm-k ring"></i>Ring</span><span><i class="mm-k care"></i>Care package</span><span><i class="mm-k sh"></i>Stronghold</span><span><i class="mm-k kill"></i>Knock / kill</span><span><i class="mm-k down"></i>We went down</span><span><i class="mm-k note"></i>Coach note</span><span>Click the path or a mark to go there · wheel to zoom · drag to move</span></div>`;
   side.prepend(box);
   // the Map button beside Theatre / Full screen
   const th = $('#rvTheatre');
@@ -174,7 +174,25 @@ function mmPath(g, info) {
   const land = L.x != null && L.y != null ? mmFrac(info, L.x, L.y) : null;
   // harvesters are read on the full map in map %: the game's minimap is framed the same way
   const harv = (g.harvesters || []).filter(h => h.x != null && h.y != null).map(h => ({fx: h.x / 100, fy: h.y / 100, ok: h.reliable !== false, poi: h.poi}));
-  return {g, info, pts, land, landPoi: L.poi || null, harv, rings: mmRings(g, info)};
+  return {g, info, pts, land, landPoi: L.poi || null, harv, rings: mmRings(g, info), icons: mmIcons(g)};
+}
+
+/* care packages and strongholds read on the full map (`games[].carePackages`, `games[].strongholds`, map %): shown
+   from the moment the scanner first saw them; click = go there */
+function mmIcons(g) {
+  const out = [], ok = e => e && typeof e.t === 'number' && Number.isFinite(e.mapX) && Number.isFinite(e.mapY);
+  for (const e of g.carePackages || []) {
+    if (!ok(e)) continue;
+    const ring = e.inNextRing === true ? ' · inside ring ' + e.nextRing : e.inNextRing === false ? ' · outside ring ' + e.nextRing : '';
+    out.push({kind: 'care', t: e.t, fx: e.mapX / 100, fy: e.mapY / 100, n: e.n || null, opened: e.openedAt,
+              label: 'Care package' + (e.n ? ' ' + e.n : '') + ring});
+  }
+  for (const e of g.strongholds || []) {
+    if (!ok(e)) continue;
+    out.push({kind: 'sh', t: e.t, fx: e.mapX / 100, fy: e.mapY / 100, state: e.state, until: e.availableLast,
+              label: 'Stronghold' + (e.state === 'unavailable' ? ' (taken)' : '')});
+  }
+  return out;
 }
 
 /* a misread number gives a lone point far away (a spike out and back): dropped, the path joins again */
@@ -305,7 +323,7 @@ function mmScene() {
   return {
     img: game.img, view: MM.view || (MM.view = mmDefaultView(game.pts, game.land)), t,
     main: {pts: game.pts, color: '#ffd60a'}, land: game.land, harv: game.harv, rings: mmRingsAt(game.rings, t),
-    others: sq && sq.lines ? sq.lines : [], marks: mmMarks(game, t), hover: MM.hover,
+    others: sq && sq.lines ? sq.lines : [], marks: (game.icons || []).filter(k => k.t <= t + 0.25).concat(mmMarks(game, t)), hover: MM.hover,
     setView: v => { MM.view = v; }, setHover: h => { MM.hover = h; },
   };
 }
@@ -400,6 +418,27 @@ function mmPaint(cv, box, sc) {
   // marks: knocks / kills (cross), went down (grey cross), coach notes (yellow square; later ones faint)
   sc.marks.forEach(k => {
     const x = X(k.fx), y = Y(k.fy), r = 4.5 * dpr;
+    if (k.kind === 'care') {             // care package: white diamond (faint once opened), its number by timing
+      const q = 6 * dpr;
+      ctx.globalAlpha = k.opened != null && k.opened <= t ? 0.5 : 1;
+      ctx.beginPath(); ctx.moveTo(x, y - q); ctx.lineTo(x + q, y); ctx.lineTo(x, y + q); ctx.lineTo(x - q, y); ctx.closePath();
+      ctx.fillStyle = '#121211'; ctx.fill(); ctx.lineWidth = 2 * dpr; ctx.strokeStyle = '#f1efea'; ctx.stroke();
+      if (k.n) {
+        ctx.font = `700 ${9 * dpr}px Consolas, monospace`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+        ctx.fillStyle = '#f1efea'; ctx.fillText(String(k.n), x, y + 0.5 * dpr);
+        ctx.textAlign = 'start'; ctx.textBaseline = 'alphabetic';
+      }
+      ctx.globalAlpha = 1;
+      return;
+    }
+    if (k.kind === 'sh') {               // stronghold: octagon, red while it can be taken, grey after
+      const q = 6.5 * dpr, taken = k.state === 'unavailable' && (k.until == null || k.until < t);
+      ctx.beginPath();
+      for (let i = 0; i < 8; i++) { const a = Math.PI / 8 + i * Math.PI / 4; ctx[i ? 'lineTo' : 'moveTo'](x + q * Math.cos(a), y + q * Math.sin(a)); }
+      ctx.closePath(); ctx.fillStyle = taken ? '#55524c' : '#e8365a'; ctx.fill();
+      ctx.lineWidth = 1.5 * dpr; ctx.strokeStyle = '#121211'; ctx.stroke();
+      return;
+    }
     if (k.kind === 'note') {
       ctx.globalAlpha = k.later ? 0.45 : 1;
       ctx.fillStyle = '#ffd60a'; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);

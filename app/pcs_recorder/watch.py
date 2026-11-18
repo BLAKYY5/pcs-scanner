@@ -279,10 +279,8 @@ class Watch:
         while gen == self.gen:
             ws = None
             try:
-                url = self._url()
-                ws_url = ("wss://" + url[8:] if url.startswith("https://") else "ws://" + url.split("://", 1)[-1]) \
-                    + f"/api/sessions/{_sid(sid)}/ws"
-                ws = websocket.create_connection(ws_url, timeout=10, suppress_origin=True,
+                ws_url = ws_address(self._url()) + f"/api/sessions/{_sid(sid)}/ws"
+                ws = websocket.create_connection(ws_url, timeout=10, suppress_origin=True, sslopt=sslopt(),
                                                  header=["Authorization: Bearer " + (hub.get_key() or "")])
                 ws.settimeout(0.5)
                 with self.cond:
@@ -398,6 +396,24 @@ class Watch:
                 self._apply({"type": "state", "state": self._call("GET", f"/api/sessions/{self._need()}")})
             except Exception as e:
                 log.info("watch refetch: %s", e)
+
+
+def ws_address(url: str) -> str:
+    """The hub's websocket address: wss:// for an https:// hub (the public address), ws:// for http://."""
+    return ("wss://" + url[8:]) if url.startswith("https://") else "ws://" + url.split("://", 1)[-1]
+
+
+def sslopt() -> dict:
+    """wss://: the certificate and the name are always checked, against the same CA list as the app's https
+    requests (certifi, as requests uses). Never turned off."""
+    import ssl
+    opt = {"cert_reqs": ssl.CERT_REQUIRED, "check_hostname": True}
+    try:
+        import certifi
+        opt["ca_certs"] = certifi.where()
+    except ImportError:                               # websocket-client then loads Windows' own list
+        pass
+    return opt
 
 
 def _sid(sid) -> str:
