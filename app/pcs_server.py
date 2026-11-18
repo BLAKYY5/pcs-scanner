@@ -148,6 +148,26 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "heals", "abilities")     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
 
 
+# the game's minimap transform per map (world -> picture), as in scanner/pcs_minimap.MAPS and the hub's minimaps
+MINIMAP_TX = {"WE": (-45056, 45055, 22), "SP": (-50606, 52139, 25), "ED": (-43008, 43008, 21),
+              "BM": (-45000, 43500, 21), "KC": (-37541, 43886, 20), "OL": (-52024, 48025, 22)}
+
+
+def seen_rows(g: dict) -> tuple[list, str | None]:
+    """The review's position rows of a game: the debug overlay's (`samples`), or for a player without the overlay the
+    scanner's HUD minimap reads (`minimapTrack`, map %) turned into world x, y. -> (rows, "pos" | "minimap" | None)."""
+    rows = [[s[0], s[1], bool(s[3]), s[4], s[5], s[6], s[7]] for s in g.get("samples", [])]
+    if any(r[3] is not None for r in rows):
+        return rows, "pos"
+    tx = MINIMAP_TX.get(g.get("map") or "")
+    pts = (g.get("minimapTrack") or {}).get("pts") or []
+    if not tx or not pts:
+        return rows, None
+    w = tx[2] * 4096
+    return [[p[0], -1, False, round(tx[0] + p[1] / 100 * w), round(tx[1] - p[2] / 100 * w), None, None]
+            for p in pts if isinstance(p, list) and len(p) >= 3], "minimap"
+
+
 def _same_sig(a, b) -> bool:
     """Two name shapes from the scanner (pcs_hud._sig) close enough to be the same name."""
     if not a or not b:
@@ -545,11 +565,13 @@ class Backend:
             d = json.loads(scan.read_text(encoding="utf-8"))
             games = []
             for g in d.get("games", []):
+                seen, seen_from = seen_rows(g)
                 games.append({k: g.get(k) for k in GAME_FIELDS}
                              | {"drop": {k: (g.get("drop") or {}).get(k) for k in ("spots", "err")},
                                 "track": [[s[0], s[4], s[5], s[6], s[7]] for s in g.get("samples", []) if s[4] is not None],
-                                # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]
-                                "seen": [[s[0], s[1], bool(s[3]), s[4], s[5], s[6], s[7]] for s in g.get("samples", [])]})
+                                # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]; without
+                                # the debug overlay the HUD minimap's reads every 3 s (seenFrom "minimap")
+                                "seen": seen, "seenFrom": seen_from})
             it["games"] = games
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
@@ -1262,6 +1284,17 @@ class Backend:
     def team_tracks_tick(self) -> None:
         if self.auto and self.auto.s.hub_url:
             self.teamtracks.tick()
+
+    def minimaps_tick(self) -> int:
+        """The hub's map pictures in the data folder, so scans can read the player's position from the HUD minimap
+        (pcs_minimap). Not while Apex runs; a picture already here is not downloaded again."""
+        if not (self.auto and self.auto.s.hub_url):
+            return 0
+        from pcs_recorder.core import apex_running
+        if apex_running():
+            return 0
+        from pcs_recorder import minimaps
+        return minimaps.prefetch(self.auto.s.hub_url)
 
     def set_autorecord(self, on: bool) -> None:
         a = self.auto

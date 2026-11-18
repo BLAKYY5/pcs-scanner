@@ -202,6 +202,25 @@ def test_recording_date_and_game_data_for_review():
         core.SETTINGS["library"] = before
 
 
+def test_review_positions_from_minimap():
+    """Map panel rows: the debug overlay's positions when the scan has them, else the HUD minimap's reads (map %)
+    turned into world x, y with the map's transform, so players without the overlay see their path too."""
+    pos = {"map": "ED", "samples": [[10.0, 2, 90, False, 100.0, 200.0, 50.0, 3.0, False, False]],
+           "minimapTrack": {"pts": [[10.0, 50.0, 50.0, 80]]}}
+    rows, src = pcs_server.seen_rows(pos)
+    assert src == "pos" and rows == [[10.0, 2, False, 100.0, 200.0, 50.0, 3.0]]
+    mm = {"map": "ED", "samples": [[10.0, 2, 90, False, None, None, None, None, False, False]],
+          "minimapTrack": {"pts": [[12.0, 50.0, 50.0, 80], [15.0, 60.0, 25.0, 70]]}}
+    rows, src = pcs_server.seen_rows(mm)
+    w = 21 * 4096
+    assert src == "minimap" and rows == [[12.0, -1, False, 0, 0, None, None],
+                                         [15.0, -1, False, round(-43008 + 0.6 * w), round(43008 - 0.25 * w), None, None]]
+    assert pcs_server.seen_rows({**mm, "map": "?"})[1] is None                     # unknown map: no transform
+    assert pcs_server.seen_rows({"map": "ED"}) == ([], None)
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_minimap
+    assert pcs_server.MINIMAP_TX == {k: tuple(v[1:]) for k, v in pcs_minimap.MAPS.items()}   # one transform table
+
 def test_review_page_texts():
     """The words the review player and Settings show (no browser in the tests: read from app.js)."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")

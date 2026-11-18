@@ -229,7 +229,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
 - **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.2 collection `minimaps`): the review player
-  draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`)
+  draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`;
+  without the overlay the HUD minimap's reads from `minimapTrack`, `pcs_server.seen_rows`, `seenFrom: "minimap"`)
   on the game's own minimap, with the marker at the video's moment, the landing and the harvesters (map % = picture
   fraction). World -> picture: `(x - pos_x) / scale / size`, `(pos_y - y) / scale / size` (the game's transform, from the
   hub document). The pictures are EA's: the coach uploads them to the hub (`tools/upload_minimaps.py` in the hub repo),
@@ -475,6 +476,28 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   (17 Nov, 360 keyframes): 352 the same, the rest read vs not read on one keyframe, never two items. The review player draws
   heals (small teal dots), ult uses (blue diamonds) and tacticals (small grey dots) on the events lane; heals and ults
   also in Events ("Shield battery", "Ultimate used · Seer").
+- **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
+  the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
+  turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:
+  78, 62.5, 56.5 or 45 world units per screen pixel (it changes inside a game; cause unknown). Scan side: every 3 s
+  of normal HUD (`EVERY`) the box rows 104..384, x 70..386 (below the debug overlay's lines) is kept as 70 x 79 grey
+  cells + a mask of icon cells (saturated or very bright: arrows, pings, ring lines) when the minimap's white corner
+  brackets are at their normal place (spectating moves the HUD 85 px down: someone else's minimap; menus, map open,
+  death screens: no brackets). `attach` then matches each game's reads on the map's own minimap picture (local
+  contrast both sides, masked NCC by FFT; near the last position at the last zoom first, the other zooms there,
+  the whole map at most every 9 s while lost; the picture is padded with the dark plain the HUD shows beyond a map
+  edge). A read counts when its score is >= 0.33 and the read before or after it (<= 12 s) agrees within the
+  fastest move. `games[].minimapTrack` = {v, every, reads, pts: [[t, mapX, mapY, q]]} (map % = picture fraction x
+  100, as `landing.mapX`; q = score x 100), or `noPicture: true` with no points. Pictures are EA's: `PCS_MINIMAPS`
+  (an RSX export folder) for developers, else the app's data folder `minimaps/` (downloaded from the hub by
+  `pcs_recorder.minimaps`; `Backend.minimaps_tick` fetches all maps every 6 h while Apex is closed), only when the
+  hub's transform is the one in `MAPS`. Checked against the coach's debug-overlay POS on region caches (box `minimap`;
+  split fixed before tuning: dev 17 + 4 Nov, held-out 7 + 15 Nov). Held-out, 15 games: of the moments every 3 s from
+  the jump to the game's end in own view, 83 % have a minimap position within 2 s (dev 92 / 77 %); error median 0.06 %
+  of the map, 99th percentile 0.3-1.4 %, 98.7 % within 1 %, one point of 979 wrong (107 %: dropship off the map's edge).
+  The POS reader itself misreads now and then (a minus sign lost, 9 read as 8, a dropped digit): the minimap was
+  right in every case looked at; those POS rows were the "errors".
+  Cost: ~1 ms per read at scan time (0.3 ms per keyframe), matching ~3-8 ms per read after the chunks are done.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
   Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a
@@ -489,7 +512,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
 ## Developer tools (`tools/`, not in the exe)
 
 - **Region cache** (`tools/region_cache.py`): decodes a recording once with the scanner's own `keyframes()` and keeps,
-  per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, top-left block for legend select /
+  per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, HUD minimap (`minimap`), top-left block for legend select /
   banner / ring clock, rest of the banner words, top-right counters, kill feed, squad cards + own bars `squad`, added
   18 Nov 2026: older caches lack it; `--boxes squad,left` for the cards, bars and spectating; `heal`, `abil` for
   pcs_usage), as lossless WebP (bit-identical: lossy

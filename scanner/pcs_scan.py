@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap
 
 VERSION = '1.10.12'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -422,7 +422,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0
+    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -486,6 +486,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 except Exception: own = {}
                 if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
                     perf.setdefault('_own', []).append((round(t, 2), own))
+                if t - mm_at >= pcs_minimap.EVERY and not (hud and hud[2] and hud[2]['spec']):   # HUD minimap: position
+                    try: mm = pcs_minimap.grab(img)
+                    except Exception: mm = None
+                    if mm is not None: mm_at = t; perf.setdefault('_minimap', []).append((round(t, 2), mm))
         if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
@@ -607,11 +611,11 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
-        usage += pf.pop('_usage', []); pf.pop('_usageMaskAt', None)
+        usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); pf.pop('_usageMaskAt', None)
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -628,6 +632,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
+    perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -760,6 +765,10 @@ def main():
         bar_reads = perf.pop('_bars', [])
         try: pcs_bars.attach(games, bar_reads, samples)     # own knocks, shield / health timelines
         except Exception as e: perf['barsError'] = f'{type(e).__name__}: {e}'[:200]
+        t_mm = time.time(); mm = perf.pop('_minimap', [])
+        try: pcs_minimap.attach(games, mm)                                 # position from the HUD minimap (no debug overlay needed)
+        except Exception as e: perf['minimapError'] = f'{type(e).__name__}: {e}'[:200]
+        perf['minimap'] = time.time() - t_mm; perf['minimapReads'] = len(mm)
         perf.pop('_usageMaskAt', None)
         try: pcs_usage.attach(games, pcs_usage.unpack(perf.pop('_usage', [])), bar_reads)    # heals, ult / tactical uses
         except Exception as e: perf['usageError'] = f'{type(e).__name__}: {e}'[:200]
