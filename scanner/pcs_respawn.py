@@ -56,7 +56,10 @@ def read_cards(a):
     ll = _left(lime)
     lrow = (lime.sum(1) >= 20) & (_trans(lime) >= 6) & (ll <= 22)
     for y0, y1 in _runs(lrow, 8):
-        if y1 - y0 <= 26: cards.append((y0 - 27, 'dead'))
+        # the status line: 17 rows of capitals from x 186..188 with ~50 colour changes a row (RESPAWNING... fewer);
+        # grass behind the cards gives lime too, but from the column's edge, in bands of other heights
+        b = lime[y0:y1]; cols = np.nonzero(b.any(0))[0]
+        if 14 <= y1 - y0 <= 20 and 4 <= cols.min() <= 12 and np.median(_trans(b)) >= 18: cards.append((y0 - 27, 'dead'))
     # alive: a solid white bar from the name column (a knocked player's bar is red, a low one may be too short)
     wl = _left(white)
     run = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
@@ -113,7 +116,7 @@ def teammate_respawns(reads, t0, t1, hold=3):
     return sorted(out, key=lambda e: e['t'])
 
 
-MAX_GAP = 60.0            # s from the last 'dead' read to the first 'alive' one (more: cards unseen, maybe another game)
+MAX_GAP = 40.0            # s from the last 'dead' read to the first 'alive' one (more: cards unseen, maybe another game)
 SLOTS = 2                 # trios: two teammate cards (a third small card, the player's own, shows in some layouts)
 SLOT_TOL = 12             # px: one card's rows across frames (map view, bar vs status line)
 
@@ -189,7 +192,11 @@ def attach(games, card_reads, samples):
     for i, g in enumerate(games):
         t0 = g['tStart']; t1 = games[i + 1]['tStart'] if i + 1 < len(games) else float('inf')
         deaths, own = own_deaths(samples, t0, t1)
-        resp = teammate_respawns(mine, t0, t1) + own
+        # after the player's last death with no way back the squad is out (or he watches others): his own view is over,
+        # cards seen later (the ring clock no longer read) belong to whoever he spectates
+        t_cards = t1
+        if deaths and not any(r['deadSince'] >= deaths[-1] for r in own): t_cards = min(t1, deaths[-1])
+        resp = teammate_respawns(mine, t0, t_cards) + own
         g['respawns'] = sorted(resp, key=lambda e: e['t'])
         if deaths: g['ownDeaths'] = deaths
     return games

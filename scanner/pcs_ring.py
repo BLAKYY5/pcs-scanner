@@ -223,6 +223,9 @@ def read(a, M=None, hint=None):
     inside = (cur['cx'], cur['cy'], cur['r']) if cur else None
     nxt = find_circle(edges_next(c), measure_next, c, T, 20, 520, 420, inside, hints=hp('next'))
     if not (nxt and nxt['support'] >= MIN_SUPPORT and nxt['visible'] * 2 * np.pi * nxt['r'] >= 150): nxt = None
+    # each ring is about half the one before (ED: 30.9 % of the map, then 15.2, 8); with no current ring on the map
+    # (round 1) the next ring is the first one, about 30 %. A small white circle elsewhere is a map feature.
+    if nxt and nxt['r'] < (0.3 * cur['r'] if cur else 12.0 / (DS * M[0, 0])): nxt = None
 
     def to_map(d):
         if d is None: return None
@@ -254,13 +257,14 @@ def phase_at(ring, t):
     return None, None
 
 
-def _agree(C, tol=0.6):
-    """The circles (cx, cy, r in map %) that agree with their median within tol % : (median circle, n agreeing)."""
-    A = np.array(C)
-    m = np.median(A, 0)
-    ok = np.abs(A - m).max(1) <= tol
-    if ok.sum() >= 1: m = np.median(A[ok], 0)
-    return [round(float(v), 2) for v in m], int(ok.sum())
+def _agree(C, tol=0.6, w=None):
+    """The biggest group of circles (cx, cy, r in map %) agreeing within tol % (weights w, e.g. reads):
+    (median circle of that group, n in it)."""
+    A = np.array(C, float); w = np.ones(len(A)) if w is None else np.asarray(w, float)
+    near = np.abs(A[:, None] - A[None]).max(2) <= tol
+    k = int(np.argmax(near @ w))
+    m = np.median(A[near[k]], 0)
+    return [round(float(v), 2) for v in m], int(near[k].sum())
 
 
 def game_circles(reads, ring, mp, t0, t1):
@@ -282,11 +286,14 @@ def game_circles(reads, ring, mp, t0, t1):
         elif cur:
             t_, x = next((t_, x) for t_, x in L if x.get('cur'))
             e.update(cx=x['cur']['cx'], cy=x['cur']['cy'], r=x['cur']['r'], curAt=t_, curReads=len(cur)); conf.append(len(cur) / len(L))
-            tr = np.array([(t_, x['cur']['r']) for t_, x in L if x.get('cur')])
-            if len(tr) >= 3 and np.ptp(tr[:, 0]) >= 5:     # the ring closing in front of us: radius change per second
-                k, b = np.polyfit(tr[:, 0], tr[:, 1], 1)
-                if np.abs(tr[:, 1] - (k * tr[:, 0] + b)).max() < 0.4 and k < 0:
-                    e['rPerS'] = round(float(k), 4); e['rPerSSpan'] = round(float(np.ptp(tr[:, 0])), 1)
+            # the ring closing in front of us: radius change per second (Theil-Sen slope over the clear reads)
+            tr = np.array([(t_, x['cur']['r']) for t_, x in L if x.get('cur') and x['cur'].get('support', 1) >= 0.9])
+            if len(tr) >= 3 and np.ptp(tr[:, 0]) >= 10:
+                i, j = np.triu_indices(len(tr), 1); dt = tr[j, 0] - tr[i, 0]; ok = dt >= 3
+                if ok.any():
+                    k = float(np.median((tr[j, 1] - tr[i, 1])[ok] / dt[ok]))
+                    if k < 0:
+                        e['rPerS'] = round(k, 4); e['rPerSSpan'] = round(float(np.ptp(tr[:, 0])), 1); e['rPerSReads'] = len(tr)
         if nxt:
             (cx, cy, r), n = _agree(nxt); e['next'] = {'cx': cx, 'cy': cy, 'r': r, 'reads': len(nxt)}; conf.append(n / len(L))
         if not cur and not nxt: continue
@@ -310,7 +317,7 @@ def ring_ends(circles, mp):
     out = []
     for k in sorted(cand):
         C = cand[k]
-        (cx, cy, r), n = _agree([c[:3] for c in C])
+        (cx, cy, r), n = _agree([c[:3] for c in C], w=[c[4] for c in C])
         d = {'ring': k, 'cx': cx, 'cy': cy, 'r': r, 'from': sorted(set(c[3] for c in C)), 'reads': sum(c[4] for c in C),
              'agree': n == len(C)}
         if k_u: d['rUnits'] = int(round(r * k_u))
@@ -329,12 +336,12 @@ def closing_speed(ends, ring, circles=(), mp=None):
     for e in circles:
         if e.get('rPerS') is not None and k_u:
             out.append({'ring': e['stage'], 'method': 'closing', 'unitsPerS': round(-e['rPerS'] * k_u, 1),
-                        'seconds': e['rPerSSpan'], 'reads': e['curReads']})
+                        'seconds': e['rPerSSpan'], 'reads': e['rPerSReads']})
     E = {e['ring']: e for e in ends if e.get('rUnits')}
     W = {r['round']: r['endsAt'] for r in ring or [] if r.get('kind') == 'wait' and r.get('round') and not r.get('fromSpectate')}
     C = {r['round']: r['endsAt'] for r in ring or [] if r.get('kind') == 'closing' and r.get('round') and not r.get('fromSpectate')}
     for k in sorted(E):
-        if k - 1 in E and k in W and k in C and C[k] > W[k]:
+        if k - 1 in E and k in W and k in C and C[k] > W[k] and E[k - 1]['rUnits'] > E[k]['rUnits']:
             drop = E[k - 1]['rUnits'] - E[k]['rUnits']; secs = C[k] - W[k]
             out.append({'ring': k, 'method': 'ends', 'drop': drop, 'seconds': round(secs, 1), 'unitsPerS': round(drop / secs, 1)})
     return out
