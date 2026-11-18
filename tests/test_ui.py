@@ -153,6 +153,8 @@ def test_recording_date_and_game_data_for_review():
             "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
             "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
+            "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
+            "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
             "samples": [[550.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False]]}
     old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}              # a scan from before 1.10.8
     for v, games, rs in ((named, [game, old], "2026-11-07T21:42:00"), (by_scan, [old], "2026-11-03T22:17:00"), (bare, [old], None)):
@@ -186,6 +188,9 @@ def test_recording_date_and_game_data_for_review():
         assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
         # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
         assert "knock: ['', 'Knocked']" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
+        # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
+        assert g["heals"][0]["item"] == "battery" and g["abilities"][0]["kind"] == "ult" and o["heals"] is None
+        assert "battery: 'Shield battery'" in js and "'Ultimate used'" in js and "laneOnly: true" in js and "if (e.laneOnly) return;" in js
         assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
         assert o["drop"]["spots"] == []
         # a missing file: the player can say so (404), not "format not supported"
