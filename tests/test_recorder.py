@@ -2325,6 +2325,73 @@ def test_own_bars_and_knocks():
     assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
 
 
+def test_fights_and_ring_damage():
+    """pcs_fights: ring damage from the red screen edges and health ticks (shield untouched); fights from our squad's
+    kill-feed lines, own knocks and hits: kills decide, the player's own death counts, a wiped squad lost; one line
+    captured twice counts once; a name in a colour none of our squad has is not ours; third party = more enemy names
+    than a squad, or shooting after every opponent died."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_fights as F
+    a = np.zeros((1440, 2560, 3), np.uint8); a[...] = (90, 100, 110)
+    assert F.read_storm(a) == (0.0, 0.0, 0.0, 0.0) and not F.storm_outside(F.read_storm(a))
+    a[..., 0] = 230; a[..., 1] = 90; a[..., 2] = 60                            # red-orange haze everywhere
+    assert F.storm_outside(F.read_storm(a))
+    b = np.zeros((1440, 2560, 3), np.uint8); b[0:24] = (230, 90, 60)            # only the top strip: low health vignette
+    assert not F.storm_outside(F.read_storm(b))
+    A = lambda t, s, h: (float(t), {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': h}, [], False)
+    # ring: 3 health a tick for 8 reads, shield 50 untouched; a fight hit (shield) is not ring damage
+    bars = [A(t, 50, 100) for t in range(100, 110)] + [A(110 + i, 50, 97 - 3 * i) for i in range(8)] +            [A(t, 50, 76) for t in range(118, 125)] + [A(125, 20, 76), A(126, 20, 76)]
+    storm = [(float(t), (0.9, 0.9, 0.8, 0.7) if 111 <= t <= 117 else (0.0, 0.0, 0.0, 0.0)) for t in range(100, 127)]
+    g = [{'tStart': 90.0, 'ring': [{'round': 1, 'kind': 'closing', 'firstSeen': 100.0, 'endsAt': 300.0}]}]
+    F.attach(g, [], bars, storm)
+    rd = g[0]['ringDamage']
+    assert len(rd['segments']) == 1 and rd['segments'][0]['perTick'] == 3.0 and rd['segments'][0]['round'] == 1, rd
+    assert 21 <= rd['measured'] <= 24 and rd['damage'] >= rd['measured'] and 6 <= rd['seconds'] <= 12, rd
+    # ticks alone (no storm read), shield up: still ring; one or two drops: not
+    g = [{'tStart': 90.0}]
+    F.attach(g, [], [A(100 + i, 75, 100 - 3 * i) for i in range(6)], [])
+    assert g[0]['ringDamage']['segments'] and g[0]['ringDamage']['segments'][0]['how'] == 'ticks'
+    F.attach(g, [], [A(100, 75, 100), A(101, 75, 97), A(102, 75, 97)], [])
+    assert g[0]['ringDamage']['segments'] == []
+    # fights
+    sq = lambda hue: {'side': 'squad', 'hue': hue}
+    other = {'side': 'other'}
+    sig1, sig2 = '0' * 36, 'f' * 36
+    sig3 = '00ff' * 9
+    line = lambda t, ev, k, v, ks=None, vs=None, y=290, w='r301': {'t': float(t), 'event': ev, 'weapon': w, 'killer': k,
+                                                                     'victim': v, 'killerSig': ks, 'victimSig': vs, 'y': y}
+    game = lambda: {'tStart': 0.0, 'tEndGame': 900.0, 'select': {'squad': [{'slot': 1, 'hue': 40, 'self': True},
+                                                                            {'slot': 2, 'hue': 77}, {'slot': 3, 'hue': 179}]}}
+    feed = [line(100, 'knock', sq(40), other, vs=sig1), line(103, 'knock', sq(40), other, vs=sig1, y=330),   # same line again, lower
+            line(110, 'kill', sq(77), other, vs=sig1), line(112, 'knock', other, sq(179), ks=sig2),
+            line(130, 'knock', sq(210), other, vs=sig3),                       # blue: none of us
+            line(400, 'knock', other, sq(40), ks=sig3)]
+    g = [game()]
+    g[0]['ownKnocks'] = [{'t': 401.0, 'end': 420.0, 'reads': 10, 'outcome': 'died'}]
+    g[0]['ownDeaths'] = [421.0]
+    F.attach(g, feed, [A(t, 50, 100) for t in range(90, 140)], [])
+    f1, f2 = g[0]['fights']
+    assert (f1['ours'], f1['theirs'], f1['result']) == ({'knocks': 1, 'kills': 1}, {'knocks': 1, 'kills': 0}, 'won'), f1
+    assert f1['opponents'] == 2 and not f1['thirdParty'] and f1['t0'] <= 100 <= 112 <= f1['t1'] < 130, f1
+    assert f2['theirs'] == {'knocks': 1, 'kills': 1} and f2['result'] == 'lost', f2                     # he died in it
+    assert F.verdict({'knocks': 3, 'kills': 0}, {'knocks': 1, 'kills': 0}) == 'won'
+    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'even'
+    assert F.verdict({'knocks': 2, 'kills': 2}, {'knocks': 0, 'kills': 0}, wiped=True) == 'lost'
+    # third party: a fourth enemy name in one fight
+    sigs = ['0' * 36, 'f' * 36, '0f' * 18, 'f0' * 18]
+    g = [game()]
+    F.attach(g, [line(200 + 5 * k, 'knock', sq(77), other, vs=s_, w='w%d' % k) for k, s_ in enumerate(sigs)], [], [])
+    f = g[0]['fights'][0]
+    assert f['opponents'] == 4 and f['thirdParty'] and f['thirdPartyWhy'] == 'new enemy', f
+    # shooting after every opponent we met died
+    g = [game()]
+    loud = np.full(int(400 / 0.05), -50.0, np.float32); loud[int(300 / 0.05):int(330 / 0.05)] = -10.0
+    F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
+    f = g[0]['fights'][0]
+    assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
