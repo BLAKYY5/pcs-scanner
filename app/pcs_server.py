@@ -16,6 +16,7 @@ import mimetypes
 import os
 import re
 import secrets
+import subprocess
 import threading
 import time
 import traceback
@@ -647,6 +648,23 @@ class Backend:
             pass
         return None
 
+    def _run_scan(self, proc, every_s: float = 3) -> int | None:
+        """Wait for a scan; None when Apex started meanwhile: the scan is then stopped (not kept paused in memory
+        during the game) and the scanner goes on from its finished chunks next time."""
+        from pcs_recorder.core import apex_running, stop_tree
+        while True:
+            try:
+                return proc.wait(timeout=every_s)
+            except subprocess.TimeoutExpired:
+                pass
+            try:
+                apex = apex_running()
+            except Exception:
+                apex = False
+            if apex:
+                stop_tree(proc)
+                return None
+
     def _scan_worker(self) -> None:
         with self.scan_lock:
             if self._worker_running:
@@ -670,7 +688,14 @@ class Backend:
                     p = self.scan_queue.pop(0)
                     self.scan_now, self.scan_started = p, time.time()
                 self.say(f"Scanning {Path(p).name}…")
-                code = scan_process(p, core.OUT).wait()
+                code = self._run_scan(scan_process(p, core.OUT))
+                if code is None:                         # Apex started: stopped, goes on from there when it closes
+                    with self.scan_lock:
+                        self.scan_queue.insert(0, p)
+                        self.scan_now = None
+                    self.say(f"Scan of {Path(p).name} paused while Apex runs: it goes on when Apex closes.")
+                    told = True
+                    continue
                 if code != 0:
                     self.say(f"Scan of {Path(p).name} failed (code {code}). Details: {Path(core.OUT) / 'scan.log'}")
                     continue

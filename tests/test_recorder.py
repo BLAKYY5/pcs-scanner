@@ -122,14 +122,19 @@ def test_full_session_scan_and_upload():
     r, apex, hub, ui = run_session()
     assert r.scan_proc is not None
     time.sleep(0.8)                                   # let the scanner start its worker process
-    apex["on"] = True; r.tick()                       # player relaunches: scan pauses, no upload
-    assert "paused" in r.status
     import psutil
     root = psutil.Process(r.scan_proc.pid)
     tree = [root] + root.children(recursive=True)
-    assert len(tree) >= 2 and all(p.status() == psutil.STATUS_STOPPED for p in tree), [p.status() for p in tree]
+    assert len(tree) >= 2, tree
+    first = r.scan_key
+    starts = []
+    r.start_scan = lambda v, out: (starts.append(v), fake_scan(v, out))[1]
+    apex["on"] = True; r.tick()                      # player relaunches: scan stops (memory freed), no upload
+    assert "paused" in r.status
+    assert r.scan_proc is None and r.queue == [first] and r.idx[first].status == "waiting", (r.queue, r.scan_proc)
+    assert not any(p.is_running() and p.status() != psutil.STATUS_ZOMBIE for p in tree), tree   # nothing left
     time.sleep(2.5); r.tick()
-    assert r.scan_proc is not None and hub.uploads == []   # still suspended, nothing sent mid-game
+    assert r.scan_proc is None and hub.uploads == [] and "paused" in r.status   # nothing runs or is sent mid-game
     apex["on"] = False                                # closes again: 2nd session recorded, its scan waits in line
     for _ in range(120):                              # up to 60 s: process start-up is slow on Windows
         r.tick(); time.sleep(0.5)
@@ -140,11 +145,14 @@ def test_full_session_scan_and_upload():
     assert len(hub.uploads) == 2 and all(core_files(u) == ["game1.feed.json", "scan.log", "session.scan.json"] or
                                          core_files(u) == ["game1.feed.json", "session.scan.json"] for u in hub.uploads), (
         hub.uploads, {k: vars(v) for k, v in r.idx.items()}, r.queue, r.scan_proc and r.scan_proc.poll(), r.paused,
-        [p.pid for p in r.suspended], r.status)
+        r.status)
     assert [e.status for e in r.idx.values()] == ["uploaded", "uploaded"], {k: vars(v) for k, v in r.idx.items()}
     titles = [n[0] for n in ui.notes]
     for t in ("Scanning your session", "Scan finished", "Results sent"):
         assert any(x.startswith(t) for x in titles), titles      # the player is told at every step
+    # the stopped scan went on first (no second "Scanning" message for it), then the second session's
+    assert sum(x.startswith("Scanning your session") for x in titles) == 2, titles
+    assert starts[0] == r.idx[first].path and len(starts) == 2, (starts, r.idx[first].path)
     assert hub.reports[:3] == ["recording", "recorded", "uploaded"] or "uploaded" in hub.reports
 
 
@@ -616,31 +624,33 @@ def test_skip_and_offline_hub():
 
 
 def test_pause_never_stacks():
-    """Ticks while Apex runs must not pause the scanner again (on Windows pauses stack), and one that
-    finished while paused must not be resumed or crash anything."""
-    import subprocess, psutil
+    """Ticks while Apex runs stop the scan once (no second stop, no new scan started mid-game); when Apex closes
+    the scan starts again once and finishes."""
+    import psutil
+    from pcs_recorder import core as rcore
     retention.INDEX_FILE.unlink(missing_ok=True)
     s = settings.load(); s.folder = str(TMP / "stack"); s.enabled = True
     apex = {"on": False}
     hub, ui = FakeHub(), FakeUI(True)
-    r = Recorder(s, FakeOBS(s.folder_path), hub, ui, fake_scan, is_apex_running=lambda: apex["on"])
+    starts = []
+    r = Recorder(s, FakeOBS(s.folder_path), hub, ui, lambda v, o: (starts.append(v), fake_scan(v, o))[1],
+                 is_apex_running=lambda: apex["on"])
     r._final_file = lambda p, wait_s=0: p
     apex["on"] = True; r.tick(); apex["on"] = False; r.tick()          # one session, scan starts
     time.sleep(0.8)
-    calls = {"suspend": 0, "resume": 0}
-    real_s, real_r = psutil.Process.suspend, psutil.Process.resume
-    psutil.Process.suspend = lambda self: (calls.__setitem__("suspend", calls["suspend"] + 1), real_s(self))[1]
-    psutil.Process.resume = lambda self: (calls.__setitem__("resume", calls["resume"] + 1), real_r(self))[1]
+    stops = []
+    real = rcore.stop_tree
+    rcore.stop_tree = lambda p, **k: (stops.append(p.pid), real(p, **k))[1]
     try:
         apex["on"] = True
         for _ in range(5):
             r.tick()                                                     # five checks while Apex runs
-        paused_once = calls["suspend"]
-        assert paused_once >= 1 and len(r.suspended) == paused_once
+        assert len(stops) == 1 and r.scan_proc is None and r.paused and len(starts) == 1, (stops, starts)
+        assert not psutil.pid_exists(stops[0]) or psutil.Process(stops[0]).status() == psutil.STATUS_ZOMBIE
         apex["on"] = False; r.tick()
-        assert calls["resume"] == paused_once and not r.suspended and not r.paused, calls
+        assert not r.paused and r.scan_proc is not None and len(starts) == 2, starts
     finally:
-        psutil.Process.suspend, psutil.Process.resume = real_s, real_r
+        rcore.stop_tree = real
     for _ in range(60):
         r.tick(); time.sleep(0.5)
         if hub.uploads:
@@ -2066,6 +2076,214 @@ def test_audio_tracks_cut_after_recording():
     part.write_bytes(b"half")
     assert tracks.clean_parts([folder]) == 1 and not part.exists()
     assert (folder / "Apex Legends_done.track1.m4a").exists()                    # finished tracks stay
+
+
+def _scanner():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_scan
+    return pcs_scan
+
+
+def test_scan_resumes_from_finished_chunks():
+    """A scan stopped part-way (Apex started: the app stops it) goes on from the chunks it had finished, and the
+    merged result is the same as one uninterrupted scan. Chunks are reused only for the same file and cuts; the
+    pieces are the same as before (results depend on the cuts), whatever the number of worker processes."""
+    import numpy as np
+    SCAN = _scanner()
+    video = TMP / f"resume-{time.time_ns()}.mp4"
+    video.write_bytes(b"x" * 100)
+    ran = []
+
+    def seg(job, fail_at=None):
+        path, start, end, snap, dec, layout = job
+        k = int(round(start / 600))
+        if k == fail_at:
+            raise KeyboardInterrupt("stopped")                     # the process is ended here
+        ran.append(k)
+        lab = np.zeros((24, 230), bool); lab[2 * k:2 * k + 4, :20] = True
+        return (start, [{"t": start + 1, "kind": "map", "data": {"map": "SP", "k": k}}],
+                [[start + 1, 0, 100 - k, False, None, None, None, None, False, False]], [(lab, 1)],
+                {"frames": 10, "decode": 0.5, "analysis": 1.0, "_feed": [{"t": start + 2}], "_rank": [(start + 1, False)],
+                 "_squads": [], "_own": [], "_votes43": 0, "_votes169": 3})
+    real = (SCAN.duration, SCAN.pick_decoder, SCAN._segment)
+    try:
+        SCAN.duration = lambda p: 3600.0
+        SCAN.pick_decoder = lambda p: ("CPU", [])
+        assert SCAN.default_chunks(3600) == max(1, min(8, (os.cpu_count() or 2) // 2)) and SCAN.default_chunks(200) == 1
+        SCAN._segment = seg
+        ev, sm, lb, perf = SCAN.scan_video(str(video), workers=1, chunks=6)            # reference: no stop
+        whole = (ev, sm, lb.export(), perf["_feed"], perf["_rank"])
+        folder = TMP / f"resume-{time.time_ns()}.partial"
+        SCAN._segment = lambda j: seg(j, fail_at=3)
+        ran.clear()
+        try:
+            SCAN.scan_video(str(video), workers=1, chunks=6, resume=str(folder))
+            raise AssertionError("should have stopped")
+        except KeyboardInterrupt:
+            pass
+        assert ran == [0, 1, 2] and sorted(p.name for p in folder.glob("chunk*.pkl")) == [
+            "chunk00.pkl", "chunk01.pkl", "chunk02.pkl"]
+        (folder / "chunk01.pkl").write_bytes(b"half")               # damaged: scanned again
+        SCAN._segment = seg
+        ran.clear()
+        ev, sm, lb, perf = SCAN.scan_video(str(video), workers=1, chunks=6, resume=str(folder))
+        assert sorted(ran) == [1, 3, 4, 5], ran
+        assert (ev, sm, lb.export(), perf["_feed"], perf["_rank"]) == whole
+        assert perf["chunks"] == 6 and perf["chunksResumed"] == 2 and perf["workers"] == 1
+        ran.clear()                                                  # other cuts: earlier chunks are not used
+        SCAN.scan_video(str(video), workers=1, chunks=4, resume=str(folder))
+        assert len(ran) == 4, ran
+        ran.clear()
+        os.utime(video, (time.time() + 50, time.time() + 50))      # the file changed: not used either
+        SCAN.scan_video(str(video), workers=1, chunks=4, resume=str(folder))
+        assert len(ran) == 4, ran
+        SCAN.Resume(str(folder), str(video), [], ("", []), None).clear()
+        assert not folder.exists()
+    finally:
+        SCAN.duration, SCAN.pick_decoder, SCAN._segment = real
+
+
+def test_scan_result_files_skip_kept_chunks():
+    """The chunks an unfinished scan keeps are never sent with the results."""
+    from pcs_recorder.core import result_files
+    out = TMP / f"res-{time.time_ns()}.scan"
+    (out / "x.partial").mkdir(parents=True)
+    (out / "x.partial" / "chunk00.pkl").write_bytes(b"1")
+    (out / "x.scan.json").write_text("{}")
+    (out / "scan.log").write_text("")
+    assert [p.name for p in result_files(out)] == ["scan.log", "x.scan.json"]
+    assert result_files(out / "missing") == []
+
+
+def test_stop_tree_ends_scan_and_workers():
+    """Stopping a scan for Apex ends it and every process it started (frees their memory), not a pause."""
+    import psutil
+    from pcs_recorder.core import stop_tree
+    out = TMP / f"stop-{time.time_ns()}"
+    out.mkdir()
+    p = fake_scan("v.mp4", str(out))
+    root = psutil.Process(p.pid)
+    for _ in range(50):
+        if root.children(recursive=True):
+            break
+        time.sleep(0.1)
+    tree = [root] + root.children(recursive=True)
+    assert len(tree) >= 2
+    stop_tree(p)
+    assert p.poll() is not None
+    assert not any(q.is_running() and q.status() != psutil.STATUS_ZOMBIE for q in tree)
+    assert not (out / "session.scan.json").exists()
+    stop_tree(p)                                                       # already ended: nothing happens
+
+
+def _test_video(path, secs=4):
+    import shutil
+    import subprocess
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        return False
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s=320x180:r=30:d={secs}",
+                    "-c:v", "mpeg4", "-g", "30", str(path)], check=True)
+    return True
+
+
+def test_keyframes_same_frames_unbuffered():
+    """keyframes() reads each frame straight from ffmpeg into its own buffer (the old 100 MB Python buffer cost about
+    100 ms and most of the scan's kernel time per keyframe): same bytes and times as ffmpeg gives, read-only frames."""
+    import hashlib
+    import subprocess
+    SCAN = _scanner()
+    v = TMP / f"kf-{time.time_ns()}.mp4"
+    if not _test_video(v):
+        print("  (no ffmpeg: keyframes test skipped)")
+        return
+    real = SCAN.DECODER
+    try:
+        SCAN.DECODER = ("CPU", [])
+        got = [(t, img.shape, img.flags.writeable, hashlib.sha1(img.tobytes()).hexdigest())
+               for t, img in SCAN.keyframes(str(v), 0.0, None)]
+        raw = subprocess.run(["ffmpeg", "-v", "error", "-skip_frame", "nokey", "-i", str(v), "-fps_mode", "passthrough",
+                              "-vf", "scale=2560:1440", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
+                             capture_output=True, check=True).stdout
+        n = 2560 * 1440 * 3
+        ref = [hashlib.sha1(raw[k * n:(k + 1) * n]).hexdigest() for k in range(len(raw) // n)]
+        assert [g[0] for g in got] == [0.0, 1.0, 2.0, 3.0], got
+        assert [g[3] for g in got] == ref and all(g[1] == (1440, 2560, 3) and g[2] is False for g in got)
+        mid = [t for t, _ in SCAN.keyframes(str(v), 1.5, 3.5)]          # a piece in the middle
+        assert mid == [2.0, 3.0], mid
+    finally:
+        SCAN.DECODER = real
+
+
+def test_stretched_views_fill_reader_boxes():
+    """4:3 stretched recordings: the views fill only the boxes the readers look at, with the same pixels as the full
+    remapped frames they replace (which were built 3 to 4 times per keyframe)."""
+    import numpy as np
+    SCAN = _scanner()
+    img = np.random.default_rng(1).integers(0, 256, (1440, 2560, 3), dtype=np.uint8)
+    old_top = img[SCAN.ROWS_TOP]
+    old_map = img.copy(); old_map[:1340] = img[SCAN.ROWS_MAP]
+    old_drop = img.copy(); old_drop[88:1088, 1520:2520] = img[SCAN.ROWS_DROP, 1520:2520]
+    old_drop[1125:1180, 1740:2075] = img[1140:1195, 1983:2318]
+    top, mp, drop = SCAN.view_top(img), SCAN.view_map(img), SCAN.view_drop(img)
+    import pcs_hud as HUD
+    boxes = {"top": [(417, 563 + 1, 0, 400), (40, 110, 0, 300), (120, 190, 2480, 2545), (HUD.Feed.Y0, HUD.Feed.Y1, HUD.Feed.X0, HUD.Feed.X1),
+                     (0, SCAN.TOP_ROWS, 0, 2560)],
+             "map": [(0, 1340, 560, 1960), (1362, 1430, 0, 2560)],
+             "drop": [(88, 1088, 1520, 2520), (1125, 1180, 1740, 2075)]}
+    assert 441 + HUD.SPEC_OFF + 1 <= 563 + 1 and 478 + HUD.SPEC_OFF <= SCAN.TOP_ROWS and HUD.Feed.Y1 <= SCAN.TOP_ROWS
+    for name, new, old in (("top", top, old_top), ("map", mp, old_map), ("drop", drop, old_drop)):
+        for y0, y1, x0, x1 in boxes[name]:
+            assert np.array_equal(new[y0:y1, x0:x1], old[y0:y1, x0:x1]), (name, y0, y1, x0, x1)
+    img.flags.writeable = False                                            # frames are read-only: views still work
+    assert np.array_equal(SCAN.view_top(img)[:SCAN.TOP_ROWS], old_top[:SCAN.TOP_ROWS])
+
+
+def test_clean_old_unpacked_copies():
+    """At start the app removes the copies of itself left unpacked in %TEMP% (crash, shutdown), and nothing else:
+    not the one it runs from, not one being unpacked, not one in use, not another program's folder."""
+    import shutil
+    import subprocess
+    import pcs_core as core
+    tmp = TMP / f"temp-{time.time_ns()}"
+    tmp.mkdir()
+    src = Path(sys.base_prefix) / "python3.dll"
+    if not src.exists():
+        src = Path(sys.executable).parent / "python3.dll"
+
+    def bundle(name, markers=True):
+        d = tmp / name
+        (d / "web").mkdir(parents=True)
+        shutil.copy(src, d / "python312.dll")
+        (d / "lib.pyd").write_bytes(b"x" * 1000)
+        if markers:
+            for m in ("pcs_maps.json", "pcs_fonts.json", "web/index.html"):
+                (d / m).write_text("{}")
+            (d / "build.json").write_text('{"version": "1.10.11"}', encoding="utf-8-sig")
+        return d
+    old = bundle("_MEI1001")
+    current = bundle("_MEI1002")
+    other = bundle("_MEI1003", markers=False)                             # another PyInstaller program's folder
+    busy = bundle("_MEI1004")
+    left = tmp / "_MEI1005.pcs-old"                                       # renamed by an earlier start
+    left.mkdir(); (left / "a.txt").write_text("x")
+    (tmp / "_MEI1006").write_text("a file, not a folder")
+    plain = tmp / "_MEIabc"; plain.mkdir()
+    user = tmp / "my folder"; user.mkdir()
+    holder = subprocess.Popen([sys.executable, "-c", f"import ctypes,time; ctypes.WinDLL(r'{busy / 'python312.dll'}'); "
+                               "print('ok', flush=True); time.sleep(30)"], stdout=subprocess.PIPE, text=True)
+    try:
+        assert holder.stdout.readline().strip() == "ok"
+        gone = core.clean_old_unpacked(str(tmp), str(current))               # just unpacked: too new to judge,
+        assert [Path(p).name for p, _ in gone] == ["_MEI1005.pcs-old"], gone  # except what an earlier start renamed
+        gone = core.clean_old_unpacked(str(tmp), str(current), now=time.time() + 3600)
+        assert [Path(p).name for p, _ in gone] == ["_MEI1001.pcs-old"], gone
+        assert not old.exists() and not left.exists() and current.exists() and other.exists()
+        assert busy.exists() and (busy / "python312.dll").exists() and (busy / "lib.pyd").exists()   # in use: untouched
+        assert (tmp / "_MEI1006").is_file() and plain.exists() and user.exists()
+    finally:
+        holder.kill(); holder.wait()
+    gone = core.clean_old_unpacked(str(tmp), str(current), now=time.time() + 3600)   # no longer in use: removed
+    assert [Path(p).name for p, _ in gone] == ["_MEI1004.pcs-old"] and gone[0][1] > 1000, gone
 
 
 def run_all(tests):

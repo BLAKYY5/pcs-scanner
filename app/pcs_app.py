@@ -344,6 +344,8 @@ def main():
             show_running_instance()                        # the running one shows its window instead
         return
     core.cleanup_staged()
+    if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
+        threading.Thread(target=core.clean_old_unpacked, daemon=True, name='clean-temp').start()
     try:
         from pcs_recorder import runtime as autorec
     except Exception:
