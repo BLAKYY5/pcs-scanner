@@ -53,11 +53,10 @@ jobs:
           python tests/test_ui.py
           if ($LASTEXITCODE) { exit 1 }
 
-      - name: Write build settings (version, Google sign-in ID, coach)
+      - name: Write build settings (version, Google sign-in ID)
         shell: pwsh
         env:
           GOOGLE_OAUTH_CLIENT: ${{ secrets.GOOGLE_OAUTH_CLIENT }}
-          COACH_EMAIL: ${{ vars.COACH_EMAIL }}
           GH_TOKEN: ${{ github.token }}
         run: |
           $code = (Select-String -Path scanner/pcs_scan.py -Pattern "^VERSION = '(.+)'").Matches[0].Groups[1].Value
@@ -66,7 +65,7 @@ jobs:
           $release = ((-not $exists) -and ("${{ github.ref_name }}" -eq "main")) -or ("${{ github.ref_type }}" -eq "tag")
           $ver = if ($release) { $code } else { "dev-${{ github.run_number }}" }
           "RELEASE=$release" | Out-File -FilePath $env:GITHUB_ENV -Append
-          @{ version = $ver; base = $code; repo = "${{ github.repository }}"; coach = $env:COACH_EMAIL } | ConvertTo-Json | Set-Content -Encoding utf8 build.json
+          @{ version = $ver; base = $code; repo = "${{ github.repository }}" } | ConvertTo-Json | Set-Content -Encoding utf8 build.json
           if ($env:GOOGLE_OAUTH_CLIENT) { $env:GOOGLE_OAUTH_CLIENT | Set-Content -Encoding utf8 client.json } else { Write-Warning "No GOOGLE_OAUTH_CLIENT secret: the app will scan but cannot upload." }
           "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
 
@@ -75,7 +74,7 @@ jobs:
         run: |
           $data = @("app/web;web", "app/assets;assets", "scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/pcs_banner.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.squadpaths", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--paths", "app")
+          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--hidden-import", "pcs_ring", "--hidden-import", "pcs_respawn", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--hidden-import", "pcs_recorder.squadpaths", "--paths", "app")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
 

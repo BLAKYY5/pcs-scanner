@@ -3,6 +3,7 @@ Run:  python tests/test_ui.py
 """
 import json
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -257,6 +258,39 @@ def test_recorder_settings_and_start_with_windows():
     assert st.Settings().start_with_windows is True                  # on by default
 
 
+def test_bitrate_setting_per_encoder():
+    """Settings → Quality shows the encoder's bitrate (AV1 10, HEVC / H.264 12); saving the page unchanged keeps
+    it automatic, another value is the player's own."""
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    a.s = st.Settings(folder=str(TMP / "recs"), encoder="av1_texture_amf").clamp()
+    b = pcs_server.Backend(a)
+    b.set_start_with_windows = lambda on: None
+    st_save = st.save
+    st.save = lambda s: s.clamp()                   # no recorder.json written by this test
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        r = state["recorder"]
+        assert code == 200 and r["settings"]["bitrate_mbps"] == 10 and r["bitrateDefault"] == 10 and r["bitrateAuto"]
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 10, "keep_days": 5})
+        assert code == 200 and a.s.bitrate_auto and state["recorder"]["settings"]["bitrate_mbps"] == 10
+        code, state, _ = call(srv, "/api/settings", {"bitrate_mbps": 15})
+        assert code == 200 and not a.s.bitrate_auto and state["recorder"]["bitrateAuto"] is False
+        a.s.encoder = "obs_nvenc_hevc_tex"                  # e.g. "Test encoder again" on a new card
+        a.s.clamp()
+        code, state, _ = call(srv, "/api/state")
+        assert state["recorder"]["settings"]["bitrate_mbps"] == 15 and state["recorder"]["bitrateDefault"] == 12
+        call(srv, "/api/settings", {"bitrate_mbps": 12})    # back to the recommendation: automatic again
+        assert a.s.bitrate_auto and a.s.bitrate_mbps == 12
+    finally:
+        srv.stop()
+        st.save = st_save
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "bitrateTip(r)" in js and "AV1 10, HEVC / H.264 12" in js and "12 is recommended." not in js
+
+
 def test_voice_app_setting():
     """Settings → Voice app: saved through the API; "other" needs a program name, never a path."""
     from pcs_recorder import settings as st
@@ -467,39 +501,96 @@ def test_delete_and_sound_levels():
 
 
 def test_coach_role():
-    """Coach only for the coach's Google account; importing recordings by hand is the coach's."""
-    b = pcs_server.Backend()
-    srv = pcs_server.Server(b)
-    srv.start()
-    real_build, real_drive = dict(core.BUILD), core.drive_service
-    core.BUILD["coach"] = "coach@example.com"
-    who = {"email": "player@example.com"}
-
-    class Svc:
-        def about(self):
-            class A:
-                def get(self, fields):
-                    class X:
-                        def execute(self):
-                            return {"user": {"emailAddress": who["email"]}}
-                    return X()
-            return A()
-    core.drive_service = lambda interactive=True: Svc()
+    """Coach only for the coach's hub key (the hub's /api/me says coach); importing recordings by hand is the coach's.
+    No coach address is built into the app."""
+    assert "coach" not in core.BUILD
+    hubbackup, hub, fake, b, hb, srv, clock, target = _backup_setup(PLAYER_KEY)
     try:
         code, r, _ = call(srv, "/api/settings", {"role": "Coach", "player": "Xno"})
         assert code == 403 and "coach" in r["error"].lower()
         assert core.SETTINGS["player"] == "Xno" and core.SETTINGS.get("role") != "Coach"   # the rest was saved
         assert call(srv, "/api/library/add", {"paths": []})[0] == 403
-        who["email"] = "Coach@Example.com"
+        hub.set_key(GOOD_KEY)
         code, st, _ = call(srv, "/api/settings", {"role": "Coach"})
-        assert code == 200 and st["coach"] is True and st["role"] == "Coach"
+        assert code == 200 and st["coach"] is True and st["role"] == "Coach", st
         assert call(srv, "/api/library/add", {"paths": []})[0] == 200
         code, st, _ = call(srv, "/api/settings", {"role": "IGL"})
         assert st["coach"] is False
+        hub.set_key(None)                                    # no key: never the coach
+        assert call(srv, "/api/settings", {"role": "Coach"})[0] == 403
     finally:
-        core.BUILD.clear(); core.BUILD.update(real_build); core.drive_service = real_drive
         core.SETTINGS["role"] = ""
+        _backup_done(srv, fake)
+
+
+def test_coach_email_from_settings():
+    """The scans folder on Drive is shared with the coach's address the player typed in Settings, once per address;
+    without one nothing is shared."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    calls = {"share": [], "folders": []}
+
+    class Svc:
+        def files(self):
+            class F:
+                def list(self, **kw):
+                    return _X({"files": [{"id": f} for f in calls["folders"]]})
+
+                def create(self, body, fields):
+                    calls["folders"].append("F1")
+                    return _X({"id": "F1"})
+            return F()
+
+        def permissions(self):
+            class P:
+                def create(self, fileId, sendNotificationEmail, body):
+                    calls["share"].append((fileId, body["emailAddress"]))
+                    return _X({})
+            return P()
+
+    class _X:
+        def __init__(self, v):
+            self.v = v
+
+        def execute(self):
+            return self.v
+    try:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == []          # no address: not shared
+        code, r, _ = call(srv, "/api/settings", {"coach_email": "not an address"})
+        assert code == 500 and "address" in r["error"]
+        code, st, _ = call(srv, "/api/settings", {"coach_email": " coach@example.com "})
+        assert code == 200 and st["coachEmail"] == "coach@example.com"
+        assert core.scans_folder(Svc()) == "F1" and calls["share"] == [("F1", "coach@example.com")]
+        core.scans_folder(Svc())
+        assert len(calls["share"]) == 1                                           # once per address
+        call(srv, "/api/settings", {"coach_email": "new.coach@example.com"})
+        core.scans_folder(Svc())
+        assert calls["share"][-1] == ("F1", "new.coach@example.com") and len(calls["share"]) == 2
+    finally:
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        core.save_settings()
         srv.stop()
+
+
+def test_no_personal_email_in_app():
+    """No personal address in what the exe is built from (a security review found the coach's address in the exe):
+    app/, scanner/ and the build workflow. Only obviously fake examples are allowed."""
+    root = Path(__file__).resolve().parent.parent
+    allowed = ("example.com", "example.org", "example.net", "users.noreply.github.com")
+    found = []
+    files = [p for d in ("app", "scanner") for p in (root / d).rglob("*")
+             if p.is_file() and p.suffix.lower() in (".py", ".js", ".html", ".css", ".json", ".txt", ".md", ".yml")]
+    files += list((root / ".github").rglob("*.yml"))
+    for p in files:
+        for m in re.finditer(r"[A-Za-z0-9._%+-]+@([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,})",
+                             p.read_text(encoding="utf-8", errors="replace")):
+            if not m.group(1).lower().endswith(allowed):
+                found.append(f"{p.relative_to(root)}:{m.group(1)}")      # domain only: never print the address
+    assert not found, "personal email address in: " + ", ".join(found)
+    wf = (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
 def test_team_link_weapon_icons():
@@ -1952,8 +2043,10 @@ def test_audio_track_never_blocks_the_review():
     def slow_cut(video, outs):                        # stands in for ffmpeg on a 3-hour recording
         cuts.append([n for n, _ in outs])
         gate.wait(10)
-        for _, out in outs:
-            out.write_bytes(b"m4a-track-" + out.name.encode())
+        for _, out in outs:                           # written whole, then renamed, like the real cut (.part)
+            tmp = out.with_name(out.name + ".tmp")
+            tmp.write_bytes(b"m4a-track-" + out.name.encode())
+            os.replace(tmp, out)
     c = tracks.Cutter(is_apex_running=lambda: apex[0], cut=slow_cut, count=lambda video: 3, wait_s=0.05)
     b = pcs_server.Backend()
     b.cutter = c
@@ -2053,6 +2146,75 @@ def test_review_kill_feed_our_squad():
     for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
                  "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
         assert text in js, text
+
+
+RESPAWN_GAME = {"map": "ED", "mode": "ranked", "tStart": 100.0, "tEndGame": 900.0, "drop": None, "ring": [], "landing": None,
+                "select": {"tFirst": 80.0, "tLast": 100.0, "ranked": True,
+                           "squad": [{"slot": 1, "legend": "wraith", "self": False, "hue": 77},
+                                     {"slot": 2, "legend": "crypto", "self": True, "hue": 39},
+                                     {"slot": 3, "legend": "bangalore", "self": False, "hue": 179}]},
+                # scanner PR #52: a teammate named by the card colour, one whose colour matches no slot, the player
+                "respawns": [{"t": 400.0, "who": "teammate", "slot": 1, "hue": 80, "color": "yellow", "how": "card",
+                              "deadSince": 328.0, "lastDeadRead": 395.0},
+                             {"t": 500.0, "who": "teammate", "slot": 2, "hue": 300, "color": "purple", "how": "card",
+                              "deadSince": 470.0},
+                             {"t": 650.5, "who": "self", "how": "dropship", "deadSince": 560.0}],
+                "ownDeaths": [560.0],
+                "samples": []}
+
+
+def test_review_respawns_like_kills():
+    """Respawns from the scan (PR #52) reach the review page, and the page shows each one like a kill: a marker on the
+    kill feed lane and a line in the events, its own colour, '<who> respawned', a click seeks there."""
+    folder = TMP / "respawn-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.17-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}              # a game scanned before PR #52
+    (rec.with_suffix(".scan")).mkdir(exist_ok=True)
+    (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [RESPAWN_GAME, old]}))
+    feed = {"lines": [{"t": 380.0, "jpg": "", "event": "kill", "killer": {"side": "squad", "hue": 39}, "victim": {"side": "other"}}]}
+    (rec.with_suffix(".scan") / (rec.stem + ".feed.json")).write_text(json.dumps(feed))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = call(srv, "/api/library")[1][0]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert d["games"][0]["respawns"] == RESPAWN_GAME["respawns"]                     # passed through untouched
+        assert d["games"][1]["respawns"] is None                                           # older scan: just missing
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+        assert "respawned`" in js and "Respawned</span>" in js and ".tick.respawn" in css
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            end = time.time() + 15
+            while time.time() < end and not page.js("!!(window.RV && RV.ev && document.querySelector('#laneF .tick'))"):
+                time.sleep(0.2)
+            ev = page.js("RV.ev.filter(e => e.k === 'respawn').map(e => [e.t, e.title, e.sub, e.g])")
+            assert ev == [[400, "Wraith respawned", "back after 1:12", 0], [500, "Teammate respawned", "back after 0:30", 0],
+                          [650.5, "You respawned", "back after 1:30 · dropship", 0]], ev
+            # on the kill feed lane beside the kill tick, not on the start / rings lane
+            assert page.js("[...document.querySelectorAll('#laneF .tick.respawn')].map(x => +x.dataset.t)") == [400, 500, 650.5]
+            assert page.js("document.querySelectorAll('#laneF .tick:not(.respawn)').length") == 1
+            assert page.js("document.querySelectorAll('#laneE [data-t=\"400\"]').length") == 0
+            assert "respawns" in page.js("document.querySelector('#laneF .lane-label').textContent")
+            # in the events list, in order with the kill, own style; a click seeks the video there
+            rows = page.js("[...document.querySelectorAll('#rvBody .ev')].map(x => [x.classList.contains('respawn'), x.querySelector('b').textContent])")
+            assert [r for r in rows if r[0]] == [[True, "Wraith respawned"], [True, "Teammate respawned"], [True, "You respawned"]], rows
+            names = [r[1] for r in rows]
+            assert "You killed" in names and names.index("You killed") < names.index("Wraith respawned"), \
+                (names, page.js("JSON.stringify([RV.d.feed, RV.d.feedSides, RV.d.games[0].select])"))
+            page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
+            page.js("document.querySelector('#rvBody .ev.respawn').click(); document.querySelector('#laneF .tick.respawn[data-t=\"650.5\"]').click(); 1")
+            assert page.js("__seeks") == [400, 650.5], page.js("__seeks")
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
 
 
 class MinimapHub:
