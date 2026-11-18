@@ -8,7 +8,9 @@ damage checked every 1.5 s, a per-stage share of max health). Two signals:
     in normal play they are 0..0.05. Low health alone tints them less (one or two strips).
   - ring ticks on the player's own card (`pcs_bars.read_own` reads): health drops in steps of one size while the
     shield stays the same (ring damage skips the shield). Ticks seen on our recordings: 3 per tick (rounds 1-2).
-A stretch outside = storm reads (two in a row, or one next to a tick) and/or a run of ring ticks. Its damage =
+A stretch outside = a run of ring ticks (steady: 3+ of one size with the shield up, 4+ without; or 2+ inside red
+edges), widened by the red-edge reads around it (two or more, own card alive: knocked / dying screens are red too).
+The red edges alone never make a stretch: Storm Point's red grass and orange walls tint the strips as much. Its damage =
 the ticks it lasted (seconds / 1.5) x the tick size measured in it (else in the same game and round); the health
 drops actually read are kept too (`measured`), as heals during the stretch hide some of it.
 
@@ -17,9 +19,10 @@ Fights (plan items 3 and 12). Evidence of a fight, per game:
     once each as in `pcs_hud.feed_stats`, with the enemy name's shape (`killerSig` / `victimSig`: tells names apart
     without reading them);
   - the player's own knocks (`ownKnocks`) and shield / health lost outside the ring;
-  - gunfire: game sound well above the game's usual level (`pcs_audio` loudness), only to stretch a fight's ends and
-    to see shooting going on after the opponents died (alone it is no fight: loot, ultimates, other squads).
-Evidence closer than FIGHT_GAP joins one fight (LOUD_GAP while the gunfire goes on). Result (`verdict`): kills decide
+  - gunfire: game sound well above the game's usual level (`pcs_audio` loudness), only to see shooting going on after
+    the opponents died. Measured on 7 Nov: 10 dB windows are 29 % of fight time and 12 % elsewhere, so loudness alone
+    neither finds fights nor their ends (as the audio cross-check found); it does not join or stretch fights.
+Evidence closer than FIGHT_GAP joins one fight. Result (`verdict`): kills decide
 (the player's own death in the fight counts as a kill on us); with as many kills each side, a lead of KNOCK_LEAD
 knocks; a squad wiped in it always lost; else even. Kill-feed names in a colour none of our squad has (a coloured
 background behind a white name) are not ours. Third party: a new enemy name after the fight started (`new enemy`)
@@ -42,6 +45,7 @@ TICK_MAX = 30           # a health drop larger than this per read is not one rin
 TICK_SPREAD = 2         # ticks of one stretch differ by at most this much (health %)
 TICK_GAP = 4.5          # s between ticks of one run
 STORM_GAP = 5.0         # s between storm reads of one stretch
+STORM_READS = 2         # storm reads a stretch needs
 TICKS_ALONE = 4         # a run of ticks with no storm read must have this many (with the shield up: 3)
 
 
@@ -96,37 +100,46 @@ def _steady(run):
 
 
 def _round_at(g, t):
+    """The ring round running at t: the last ring phase read that started before it (a round's closing phase is not
+    always read; its wait is)."""
+    best = None
     for r in g.get('ring') or []:
-        a = r.get('firstSeen'); b = r.get('endsAt') or r.get('lastSeen')
-        if a is not None and b is not None and a - 5 <= t <= b + 1: return r.get('round'), r.get('kind')
-    return None, None
+        a = r.get('firstSeen')
+        if a is not None and a - 5 <= t and r.get('round') is not None and (best is None or a >= best.get('firstSeen')):
+            best = r
+    return (best.get('round'), best.get('kind')) if best else (None, None)
 
 
 def ring_damage(g, own, storm):
     """own: [(t, read_own)] and storm: [(t, (L, R, T, B))] inside one game -> games[].ringDamage."""
     if not own and not storm: return None
     ticks = ring_ticks(own)
-    out_reads = [t for t, s in storm if storm_outside(s)]
-    tick_t = [k[0] for k in ticks]
-    # storm stretches: reads closer than STORM_GAP; kept with 2+ reads or one read next to a tick
+    alive = {round(t): True for t, o in own if _alive(o)}
+    # the screen also goes red while knocked or dying: only reads with the player's own card up (alive) count
+    out_reads = [t for t, s in storm if storm_outside(s) and alive.get(round(t))]
+    # storm stretches: reads closer than STORM_GAP, STORM_READS or more
     stretches = []
     for t in out_reads:
         if stretches and t - stretches[-1][1] <= STORM_GAP: stretches[-1][1] = t; stretches[-1][2] += 1
         else: stretches.append([t, t, 1])
-    spans = [[a, b, 'storm'] for a, b, n in stretches if n >= 2 or any(abs(x - a) <= 3 for x in tick_t)]
-    sizes = []
+    storms = [(a, b) for a, b, n in stretches if n >= STORM_READS]
+    # a stretch outside needs ring ticks: steady ones alone, or two of one size inside a storm stretch. The red
+    # edges alone are not enough: Storm Point's red grass and orange walls tint them as much (7 Nov, by eye).
+    spans = []
     for run in _tick_runs(ticks):
         a, b = run[0][0], run[-1][0]
-        near_storm = any(s[0] - 3 <= a <= s[1] + 3 or s[0] - 3 <= b <= s[1] + 3 for s in spans)
-        size = _steady(run)
-        if near_storm or size is not None:
+        st = [x for x in storms if x[0] - 3 <= b and x[1] + 3 >= a]
+        sizes_ = [d for t, d, dt, sh in run]
+        if _steady(run) is not None or (st and len(run) >= 2 and max(sizes_) - min(sizes_) <= TICK_SPREAD):
             spans.append([a - TICK_S, b, 'ticks'])
+            spans += [[x[0], x[1], 'storm'] for x in st]          # the red edges around it: still outside
     spans.sort()
     merged = []
     for a, b, how in spans:
         if merged and a - merged[-1][1] <= STORM_GAP:
             merged[-1][1] = max(merged[-1][1], b); merged[-1][2] |= {how}
         else: merged.append([a, b, {how}])
+    sizes = []
     segs = []
     for a, b, how in merged:
         mine = [k for k in ticks if a - 0.5 <= k[0] <= b + 0.5]
@@ -151,13 +164,13 @@ def ring_damage(g, own, storm):
 
 # ---------- fights ----------
 FIGHT_GAP = 25.0        # s between two pieces of evidence of one fight
-LOUD_GAP = 45.0         # ... when gunfire goes on in between
-EDGE = 15.0             # s a fight's ends may stretch along continuous gunfire
 HIT_MIN = 5             # shield + health lost in one read to count as a hit
 POKE = 50               # a fight with no feed line and no knock needs this much damage taken
 KNOCK_LEAD = 2          # with as many kills each side, knocks ahead needed to call it won / lost
+RING_KNOCK = 8.0        # s after a stretch outside the ring a knock is still the ring's
 DEATH_AFTER = 25.0      # s after a fight's last evidence the player's death still belongs to it
-LOUD_DB = 14.0          # gunfire: a 0.5 s window this far above the game's median loudness
+LOUD_DB = 10.0          # gunfire: a 0.5 s window this far above the game's median loudness
+LOUD_AFTER = 0.35       # share of loud windows 3..15 s after the last opponent died that means more shooting
 NEW_ENEMY_AFTER = 20.0  # s after the first enemy line for a new name to count as arriving later (a squad comes in together)
 SQUAD = 3
 DUP_MOVED_BITS = 60   # name shapes (of 144 points) of one line captured again lower in the feed
@@ -257,6 +270,8 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
         ours = (l.get('killer') or {}).get('side') == 'squad'
         ev.append((l['t'], ('our' if ours else 'their') + l['event'].capitalize(), l))
     for k in g.get('ownKnocks') or []:
+        if any(r['t0'] <= k['t'] <= r['t1'] + RING_KNOCK for r in ring_segs):
+            continue                                  # knocked by the ring itself ('[The Ring]' in the feed)
         ev.append((k['t'], 'selfKnocked', k))
         if k.get('end') and k['end'] > k['t']: ev.append((k['end'], 'selfDown', k))   # still down: the fight goes on
     for t, d in H: ev.append((t, 'hit', d))
@@ -271,7 +286,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
     for e in ev:
         if groups:
             last = groups[-1][-1][0]
-            if e[0] - last <= FIGHT_GAP or (e[0] - last <= LOUD_GAP and loud_between(last, e[0]) >= 0.3):
+            if e[0] - last <= FIGHT_GAP:
                 groups[-1].append(e); continue
         groups.append([e])
     deaths = list(g.get('ownDeaths') or []); back = [r['t'] for r in g.get('respawns') or [] if r.get('who') == 'self']
@@ -284,14 +299,6 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
         knocked = [e for e in grp if e[1] == 'selfKnocked']
         if not feed and not knocked and dmg < POKE: continue
         a, b = grp[0][0], grp[-1][0]
-        # stretch the ends along continuous gunfire (at most EDGE)
-        if len(wt):
-            j = np.searchsorted(wt, a)
-            while j > 0 and wv[j - 1] and a - wt[j - 1] <= EDGE: j -= 1
-            a = min(a, float(wt[j])) if j < len(wt) else a
-            j = np.searchsorted(wt, b)
-            while j < len(wt) and wv[j] and wt[j] - b <= EDGE: j += 1
-            b = max(b, float(wt[j - 1]) + 0.5) if j > 0 else b
         ours = {'knocks': 0, 'kills': 0}; theirs = {'knocks': 0, 'kills': 0}
         opp = []                                       # [{'sig', 't'}] enemy names, in order of first sight
         late_new = None; self_in_feed = 0; self_killed = False
@@ -330,7 +337,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
             t_done = max(t for t, kind, l in feed if kind == 'ourKill')
             after_hits = sum(e[2] for e in grp if e[1] == 'hit' and e[0] > t_done + 2)
             if after_hits >= 25: third = {'t': round(t_done, 2), 'why': 'hit after opponents died'}
-            elif loud_between(t_done + 3, t_done + 15) >= 0.35: third = {'t': round(t_done, 2), 'why': 'gunfire after opponents died'}
+            elif loud_between(t_done + 3, t_done + 15) >= LOUD_AFTER: third = {'t': round(t_done, 2), 'why': 'gunfire after opponents died'}
         f = {'t0': round(a, 2), 't1': round(b, 2), 'opponents': len(opp), 'opponentNames': [o['sig'] for o in opp],
              'ours': ours, 'theirs': theirs, 'result': result, 'thirdParty': third is not None,
              'damageTaken': int(dmg), 'feedLines': [round(e[0], 2) for e in feed]}

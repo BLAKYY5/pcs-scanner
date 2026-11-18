@@ -2390,7 +2390,6 @@ def test_fights_and_ring_damage():
     F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
     f = g[0]['fights'][0]
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
-    assert f['t1'] >= 315, f                                                  # stretched along the gunfire
 
 
 def test_scanner_build_stamp():
