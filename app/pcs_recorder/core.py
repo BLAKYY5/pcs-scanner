@@ -123,6 +123,7 @@ class Recorder:
         self.muted: dict[str, bool] = {}
         self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub / Drive, per recording
         self.hub_next, self.hub_fails, self.hub_fail_url = 0.0, 0, ""   # hub retries: backoff after network errors
+        self.hub_told = ""                     # why the hub can't be reached, last told in Activity (once per change)
         self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
         self.silence_thread: threading.Thread | None = None
         self.cutter = None                       # audio tracks for the review (tests); default tracks.CUTTER
@@ -471,6 +472,21 @@ class Recorder:
             except Exception as ex:
                 log.info("results not sent, will retry: %s", ex)
                 self.next_upload = self.clock() + 60
+                if getattr(ex, "kind", "") == "paused":           # Apex started between two parts: goes on later
+                    return
+                reach = getattr(ex, "reach", "")
+                if reach:                                         # can't reach the hub: one Activity line, no pop-up
+                    from .hub import reason
+                    note = f"not sent yet: {reason(ex)}"
+                    if e.note != note:
+                        e.note = note
+                        retention.save_index(self.idx)
+                    if self.hub_told != reach:
+                        self.hub_told = reach
+                        say = getattr(self.ui, "activity", None)
+                        text = f"Results wait for the team hub: {ex}. They are sent by themselves when it works."
+                        say(text) if say else self.ui.notify("Results not sent yet", text)
+                    return
                 import re
                 note = f"not sent yet: {ex}"
                 # tell the player once per reason, not every minute (a new reason, e.g. "key refused", is told)
@@ -482,6 +498,7 @@ class Recorder:
                 return
             hub_note = getattr(where, "hub_note", "")          # what the hub answered: "Sent to hub: 11 games"
             e.status, e.note = "uploaded", hub_note
+            self.hub_told = ""
             retention.save_index(self.idx)
             hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
             self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),

@@ -808,6 +808,12 @@ class Backend:
         if not a or not a.s.hub_url:
             return {"ok": False, "text": "No hub address"}
         res = hub.test(a.s.hub_url)
+        if res.get("https"):                               # http:// of a public hub that only answers on https://
+            from pcs_recorder import settings as st
+            a.s.hub_url = res["https"]
+            hub.reset()
+            st.save(a.s)
+            res = hub.test(a.s.hub_url)
         if res.get("ok"):
             a.rec.next_upload = 0                          # results waiting for the hub: try now
         return res
@@ -848,7 +854,7 @@ class Backend:
             try:
                 self._use_invite(inv_url, code)
             except hub.HubError as e:
-                res = {"ok": False, "text": "Hub not reachable" if e.kind == "network" else str(e)}
+                res = {"ok": False, "text": str(e)}
                 if e.kind == "network":
                     res["tailscale"] = tailscale_state(inv_url)
                 return res
@@ -1126,7 +1132,7 @@ class Backend:
                 try:
                     self._use_invite(inv_url, code)
                 except hub.HubError as e:
-                    raise ValueError("Hub not reachable" if e.kind == "network" else str(e)) from None
+                    raise ValueError(str(e)) from None
                 body.pop("hub_url", None)                    # the invite's address wins over the field
                 self._icons_soon()
             elif raw is None:

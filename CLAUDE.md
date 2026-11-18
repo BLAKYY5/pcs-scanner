@@ -155,6 +155,19 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.12 i
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
+- **Public hub** (hub 0.6 behind Cloudflare Tunnel, `https://hub.<domain>`; plan of 18 Nov 2026): every hub request,
+  the invite / sign-in links and Watch together's websocket (`wss://`, `watch.sslopt`: certificate and name always
+  checked, certifi's list as requests) work with `https://`; home network / Tailscale `http://` unchanged. An address
+  typed without a scheme gets `https://` for a public name, `http://` for an IP, a port, a one-word name or
+  `.ts.net` / `.local` (`settings.hub_address`); Test switches an `http://` address the hub redirects to `https://`.
+  Cloudflare refuses bodies over 100 MB: a file over 50 MB (mic tracks, review talk), or small files together over
+  90 MB, goes through `/api/uploads` in parts of ≤ 50 MB (`hub.send_in_parts`), resumable after a lost answer or a
+  restart (ids in `hub-uploads.json`, never the key), paused between parts when Apex starts (`Sender.stop`); a hub
+  without the route (404 without `not_found`, or 405) gets the one-shot request. Why the hub can't be reached
+  (`hub.classify`, `reach` in the hub state): no internet (a name lookup of `www.msftconnecttest.com`, nothing sent),
+  address wrong (name not found, bad certificate, a redirect that isn't to https), hub down (connection refused,
+  timeouts, Cloudflare 502-504 / 520-530), key refused. Results waiting for the hub: one Activity line per reason
+  (`UI.activity`, no corner message), the reason on the recording, the latest in Settings → Team hub.
 - **Silent voice / mic track**: after a recording of 5 min or more, tracks 2 and 3 (when on, with consent, not muted
   by hotkey) are read (audio only, `pcs_levels.track_db`); loudest half second under -60 dBFS = silent, told once
   per setting (`silence.json`).

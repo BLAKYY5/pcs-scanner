@@ -1460,6 +1460,8 @@ function hubStatusHTML(h) {
   if (!h) return '';
   if (h.wait) return `<span class="hubmsg warn">Too many wrong keys: wait ${Math.ceil(h.wait / 60)} min</span>`;
   if (h.refused) return '<span class="hubmsg bad">Key refused. Ask your coach for a new key.</span>';
+  const re = h.reach || {};          // the latest request: no internet / address wrong / hub down (newer than a Test)
+  if (re.state && re.state !== 'ok' && re.text) return `<span class="hubmsg bad">${esc(re.text)}</span>`;
   const l = h.last || {};
   return l.text ? `<span class="hubmsg ${l.ok ? 'good' : 'bad'}">${esc(l.text)}</span>` : '';
 }
