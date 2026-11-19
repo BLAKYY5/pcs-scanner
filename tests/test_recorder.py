@@ -3136,6 +3136,61 @@ def test_ammo_reader_and_events():
     assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
 
 
+def test_gpu_frames_converted_like_cpu_frames():
+    """GPU decoders hand frames over as NV12, the CPU decoder as yuv420p, with the same values. ffmpeg's NV12 -> RGB
+    route rounds differently (84 % of values off by up to 51 on the coach's recordings), so the scanner repacks GPU
+    frames into the CPU decoder's format first (pcs_hud.sw_format): lossless, same RGB as the CPU byte for byte.
+    Shown here without a GPU: frames passed through NV12 like a GPU decoder's."""
+    import io
+    import shutil
+    import subprocess
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        raise Skipped("ffmpeg / ffprobe not on PATH")
+    with tempfile.TemporaryDirectory() as d:
+        v = os.path.join(d, "Apex Legends_dec-test.mp4")
+        subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc2=s=640x360:r=10:d=2",
+                        "-c:v", "libx264", "-preset", "ultrafast", "-g", "5", "-pix_fmt", "yuv420p", v], check=True)
+
+        def rgb(vf):
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", v, "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24",
+                                   "-"], capture_output=True, check=True).stdout
+        cpu = rgb("null")
+        assert rgb("format=nv12") != cpu                              # the GPU's hand-over format: another route
+        assert HUD.sw_format(v, []) == ""                             # CPU decoding: nothing added
+        fix = HUD.sw_format(v, ["-hwaccel", "d3d11va", "-c:v", "h264"])
+        assert fix == "format=yuv420p,"
+        assert rgb("format=nv12," + fix + "null") == cpu              # repacked first: the CPU's bytes
+
+        seen = []                                                     # keyframes() and the 60 fps reads use it
+
+        class P:
+            def __init__(self, cmd, **kw):
+                seen.append(cmd)
+                self.stdout = io.BytesIO(b""); self.stderr = io.BytesIO(b"")
+            def poll(self): return 0
+            def kill(self): pass
+            def wait(self): return 0
+        old_dec, old_popen, old_run = SCAN.DECODER, SCAN.subprocess.Popen, HUD.subprocess.run
+        try:
+            SCAN.DECODER = ("GPU d3d11va", ["-hwaccel", "d3d11va", "-c:v", "h264"])
+            SCAN.subprocess.Popen = P
+            list(SCAN.keyframes(v))
+            vf = seen[-1][seen[-1].index("-vf") + 1]
+            assert vf.startswith("format=yuv420p,"), vf
+            SCAN.DECODER = ("CPU", [])
+            list(SCAN.keyframes(v))
+            assert not seen[-1][seen[-1].index("-vf") + 1].startswith("format="), seen[-1]
+            HUD.DEC = ["-hwaccel", "d3d11va", "-c:v", "h264"]
+            HUD.subprocess.run = lambda cmd, **kw: (seen.append(cmd), subprocess.CompletedProcess(cmd, 0, b"", b""))[1]
+            list(HUD._corner(v, 0.0, 0.5))
+            assert seen[-1][seen[-1].index("-vf") + 1].startswith("format=yuv420p,scale="), seen[-1]
+        finally:
+            SCAN.DECODER, SCAN.subprocess.Popen, HUD.subprocess.run, HUD.DEC = old_dec, old_popen, old_run, []
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
