@@ -249,6 +249,7 @@ class _S:            # recorder settings stand-in
     mic_device = "default"
     share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
     share_clips = False
+    transcripts_withdraw = False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -4153,6 +4154,7 @@ def test_setup_choices():
         assert s.transcript_asked and s.transcript_consent
         call(srv, "/api/setup/choice", {"choice": "transcripts", "on": False})
         assert s.transcript_asked and not s.transcript_consent
+        assert s.transcripts_withdraw is True                    # yes -> no: the hub must be told (decision 21)
         said = []
         b.say = said.append
         call(srv, "/api/setup/choice", {"choice": "autorecord", "on": False})
@@ -4163,6 +4165,9 @@ def test_setup_choices():
         s2._sync_sharing = lambda: None
         s2.save_settings({"transcript_consent": True})
         assert s2.auto.s.transcript_asked and not s2.auto.s.share_asked
+        assert not s2.auto.s.transcripts_withdraw
+        s2.save_settings({"transcript_consent": False})
+        assert s2.auto.s.transcripts_withdraw is True
     finally:
         srv.stop()
         st.save = st_save
@@ -4202,6 +4207,8 @@ class TeamHub:
         self.calls, self.shared, self.rec = [], [], rec
         self.bodies = []                 # what PUT /api/me/sharing got
         self.clips = None                # share_clips per track: None = an older hub without the field
+        self.features = ["comms"]        # GET /api/me features ("transcripts": takes PUT /api/me/transcripts)
+        self.transcripts = []            # what PUT /api/me/transcripts got
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -4225,6 +4232,14 @@ class TeamHub:
                     hub.bodies.append(json.loads(self.rfile.read(n)))
                     hub.shared.append(hub.bodies[-1]["share_tracks"])
                     return self._json(200, {"share_tracks": hub.shared[-1]})
+                if self.path == "/api/me" and self.command == "GET":
+                    return self._json(200, {"name": "Moe", "role": "player", "features": hub.features})
+                if self.path == "/api/me/transcripts" and self.command == "PUT":
+                    if "transcripts" not in hub.features:
+                        return self._json(404, {"error": "not_found"})
+                    n = int(self.headers.get("Content-Length") or 0)
+                    hub.transcripts.append(json.loads(self.rfile.read(n)))
+                    return self._json(200, {"transcripts": hub.transcripts[-1]["transcripts"]})
                 if self.path.startswith("/api/team-tracks"):
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     if q["recording"][0] != hub.rec:
@@ -4257,6 +4272,62 @@ class TeamHub:
     def stop(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+def test_transcripts_no_tells_the_hub():
+    """Decision 21: a player who switches comms transcripts from yes to no has the hub told with his own key
+    (PUT /api/me/transcripts {"transcripts": false}; the hub deletes his transcripts). Only when GET /api/me lists the
+    feature "transcripts": an older hub gets nothing (asked again 6 h later). Hub out of reach: tried again later.
+    Said yes again before it was sent: nothing sent."""
+    from pcs_recorder import settings as st, teamtracks
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    real_up = hub.internet_up
+    hub.internet_up = lambda: True                           # no look at the outside world in tests
+    fake = TeamHub("none")
+    s = st.Settings()
+    s.hub_url = fake.url
+    saved = []
+    real_save = st.save
+    st.save = lambda x: saved.append(x.transcripts_withdraw)
+    clock = {"t": 1000.0}
+    tt = teamtracks.TeamTracks(lambda: s, lambda: {}, lambda: None, now=lambda: clock["t"])
+    try:
+        assert tt.sync_transcripts() is None and fake.calls == []            # nothing to withdraw: no request
+        s.transcripts_withdraw = True
+        assert tt.sync_transcripts() is None                                   # older hub: no feature, nothing sent
+        assert fake.calls == [("GET", "/api/me")] and fake.transcripts == [] and s.transcripts_withdraw
+        assert tt.sync_transcripts() is None and len(fake.calls) == 1        # not asked again at once
+        fake.features = ["comms", "transcripts"]                              # the hub updated
+        clock["t"] += teamtracks.OLD_HUB_RETRY_S + 1
+        assert tt.sync_transcripts() is True
+        assert fake.transcripts == [{"transcripts": False}] and fake.calls[-1] == ("PUT", "/api/me/transcripts")
+        assert s.transcripts_withdraw is False and saved[-1] is False
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and len(fake.calls) == n        # sent once
+        # hub out of reach: kept, sent at a later try
+        s.transcripts_withdraw = True
+        url = s.hub_url
+        s.hub_url = "http://127.0.0.1:9"
+        assert tt.sync_transcripts() is None and s.transcripts_withdraw
+        s.hub_url = url
+        assert tt.sync_transcripts() is True and len(fake.transcripts) == 2
+        # said yes again before it went out: nothing sent, the flag dropped
+        s.transcripts_withdraw, s.transcript_consent = True, True
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and not s.transcripts_withdraw and len(fake.calls) == n
+        # the minute tick sends it too (never during a game: tick does nothing then)
+        s.transcripts_withdraw, s.transcript_consent = True, False
+        tt.busy = lambda: "Apex is running"
+        assert not tt.tick() and s.transcripts_withdraw
+        tt.busy = lambda: None
+        tt.tick()
+        _tt_wait(tt)
+        assert not s.transcripts_withdraw and len(fake.transcripts) == 3
+    finally:
+        st.save = real_save
+        fake.stop()
+        _fresh_hub().internet_up = real_up
 
 
 def _tt_wait(tt, s=10):

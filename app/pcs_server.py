@@ -1334,6 +1334,8 @@ class Backend:
                 a.s.share_asked = True                       # answered in Settings: the setup step stops asking
             if "transcript_consent" in body and a.s.transcript_consent != share_before[1]:
                 a.s.transcript_asked = True
+                if share_before[1] and not a.s.transcript_consent:
+                    a.s.transcripts_withdraw = True          # the hub deletes his transcripts once told (decision 21)
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st
@@ -1375,6 +1377,8 @@ class Backend:
             if on:
                 a.s.comms_consent = a.s.mic_audio = a.s.send_mic = True
         elif choice == "transcripts":
+            if a.s.transcript_consent and not on:
+                a.s.transcripts_withdraw = True
             a.s.transcript_asked, a.s.transcript_consent = True, on
         else:
             raise ValueError("unknown choice")
@@ -1385,7 +1389,8 @@ class Backend:
         """The player's mic sharing answer to the hub, in the background (never during a game: the next tick)."""
         if not (self.auto and self.auto.s.hub_url) or self._backup_busy():
             return
-        threading.Thread(target=self.teamtracks.sync_sharing, daemon=True, name="share-sync").start()
+        tt = self.teamtracks
+        threading.Thread(target=lambda: (tt.sync_sharing(), tt.sync_transcripts()), daemon=True, name="share-sync").start()
 
     @property
     def teamtracks(self):

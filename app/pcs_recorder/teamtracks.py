@@ -19,6 +19,10 @@ the same games, so the review player can play them next to the player's own soun
   teammate's clip (Discord). "Allow my voice in teammates' clips" (`share_clips`, off by default) goes to the hub
   with the sharing answer (`share_clips`); the hub lists it per track (`share_clips` in `GET /api/team-tracks`), and a
   clip takes a teammate's mic only when that is true (missing = an older hub = left out).
+- Transcripts withdrawn (decision 21, 20 Nov 2026): a player who switches comms transcripts from yes to no has the
+  hub told (`PUT /api/me/transcripts {"transcripts": false}`, his own key), and the hub deletes his transcripts. Only
+  when `GET /api/me` lists the feature "transcripts" (an older hub gets nothing; asked again every OLD_HUB_RETRY_S);
+  kept as `transcripts_withdraw` in the settings and tried again at the next tick until the hub took it.
 - State in `team-tracks.json` (no key, no personal data beyond teammates' names as the hub gives them).
 """
 from __future__ import annotations
@@ -46,6 +50,7 @@ CHUNK = 1 << 18
 BUSY_EVERY_S = 3
 SPARE = 2 << 30                      # leave at least 2 GB free on the drive
 TRACK_RE = re.compile(r"[A-Za-z0-9_-]{1,40}-\d{1,10}\.mic\.m4a")
+OLD_HUB_RETRY_S = 6 * 3600           # a hub without the "transcripts" feature: asked again this much later
 
 
 def base_dir() -> Path:
@@ -102,6 +107,7 @@ class TeamTracks:
         self.running = False
         self.next_try = 0.0
         self.synced: tuple | None = None                 # (hub address, key fingerprint, answer) the hub took
+        self.withdraw_next = 0.0                         # older hub: when to look at its features again
         self.st = self._load()
 
     # ---------------------------------------------------------------- state
@@ -149,6 +155,40 @@ class TeamTracks:
         self.synced = who
         return ans
 
+    def sync_transcripts(self) -> bool | None:
+        """A transcripts "no" after a "yes" (`transcripts_withdraw`): tell the hub, which deletes the player's
+        transcripts. True = the hub took it (the flag is cleared), None = not now (no hub / key, older hub, no answer:
+        tried again later). Said yes again meanwhile = nothing to send."""
+        from . import settings as st
+        s = self.settings()
+        if not getattr(s, "transcripts_withdraw", False):
+            return None
+        if s.transcript_consent:
+            s.transcripts_withdraw = False
+            st.save(s)
+            return None
+        if not s.hub_url or not hub.get_key() or self.now() < self.withdraw_next:
+            return None
+        try:
+            r = hub.request(s.hub_url, "GET", "/api/me", timeout=8)
+            if r.status_code >= 400:
+                return None
+            if "transcripts" not in ((r.json() or {}).get("features") or []):
+                self.withdraw_next = self.now() + OLD_HUB_RETRY_S
+                log.info("the hub doesn't take transcripts answers yet (older hub)")
+                return None
+            r = hub.request(s.hub_url, "PUT", "/api/me/transcripts", json={"transcripts": False}, timeout=8)
+        except (hub.HubError, ValueError, AttributeError) as e:
+            log.info("transcripts answer not sent: %s", e)
+            return None
+        if r.status_code >= 400:
+            log.info("transcripts answer refused: %s", r.status_code)
+            return None
+        s.transcripts_withdraw = False
+        st.save(s)
+        log.info("the hub was told: no transcripts (it deletes them)")
+        return True
+
     # ---------------------------------------------------------------- when
     def tick(self) -> bool:
         """Called every minute by the app. -> a download round started."""
@@ -157,6 +197,7 @@ class TeamTracks:
             if not s.hub_url or not hub.get_key() or self.busy():
                 return False                             # never during a game: not even a request
             self.sync_sharing()
+            self.sync_transcripts()
             self.cleanup()
             if not active(s) or self.running or self.now() < self.next_try or not self.todo():
                 return False
