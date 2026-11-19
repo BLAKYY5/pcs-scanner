@@ -1582,7 +1582,9 @@ class Backend:
             send = (lambda files: a.rec.hub.upload_hub(files)) if a else None
             self._comms = comms.Comms(lambda: self.auto.s, lambda: self.auto.rec.idx if self.auto else {},
                                       self._backup_busy, send, version=str(core.BUILD.get("version") or ""),
-                                      hub_ok=lambda: hub.has_feature(self.auto.s.hub_url, "comms"))
+                                      hub_ok=lambda: hub.has_feature(self.auto.s.hub_url, "comms"),
+                                      server_ok=lambda: hub.has_feature(self.auto.s.hub_url, "comms-server"),
+                                      hub_call=lambda m, path, **kw: hub.request(self.auto.s.hub_url, m, path, **kw))
         return self._comms
 
     def comms_tick(self) -> None:

@@ -194,8 +194,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   model (1.6 GB, 5 files) comes from a pinned Hugging Face commit with each file's SHA-256 (`MODEL_FILES`), https only,
   into `transcripts/` in the data folder, after the yes only. Developers: `PCS_TRANSCRIBE_PY` (a Python with
   faster-whisper; runs the worker from source) and `PCS_WHISPER_MODEL` (a model folder). Review player: a "Your comms
-  (text)" lane under the timeline and a Comms tab with a word filter (click = seek). Hook for the hub's scan worker:
-  `Comms.where()` and the worker's `--stream 0` on a `.mic.m4a`. Measured 19 Nov 2026 (5700X3D): see the PR.
+  (text)" lane under the timeline and a Comms tab with a word filter (click = seek). Measured 19 Nov 2026 (5700X3D): see the PR.
+  **On the team server** (coach's decision 20 Nov 2026, hub `hub/transcribe.py`): when `/api/me` lists `comms-server`
+  and the mic goes to the hub (comms consent + "Send my mic track"), `Comms.where()` = "server": nothing runs here, the
+  app tells the hub the yes once per hub and key (`PUT /api/me/transcripts {"transcripts": true}`; the hub transcribes
+  only players whose yes it holds) and every 10 min downloads the hub's transcripts of its own uploaded recordings of
+  the last 7 days into `<rec>.scan/<rec>.comms.json` (state "server"; the review lane shows them). Said no: those
+  downloaded copies are deleted here. Settings: "Made on the team server: nothing runs on this PC." The hub runs
+  `pcs_transcribe.py --device cuda` (float16; adds pip's `nvidia/*/bin` CUDA DLL folders; `device`, `computeType` in
+  the output). RTX 3060 Laptop: 60.7 min of audio (31 min speech) in 62.5 s, ~58x real time, 2.6 GB VRAM peak.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
   (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
   all day, 0.2 % for the whole app after). Hotkey thread: 20 looks a

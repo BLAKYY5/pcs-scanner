@@ -5786,6 +5786,82 @@ def test_comms_transcribes_and_sends_to_hub():
     assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
 
 
+def test_comms_made_on_the_team_server():
+    """A hub that lists "comms-server" makes the transcripts on its GPU (coach, 20 Nov 2026): nothing runs on this
+    PC, the hub is told the yes once, and the hub's transcript of this PC's recording is downloaded for the review
+    player. Said no: the downloaded copy is deleted here. No mic sent to the hub = this PC, as before."""
+    import json
+    comms, job, s, idx, rec, sent = _comms_setup("comms-server")
+    s.send_mic = True
+    calls, feats = [], {"server": True}
+    body = json.dumps({"v": 1, "kind": "comms", "speaker": "tester",
+                       "segments": [{"start": 2.0, "end": 3.0, "text": "on push", "speaker": "tester"}]}).encode()
+
+    class R:
+        def __init__(self, code=200, data=None, content=b""):
+            self.status_code, self._d, self.content = code, data, content
+        def json(self): return self._d
+
+    def call(m, path, **kw):
+        calls.append((m, path, kw.get("json")))
+        if path == "/api/me":
+            return R(data={"name": "Tester"})
+        if path == "/api/scans":
+            return R(data=[{"id": 7, "kind": "comms", "recording": rec.stem, "uploader": "Tester"},
+                           {"id": 8, "kind": "comms", "recording": rec.stem, "uploader": "Zed"},
+                           {"id": 9, "kind": "scan", "recording": rec.stem, "uploader": "Tester"}])
+        if path == "/api/scans/7/file":
+            return R(content=body)
+        return R()
+    job.server_ok, job.hub_call = (lambda: feats["server"]), call
+    from pcs_recorder import hub
+    old_key = hub.get_key
+    hub.get_key = lambda: "pcs_testkey"
+    try:
+        assert job.where() == "server" and job.public()["where"] == "server"
+        _fake_worker(comms)
+        job._run_server()                                         # what tick() starts in a thread
+        assert ("PUT", "/api/me/transcripts", {"transcripts": True}) in calls
+        assert [c for c in calls if c[1].endswith("/file")] == [("GET", "/api/scans/7/file", None)]
+        assert comms.transcript_of(rec)["segments"][0]["text"] == "on push"
+        assert job.st["recs"][rec.stem]["status"] == "server" and sent == []     # nothing made or sent from here
+        assert job.todo() == []
+        n = len(calls)
+        job._run_server()                                         # yes told once; nothing left to fetch
+        assert not [c for c in calls[n:] if c[0] == "PUT"]
+        s.transcript_consent = False                              # said no: the copy from the hub goes
+        assert job.tick() is False and not comms.comms_path(rec).exists() and rec.stem not in job.st["recs"]
+        s.transcript_consent = True
+        s.send_mic = False                                        # the mic doesn't go to the hub: this PC
+        assert job.where() == "local"
+        s.send_mic, feats["server"] = True, False                 # hub without the worker: this PC
+        assert job.where() == "local"
+        comms2, job2, *_ = _comms_setup("comms-server-none")      # the app without server hooks: this PC
+        assert job2.where() == "local"
+    finally:
+        hub.get_key = old_key
+
+
+def test_transcribe_worker_finds_pip_cuda_libraries():
+    """--device cuda (team server): CTranslate2 needs cuBLAS / cuDNN; pip puts them in site-packages/nvidia/<lib>/bin,
+    which the worker adds to the DLL search (no system change)."""
+    import site
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+    import pcs_transcribe as T
+    sp = TMP / "fake-site"
+    for lib in ("cublas", "cudnn"):
+        (sp / "nvidia" / lib / "bin").mkdir(parents=True, exist_ok=True)
+    old = site.getsitepackages, site.getusersitepackages, os.environ.get("PATH", "")
+    try:
+        site.getsitepackages, site.getusersitepackages = (lambda: [str(sp)]), (lambda: str(TMP / "none"))
+        found = T.cuda_dlls()
+        assert sorted(Path(f).parent.name for f in found) == ["cublas", "cudnn"], found
+        assert os.environ["PATH"].split(os.pathsep)[0] in found
+    finally:
+        site.getsitepackages, site.getusersitepackages = old[0], old[1]
+        os.environ["PATH"] = old[2]
+
+
 def test_comms_not_sent_to_a_hub_without_comms():
     """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
     can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
