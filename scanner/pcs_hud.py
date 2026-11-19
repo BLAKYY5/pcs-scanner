@@ -119,12 +119,24 @@ class Labels:
         return out
 
 # ---------- debug overlay (cl_showpos style: NAME / POS / ANG / VEL) ----------
+_DBG_KEYS = list(DBG_T)
+_DBG_STACK = np.stack([DBG_T[k] for k in _DBG_KEYS]) if DBG_T and len({v.shape for v in DBG_T.values()}) == 1 else None
+
 def _dbg_line(m, y):
     s = ''
+    cells = None
+    if _DBG_STACK is not None and _DBG_STACK.shape[1:] == (9, 7) and m.shape[0] >= y + 9 and m.shape[1] >= 3 + 8 * 35 + 7:
+        # every cell against every glyph in one go (was one Python loop per glyph: the debug overlay's biggest cost)
+        cells = np.stack([m[y:y + 9, 3 + 8 * c:3 + 8 * c + 7] for c in range(6, 36)]).astype(np.int16)
+        dist = (_DBG_STACK[None] != cells[:, None]).sum((2, 3))
     for c in range(6, 36):
         x = 3 + 8 * c; cell = m[y:y + 9, x:x + 7].astype(np.int16); n = int(cell.sum())
         if n == 0: s += ' '; continue
-        best = min((int((t != cell).sum()), k) for k, t in DBG_T.items())
+        if cells is not None:
+            d = dist[c - 6]; lo = int(d.min())
+            best = (lo, min(k for k, v in zip(_DBG_KEYS, d) if v == lo))      # same tie-break as min((dist, key))
+        else:
+            best = min((int((t != cell).sum()), k) for k, t in DBG_T.items())
         if best[0] <= 9: s += best[1]; continue
         if 1 <= cell[7:9, 1:5].sum() <= 4 and cell[:6].sum() <= 2: s += '.'; continue
         s += '-' if cell[3:6, 1:6].sum(1).max() >= 4 and cell[7:9].sum() <= 2 else '?'
@@ -370,7 +382,10 @@ class Weapons:
         I1 = self._integral(c[:H, :Wd]); I2 = self._integral(c[:H, :Wd] ** 2)     # once per line, not per icon
         for n, (th, tw), tn, F in self.T:
             if th > H or tw > Wd: continue
-            num = np.fft.irfft2(G * F, s=(self.FH, self.FW))[:H - th + 1, :Wd - tw + 1]
+            # = np.fft.irfft2(G * F, s=(FH, FW))[:H - th + 1, :Wd - tw + 1], with numpy's own two steps (irfftn: ifft
+            # down the columns, then irfft along the rows) and the second step only on the rows kept: same numbers,
+            # about a third less work (the weapon match was the scan's biggest reader cost).
+            num = np.fft.irfft(np.fft.ifft(G * F, self.FH, 0)[:H - th + 1], self.FW, 1)[:, :Wd - tw + 1]
             k = th * tw; S = self._box(None, th, tw, I1); S2 = self._box(None, th, tw, I2)
             sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * self.STD ** 2)) * tn)
             i = int(sc.argmax()); y, x = divmod(i, sc.shape[1])

@@ -287,7 +287,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   (`1.10.9+dev.52` for a test build, `+source` from source); `scanner` stays the plain version.
 - **Scanner speed**: readers take the uint8 frame and make int16 only the small areas they compute on; per-pixel
   min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
-  which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
+  which are about 8x slower. The weapon match (the biggest reader, ~30 ms per new feed line) does numpy's irfft2 in its
+  own two steps and the second only on the rows it keeps (bit-identical, -30 %); debug overlay cells are compared with
+  all glyphs at once (19 Nov 2026: analysis 41.5 -> 33.9 ms per keyframe). A speed change must give identical results: compare every reader old vs new on the
   region caches (0 differences) and the check set table.
 - **Scan plumbing** (18 Nov 2026, to keep the scan unnoticeable): `keyframes()` reads ffmpeg's pipe unbuffered
   (`bufsize=0`, `readinto` one new buffer per frame). The old `bufsize=10**8` + `.read(n)` cost 134 ms and 0.18 CPU-s
