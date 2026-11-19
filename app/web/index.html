@@ -12,38 +12,39 @@
 </head>
 <body>
 <header class="top">
-  <a class="brand" href="#home" aria-label="PCS Scanner home">
+  <a class="brand" href="#home" aria-label="PCS Scanner home" data-i18n-aria="PCS Scanner home">
     <svg viewBox="0 0 40 40" aria-hidden="true"><rect x="1" y="1" width="38" height="38" rx="8" fill="#ba1c14"/><circle cx="20" cy="20" r="9" fill="none" stroke="#fff" stroke-width="3"/><circle cx="20" cy="20" r="3.5" fill="#fff"/></svg>
     <span><small>PCS Esports</small><b>Scan<em>ner</em></b></span>
   </a>
   <nav id="nav">
-    <a href="#home" data-page="home">Home</a>
-    <a href="#recordings" data-page="recordings">Recordings</a>
+    <a href="#home" data-page="home" data-i18n="Home">Home</a>
+    <a href="#recordings" data-page="recordings" data-i18n="Recordings">Recordings</a>
     <a href="#youtube" data-page="youtube" hidden>YouTube</a>
-    <a href="#team" data-page="team" hidden>Team</a>
-    <a href="#settings" data-page="settings">Settings</a>
+    <a href="#team" data-page="team" hidden data-i18n="Team">Team</a>
+    <a href="#settings" data-page="settings" data-i18n="Settings">Settings</a>
   </nav>
-  <span id="coachBadge" class="pill info" hidden title="Coach tools are on">Coach</span>
-  <button id="updateBtn" class="btn small brand" hidden>Update</button>
-  <div id="pill" class="live"><i></i><span>Starting…</span></div>
+  <span id="coachBadge" class="pill info" hidden title="Coach tools are on" data-i18n-title="Coach tools are on">Coach</span>
+  <button id="updateBtn" class="btn small brand" hidden data-i18n="Update">Update</button>
+  <div id="pill" class="live"><i></i><span data-i18n="Starting…">Starting…</span></div>
 </header>
 <main id="main" class="wrap"></main>
 <div id="toast" class="toast" hidden></div>
 <div id="updating" class="updating" role="dialog" aria-modal="true" aria-labelledby="upd-title" hidden>
   <div class="upd-box">
-    <h2 id="upd-title">Updating PCS Scanner</h2>
+    <h2 id="upd-title" data-i18n="Updating PCS Scanner">Updating PCS Scanner</h2>
     <p class="upd-tag" id="upd-tag"></p>
     <ol class="upd-steps">
-      <li data-step="download"><b>Downloading the update</b><span id="upd-dl"></span><i class="upd-bar"><i id="upd-bar"></i></i></li>
-      <li data-step="check"><b>Checking the file</b></li>
-      <li data-step="restart"><b>Restarting PCS Scanner</b><span>The app closes and opens again by itself in a few seconds.</span></li>
+      <li data-step="download"><b data-i18n="Downloading the update">Downloading the update</b><span id="upd-dl"></span><i class="upd-bar"><i id="upd-bar"></i></i></li>
+      <li data-step="check"><b data-i18n="Checking the file">Checking the file</b></li>
+      <li data-step="restart"><b data-i18n="Restarting PCS Scanner">Restarting PCS Scanner</b><span data-i18n="The app closes and opens again by itself in a few seconds.">The app closes and opens again by itself in a few seconds.</span></li>
     </ol>
     <div class="upd-fail" id="upd-fail" hidden>
-      <p><b>Update failed.</b> <span id="upd-why"></span></p>
-      <button class="btn brand" id="upd-back">Back</button>
+      <p><b data-i18n="Update failed.">Update failed.</b> <span id="upd-why"></span></p>
+      <button class="btn brand" id="upd-back" data-i18n="Back">Back</button>
     </div>
   </div>
 </div>
+<script src="i18n.js"></script>
 <script src="app.js"></script>
 <script src="session.js"></script>
 <script src="review-extras.js"></script>
