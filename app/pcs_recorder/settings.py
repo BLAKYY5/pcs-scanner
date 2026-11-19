@@ -6,7 +6,7 @@ import json
 import os
 import re
 import secrets
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 APP_DIR = Path(os.environ.get("PCS_DATA_DIR")
@@ -19,6 +19,19 @@ MIN_MBPS, MAX_MBPS = 8, 60   # 8 = the floor that keeps HUD text readable (Twitc
 # the same as 12 (8 loses squads-left reads and a landing); HEVC and H.264 need 12 (H.264 at 8 gave wrong results).
 AV1_MBPS, OTHER_MBPS = 10, 12
 OLD_DEFAULT_MBPS = 12        # the single default up to 1.10.11: a saved 12 was never chosen by hand (load())
+
+
+def as_int(v) -> int | None:
+    """A whole number from Settings or recorder.json, or None: an empty box arrives as null (NaN), and a bool, a
+    non-finite number or text that isn't a number is no number either (review 20 Nov 2026, L2)."""
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        if isinstance(v, float):
+            return int(v) if v == v and abs(v) != float("inf") else None
+        return int(str(v).strip())
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def default_mbps(encoder: str) -> int:
@@ -106,7 +119,16 @@ class Settings:
     game_exes: list = field(default_factory=list)      # the player's own games, by program name ("game.exe")
     game_ignore: list = field(default_factory=list)    # programs found as games that are not ("Remove")
 
+    def repair_numbers(self) -> None:
+        """Every whole-number setting that isn't one (null saved by an empty box in older versions, text, true / false)
+        goes back to its default, so clamp() and every later save work (review 20 Nov 2026, L2)."""
+        for f in fields(self):
+            if f.type in ("int", int):
+                v = as_int(getattr(self, f.name))
+                setattr(self, f.name, f.default if v is None else v)
+
     def clamp(self) -> "Settings":
+        self.repair_numbers()
         self.keep_days = max(1, min(MAX_KEEP_DAYS, int(self.keep_days)))
         self.max_gb = max(MIN_MAX_GB, int(self.max_gb))
         if self.bitrate_auto:
@@ -233,6 +255,7 @@ def saved_highlight_rules() -> str:
         for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
             if k in saved:
                 setattr(s, k, saved[k])
+        s.repair_numbers()
         s.clamp_highlights()
     except (OSError, ValueError, TypeError, AttributeError):
         s = Settings()

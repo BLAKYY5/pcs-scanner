@@ -1799,12 +1799,12 @@ function settingsBody() {
   for (const k of ['team_link']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }   // hidden when icons come from the hub
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); const n = el ? parseInt(el.value, 10) : NaN; if (Number.isFinite(n)) body[k] = n; }   // empty box: not sent, the setting stays
     for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'share_clips', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
     if (gamesEdit) { body.game_exes = gamesEdit.exes.slice(); body.game_ignore = gamesEdit.ignore.slice(); }
-    const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }
+    const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); const n = parseInt($('#f-hub_backup_keep').value, 10); if (Number.isFinite(n)) body.hub_backup_keep = n; }
   }
   return body;
 }
