@@ -1,5 +1,5 @@
 """Runs the auto-recorder inside PCS Scanner: tray icon, scan prompt, settings window,
-first-time setup, start with Windows, and uploads (team hub and/or Google Drive)."""
+first-time setup, start with Windows, and uploads (team hub)."""
 from __future__ import annotations
 
 import ctypes
@@ -19,7 +19,7 @@ from . import crash
 from . import hub as hubmod
 from . import obs as obsmod
 from . import settings as st
-from .core import NeedsSignIn, Recorder
+from .core import NoHub, Recorder
 
 log = logging.getLogger("recorder")
 PANEL, INK, MUTED, RED = "#1b1a18", "#f1efea", "#a39f96", "#ba1c14"
@@ -212,11 +212,11 @@ class Hotkeys:
 
 
 class Sent(list):
-    """Where the results went (["the team hub", "Google Drive"]), plus the hub's answer in one line.
-    hub_ok / drive_ok: True (took the files), False (tried, failed), None (not tried: no hub / no Drive);
+    """Where the results went (["the team hub"]), plus the hub's answer in one line.
+    hub_ok: True (took the files), False (tried, failed), None (not tried: no hub);
     hub_why: why the hub didn't take them, in a few words ("Hub not reachable", "Key refused")."""
     hub_note = ""
-    hub_ok = drive_ok = None
+    hub_ok = None
     hub_why = ""
 
 
@@ -232,13 +232,13 @@ class NotTaken(ConnectionError):
 
 
 class Sender:
-    """Results go to the team hub when one is set; Google Drive only when no hub is set and the player is signed in
-    (leaving-Drive plan, coach's decision 18 Nov 2026: the hub is the destination, Drive is not used once on the hub).
-    If the destination didn't take the files, the recorder retries later.
+    """Results go to the team hub. Without a hub address they stay on this PC until the player joins one (Google
+    Drive results were removed: leaving-Drive plan, coach's decision 18 Nov 2026). If the hub didn't take the files,
+    the recorder retries later.
     Hub requests carry the player's key (pcs_recorder.hub); a refused key stops hub uploads until it changes."""
 
-    def __init__(self, s: st.Settings, drive_upload, stop=None):
-        self.s, self.drive_upload = s, drive_upload
+    def __init__(self, s: st.Settings, stop=None):
+        self.s = s
         self.stop = stop                    # () -> True while Apex runs: uploads in parts pause between parts
 
     def report(self, data: dict) -> None:
@@ -254,37 +254,26 @@ class Sender:
             return Sent()
         sent, errors, where = False, [], Sent()
         hub_error = None
-        if self.s.hub_url:
-            where.hub_ok = False
-            try:
-                answer = hubmod.upload(self.s.hub_url, files, self.s.player, stop=self.stop)
-                sent = True
-                where.append("the team hub")
-                where.hub_note, where.hub_ok = hubmod.summary(answer), True
-            except hubmod.HubError as e:
-                hub_error = e
-                errors.append(str(e))
-                where.hub_note = "Not sent to hub: " + ("key refused" if e.kind == "refused" else str(e))
-                where.hub_why = hub_reason(e)
-            except Exception as e:
-                errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
-                where.hub_why = "Hub not reachable"
-        else:
-            try:
-                if self.drive_upload([str(f) for f in files]):
-                    sent = True
-                    where.append("Google Drive")
-                    where.drive_ok = True
-                else:
-                    raise NeedsSignIn("Your Google sign-in has expired or is missing, so the results couldn't go to "
-                                      "Drive")
-            except Exception as e:
-                where.drive_ok = False
-                errors.append(f"Google Drive upload failed ({e})")
+        if not self.s.hub_url:
+            raise NoHub()
+        where.hub_ok = False
+        try:
+            answer = hubmod.upload(self.s.hub_url, files, self.s.player, stop=self.stop)
+            sent = True
+            where.append("the team hub")
+            where.hub_note, where.hub_ok = hubmod.summary(answer), True
+        except hubmod.HubError as e:
+            hub_error = e
+            errors.append(str(e))
+            where.hub_note = "Not sent to hub: " + ("key refused" if e.kind == "refused" else str(e))
+            where.hub_why = hub_reason(e)
+        except Exception as e:
+            errors.append(f"the team hub didn't answer ({e.__class__.__name__})")
+            where.hub_why = "Hub not reachable"
         if not sent:
-            if hub_error is not None:        # the hub is the only destination: its reason (reach, paused) goes up
+            if hub_error is not None:        # its reason (reach, paused) goes up to the recorder
                 raise NotTaken(str(hub_error), hub_error)
-            raise ConnectionError("; ".join(errors) or "No destination set")
+            raise ConnectionError("; ".join(errors))
         return where
 
     def hub_blocked(self) -> str:
@@ -386,7 +375,7 @@ class UI:
             except Exception:
                 pass
 
-    actions: dict = {}          # name -> (button label, callback), e.g. "signin" -> ("Sign in with Google", fn)
+    actions: dict = {}          # name -> (button label, callback), e.g. "ytsignin" -> ("Sign in to YouTube", fn)
 
     # ------------------------------------------------------------------ corner messages
     TOAST_W = 380
@@ -725,14 +714,15 @@ def first_time_setup(s: st.Settings, say) -> None:
 class AutoRecorder:
     """Owns the Recorder and its loop; created once per app process."""
 
-    def __init__(self, root: tk.Tk, drive_upload, say=print, signin=None, youtube_service=None, yt_signin=None):
+    def __init__(self, root: tk.Tk, say=print, youtube_service=None, yt_signin=None):
         self.root, self.say = root, say
         self.s = st.load()
         self.ui = UI(root, say)
-        if signin:
-            self.ui.actions["signin"] = ("Sign in with Google", signin)
-        self.sender = Sender(self.s, drive_upload)
+        self.sender = Sender(self.s)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
+        from .precheck import RecCheck
+        self.check = self.rec.check = RecCheck(self.s, self.rec.obs, self.rec, self.ui,
+                                               setting_up=lambda: bool(getattr(self, "_setting_up", False)))
         self.sender.stop = lambda: self.rec.is_apex_running()     # same rule as every upload: never during a game
         from .talk import Talk
         self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
@@ -748,6 +738,8 @@ class AutoRecorder:
         if yt_signin:
             self.ui.actions["ytsignin"] = ("Sign in to YouTube", yt_signin)
 
+    CHECK_DELAY_S = 20         # after the app starts (or the setup ends): the recording check runs once by itself
+
     def run_loop(self) -> None:
         if self.thread:
             return
@@ -757,6 +749,12 @@ class AutoRecorder:
         except Exception:
             log.exception("audio tracks not resumed")
         self.hotkeys.start()
+
+        def first_check():                           # the recording check on Home, once Auto-record runs
+            time.sleep(self.CHECK_DELAY_S)
+            if self.s.enabled and self.s.encoder and not getattr(self, "_setting_up", False) and self.check.at is None:
+                self.check.start()                   # automatic: never starts OBS
+        threading.Thread(target=first_check, daemon=True, name="rec-check-start").start()
 
         def loop():
             while True:
@@ -824,13 +822,17 @@ class AutoRecorder:
         self._setting_up = True
 
         def go():
+            ok = False
             try:
                 first_time_setup(self.s, self.say)
                 self.run_loop()
+                ok = True
             except Exception as e:
                 self.s.enabled = False
                 st.save(self.s)
                 self.say(f"Auto-record setup failed: {e}")
             finally:
                 self._setting_up = False
+            if ok:
+                self.check.start(manual=True)            # the setup's result on Home (OBS left as it was)
         threading.Thread(target=go, daemon=True).start()

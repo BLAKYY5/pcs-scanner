@@ -47,7 +47,7 @@ class Settings:
     enabled: bool = False                              # auto-record on/off (turned on from the app window)
     start_with_windows: bool = True                    # app starts in the tray when Windows starts
     player: str = ""                                   # same EEC name as in the app
-    hub_url: str = ""                                  # team hub, e.g. http://pcs-hub:8420 (empty = Drive only)
+    hub_url: str = ""                                  # team hub, e.g. http://pcs-hub:8420 (empty = results stay on this PC)
     folder: str = str(Path.home() / "Videos" / "PCS Recordings")
     keep_days: int = 7                                 # delete recordings older than this
     max_gb: int = 100                                  # the recorder's files never take more than this
@@ -62,6 +62,7 @@ class Settings:
     mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
     crash_reports: bool = True                         # send crash reports to the team hub (only when on the hub)
+    server_scan: bool = False                          # scan on the team server (serverscan.py), this PC if it can't
     share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
     share_asked: bool = False                          # the player answered the mic sharing question (setup step)
     transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes

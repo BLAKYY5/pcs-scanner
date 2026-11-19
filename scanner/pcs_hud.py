@@ -119,12 +119,24 @@ class Labels:
         return out
 
 # ---------- debug overlay (cl_showpos style: NAME / POS / ANG / VEL) ----------
+_DBG_KEYS = list(DBG_T)
+_DBG_STACK = np.stack([DBG_T[k] for k in _DBG_KEYS]) if DBG_T and len({v.shape for v in DBG_T.values()}) == 1 else None
+
 def _dbg_line(m, y):
     s = ''
+    cells = None
+    if _DBG_STACK is not None and _DBG_STACK.shape[1:] == (9, 7) and m.shape[0] >= y + 9 and m.shape[1] >= 3 + 8 * 35 + 7:
+        # every cell against every glyph in one go (was one Python loop per glyph: the debug overlay's biggest cost)
+        cells = np.stack([m[y:y + 9, 3 + 8 * c:3 + 8 * c + 7] for c in range(6, 36)]).astype(np.int16)
+        dist = (_DBG_STACK[None] != cells[:, None]).sum((2, 3))
     for c in range(6, 36):
         x = 3 + 8 * c; cell = m[y:y + 9, x:x + 7].astype(np.int16); n = int(cell.sum())
         if n == 0: s += ' '; continue
-        best = min((int((t != cell).sum()), k) for k, t in DBG_T.items())
+        if cells is not None:
+            d = dist[c - 6]; lo = int(d.min())
+            best = (lo, min(k for k, v in zip(_DBG_KEYS, d) if v == lo))      # same tie-break as min((dist, key))
+        else:
+            best = min((int((t != cell).sum()), k) for k, t in DBG_T.items())
         if best[0] <= 9: s += best[1]; continue
         if 1 <= cell[7:9, 1:5].sum() <= 4 and cell[:6].sum() <= 2: s += '.'; continue
         s += '-' if cell[3:6, 1:6].sum(1).max() >= 4 and cell[7:9].sum() <= 2 else '?'
@@ -221,9 +233,51 @@ def landing(samples, t0):
             'exitZ': P[ex][3], 'landWindow': [round(P[prev][0], 2), round(P[land][0], 2)], 'landedAt': round(P[land][0], 2),
             'x': P[land][1], 'y': P[land][2], 'z': P[land][3]}
 
+# Scan on the team server (a keyframes-only copy of the recording, see clip_for): the 60 fps reads below need the
+# frames between keyframes, so they come from short clips the player's app cuts (stream copy) and sends afterwards.
+CLIPS = None   # folder of those clips (None = an ordinary scan of the whole recording)
+NEEDS = []     # windows [a, b] a 60 fps read wanted while no clip covered it (sent back to the app)
+_clip_list = None
+
+def _start_time(f):
+    o = subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=start_time,duration', '-of', 'csv=p=0', f],
+                                creationflags=0x08000000 if os.name == 'nt' else 0)
+    return tuple(float(x) for x in o.decode().strip().split(',')[:2])
+
+def _clips(path):
+    """[(clip, start, end)] in the recording's own time (0 = its first frame), cut with -copyts from the recording."""
+    global _clip_list
+    if _clip_list is None:
+        _clip_list = []
+        try: base = _start_time(path)[0]          # the keyframes-only copy keeps the recording's times (-copyts)
+        except Exception: base = 0.0
+        for n in sorted(os.listdir(CLIPS)) if CLIPS and os.path.isdir(CLIPS) else []:
+            if not n.lower().endswith(('.mp4', '.mkv', '.mov')): continue
+            f = os.path.join(CLIPS, n)
+            try:
+                st, du = _start_time(f)
+                _clip_list.append((f, st - base, st - base + du))
+            except Exception:
+                continue
+    return _clip_list
+
+def clip_for(path, a, b):
+    """The clip (path, start in recording time) holding every frame from a to b, or None: the window goes to NEEDS.
+    A clip is cut with -copyts, so its times are the recording's; '-ss x' on it seeks to start + x, and the decoder
+    starts from the same keyframe as on the whole recording: the frames are the same."""
+    for f, st, en in _clips(path):
+        if st <= max(0, a) and en >= b: return f, st
+    if [round(a, 3), round(b, 3)] not in NEEDS: NEEDS.append([round(a, 3), round(b, 3)])
+    return None
+
 def _corner(path, a, b, W=2560, H=1440, cw=420, ch=570):
     """Every frame (60 fps) between a and b, top-left corner only (debug overlay + ring clock live there)."""
-    cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{max(0, a):.3f}', '-i', path, '-t', f'{b - a:.3f}',
+    src, ss = path, max(0, a)
+    if CLIPS is not None:
+        c = clip_for(path, a, b)
+        if c is None: return
+        src, ss = c[0], max(0, a) - c[1]
+    cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{ss:.3f}', '-i', src, '-t', f'{b - a:.3f}',
            '-vf', (f'scale={W}:{H},crop={cw}:{round(ch * 0.75)}:0:0,scale={cw}:{ch}:flags=neighbor' if STRETCH else f'scale={W}:{H},crop={cw}:{ch}:0:0'),
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     raw = subprocess.run(cmd, capture_output=True, timeout=180).stdout
@@ -370,7 +424,10 @@ class Weapons:
         I1 = self._integral(c[:H, :Wd]); I2 = self._integral(c[:H, :Wd] ** 2)     # once per line, not per icon
         for n, (th, tw), tn, F in self.T:
             if th > H or tw > Wd: continue
-            num = np.fft.irfft2(G * F, s=(self.FH, self.FW))[:H - th + 1, :Wd - tw + 1]
+            # = np.fft.irfft2(G * F, s=(FH, FW))[:H - th + 1, :Wd - tw + 1], with numpy's own two steps (irfftn: ifft
+            # down the columns, then irfft along the rows) and the second step only on the rows kept: same numbers,
+            # about a third less work (the weapon match was the scan's biggest reader cost).
+            num = np.fft.irfft(np.fft.ifft(G * F, self.FH, 0)[:H - th + 1], self.FW, 1)[:, :Wd - tw + 1]
             k = th * tw; S = self._box(None, th, tw, I1); S2 = self._box(None, th, tw, I2)
             sc = num / (np.sqrt(np.maximum(S2 - S * S / k, k * self.STD ** 2)) * tn)
             i = int(sc.argmax()); y, x = divmod(i, sc.shape[1])
@@ -596,6 +653,7 @@ class Legends:
     ROW = 31                      # row of the window where the portrait sits (the lobby's party list draws them elsewhere)
     LIT = (20, 80)                # frame coloured: pixels of its left edge window (of 140) within RGB distance 60 of the badge colour
     BADGE = 680                   # a badge (with its digit) colours at most 620 of its window's 768 pixels; more = a coloured background
+    MINE = 100                    # own name: at least this many pixels of the name window in the badge's colour
     def __init__(self, path=None):
         self.T = []
         try:
@@ -670,7 +728,7 @@ class Legends:
             nm = a[y0 + 4:y0 + 40, 318 + dx:560 + dx].reshape(-1, 3)
             # letters in the slot's own colour: own name 211 to 600 such pixels, white names 0 (the background behind
             # the names is often orange too, which is why this compares with the badge's colour, not a median hue)
-            mine = self._near(nm, self._badge(a, y0, dx)) >= 100
+            mine = self._near(nm, self._badge(a, y0, dx)) >= self.MINE
             whites.append(int((nm.min(1) > 190).sum()) if mine else 999)            # white name = someone else
             legend, score = self.name(a, slot, dx)
             squad.append({'slot': slot, 'hue': hue, 'locked': lit, 'self': False, 'legend': legend, 'score': score})
@@ -728,6 +786,8 @@ class Banner:
     recordings, in English; a word not in the table is returned as its shape so it can be named later)."""
     ROWS = {'mode': (138, 198), 'map': (273, 298)}
     X0 = 180
+    WHITE = 215     # letters: every channel above this
+    NEAR = 60       # cells (of 600) a word may differ from its shape
     @staticmethod
     def shape(m):
         """White letters (rows x cols of True/False) -> (150 hex digits, width / height) or None."""
@@ -736,22 +796,22 @@ class Banner:
         m = m[ys[0]:ys[-1] + 1, xs[0]:xs[-1] + 1].astype(np.uint8) * 255
         g = np.asarray(Image.fromarray(m).resize((60, 10), Image.BOX)) > 110
         return ''.join('%x' % int(''.join('1' if v else '0' for v in g.flat[i:i + 4]), 2) for i in range(0, 600, 4)), round(m.shape[1] / m.shape[0], 2)
-    @staticmethod
-    def near(sig, ratio, table):
+    @classmethod
+    def near(cls, sig, ratio, table):
         best = None
         for word, L in table.items():
             for s2, r2 in L:
                 if abs(r2 - ratio) > 0.08 * r2: continue
                 d = bin(int(sig, 16) ^ int(s2, 16)).count('1')
                 if best is None or d < best[1]: best = (word, d)
-        return best[0] if best and best[1] <= 60 else None       # 600 cells: a tenth may differ
+        return best[0] if best and best[1] <= cls.NEAR else None       # 600 cells: a tenth may differ
     @classmethod
     def read(cls, a):
         """a: full 16:9 frame. -> None or {'mode', 'modeSig', 'map', 'mapSig'} (a name is None when the word is unknown)."""
         if (a[150:190:4, 20:60:4].max(2) > 215).mean() > 0.2: return None       # the plate left of the icon is never white
         out = {}
         for key, (y0, y1) in cls.ROWS.items():
-            m = a[y0:y1, cls.X0:1100].min(2) > 215; col = m.sum(0) > 0; xs = np.where(col)[0]
+            m = a[y0:y1, cls.X0:1100].min(2) > cls.WHITE; col = m.sum(0) > 0; xs = np.where(col)[0]
             if not len(xs) or not (6 <= xs[0] <= 22): return None                # both words start at the same column
             end = xs[0]; gap = 0
             for x in range(xs[0], len(col)):                                     # the word ends at the first wide gap
@@ -838,13 +898,17 @@ class SquadsLeft:
     The words must be there (their box is 17 to 33 % white, starting and ending where they always do), then each
     digit is compared with the shapes in pcs_banner.json ('digits': 12 x 16 cells each, from our own recordings)."""
     T = [(d, int(h, 16)) for d, L in BANNER_T.get('digits', {}).items() for h in L]
+    WHITE = 232                 # letters and digits: every channel above this
+    FILL = (0.17, 0.33)         # share of white in the words' box
+    DH, DW = (19, 22), (4, 18)  # digit height, width (px)
+    BITS = 26                   # cells (of 192) a digit may differ from its shape
     @classmethod
     def read(cls, a):
         """a: full 16:9 frame. -> the number (1..60) or None."""
         if not cls.T: return None
-        w = a[77:99, 2138:2294].min(2) > 232; c = w.sum(0) > 0
-        if not (0.17 < w.mean() < 0.33) or c[:2].any() or not c[2:4].any() or not c[-4:].any(): return None
-        m = a[77:99, 2040:2134].min(2) > 232; col = m.sum(0) > 0; x = len(col) - 1; out = ''
+        w = a[77:99, 2138:2294].min(2) > cls.WHITE; c = w.sum(0) > 0
+        if not (cls.FILL[0] < w.mean() < cls.FILL[1]) or c[:2].any() or not c[2:4].any() or not c[-4:].any(): return None
+        m = a[77:99, 2040:2134].min(2) > cls.WHITE; col = m.sum(0) > 0; x = len(col) - 1; out = ''; boxes = []
         while x >= 0 and len(out) < 2:              # from the right: at most two digits, then nothing for 12 columns
             if not col[x]:
                 if out and not col[max(0, x - 12):x + 1].any(): break
@@ -852,15 +916,19 @@ class SquadsLeft:
             e = x
             while x >= 0 and col[x]: x -= 1
             g = m[:, x + 1:e + 1]; ys = np.where(g.sum(1) > 0)[0]; g = g[ys[0]:ys[-1] + 1]
-            if not (19 <= g.shape[0] <= 22 and 4 <= g.shape[1] <= 18): return None
+            if not (cls.DH[0] <= g.shape[0] <= cls.DH[1] and cls.DW[0] <= g.shape[1] <= cls.DW[1]): return None
             n = np.asarray(Image.fromarray(g.astype(np.uint8) * 255).resize((12, 16), Image.BOX)) > 110
             v = int(''.join('1' if b else '0' for b in n.flat), 2)
             d, dist = min(((d, bin(v ^ t).count('1')) for d, t in cls.T), key=lambda r: r[1])
-            if dist > 26: return None
-            out = d + out
+            if dist > cls.BITS: return None
+            out = d + out; boxes.insert(0, (2040 + x + 1, 2040 + e + 1, 77 + int(ys[0]), 78 + int(ys[-1])))
         if not out or col[max(0, x - 12):x + 1].any(): return None       # something else left of the number: not a clean read
+        if not cls.confirm(a, boxes, out): return None
         n = int(out)
         return n if 1 <= n <= 60 else None
+    @classmethod
+    def confirm(cls, a, boxes, out):
+        return True
 
 def _strip_table(table):
     """pcs_banner.json 'strip': {font: [[label, 216 hex digits (12 x 18 grey cells, 0..f), width in px], ...]}."""
@@ -903,6 +971,11 @@ class OwnStats:
     REF = [1, 2, 3, 28, 29, 30]              # rows 129..131 and 156..158 (of the band): plate, no digits
     T = _strip_table(BANNER_T)               # font -> (labels, shapes n x 216, widths)
     ACCEPT, MARGIN = 0.16, 0.03             # mean grey difference to the nearest shape; lead over another digit
+    INK, INK_K, PLATE = 35, 0.5, 185        # white shapes: above the plate by max(INK, INK_K x the room left); plates up to PLATE
+    BRIGHT = 190                            # dark shapes: on plates brighter than this
+    CONTRAST = 40                           # a digit's strokes at least this far from its plate
+    KINDS = {'K': ((14, 18), (3, 14), (133, 138)), 'S': ((15, 19), (3, 15), (133, 138)), 'B': ((20, 24), (3, 18), (130, 135))}
+    SPLIT = ((14, 24), 16, 19, 34)           # two touching digits: height range, min width (small / big), max width
     @staticmethod
     def _medfilt(v, k=15, step=3):
         """Running median over k columns, taken every 'step' columns (the plate changes slowly)."""
@@ -926,14 +999,14 @@ class OwnStats:
         b = a[cls.Y0:cls.Y1, cls.X0:cls.X1]
         mn = np.minimum(np.minimum(b[..., 0], b[..., 1]), b[..., 2]).astype(np.int16)     # (much faster than .min(2))
         bg = cls._medfilt(np.median(mn[cls.REF], axis=0))
-        return cls._split(((mn > bg + np.maximum(35, (255 - bg) * 0.5)) & (bg <= 185))[3:30], False)
+        return cls._split(((mn > bg + np.maximum(cls.INK, (255 - bg) * cls.INK_K)) & (bg <= cls.PLATE))[3:30], False)
     @classmethod
     def dark(cls, a):
         """Dark shapes on a bright plate (the knocks plate, white or tinted) -> blobs sorted by x."""
         b = a[cls.Y0:cls.Y1, cls.X0:cls.X1]
         mx = np.maximum(np.maximum(b[..., 0], b[..., 1]), b[..., 2]).astype(np.int16)
         hi = cls._medfilt(np.median(mx[cls.REF], axis=0))
-        return cls._split(((mx < (hi + 30) / 2) & (hi > 190))[3:30], True)
+        return cls._split(((mx < (hi + 30) / 2) & (hi > cls.BRIGHT))[3:30], True)
     @classmethod
     def blobs(cls, a):
         return cls.white(a), cls.dark(a)
@@ -943,7 +1016,8 @@ class OwnStats:
         out = []
         for b in cls._runs(m, cls.X0, cls.Y0 + 3):
             w = b[1] - b[0]; h = b[3] - b[2]
-            if (14 <= h <= 24) and (16 if h < 20 else 19) <= w <= 34 and cls.kind((b[0], b[0] + 8, b[2], b[3]), dark):
+            sh = cls.SPLIT
+            if (sh[0][0] <= h <= sh[0][1]) and (sh[1] if h < 20 else sh[2]) <= w <= sh[3] and cls.kind((b[0], b[0] + 8, b[2], b[3]), dark):
                 ink = m[:, b[0] - cls.X0 + 4:b[1] - cls.X0 - 4].sum(0)
                 x = b[0] + 4 + int(ink.argmin())
                 for x0, x1 in ((b[0], x), (x + 1, b[1])):
@@ -951,17 +1025,18 @@ class OwnStats:
                     if len(ys): out.append((x0, x1, cls.Y0 + 3 + int(ys[0]), cls.Y0 + 4 + int(ys[-1])))
             else: out.append(b)
         return out
-    @staticmethod
-    def kind(b, dark=False):
+    @classmethod
+    def kind(cls, b, dark=False):
         """'S' / 'B' / 'K' for a digit-sized blob, else None."""
         w = b[1] - b[0]; h = b[3] - b[2]
-        if dark: return 'K' if 14 <= h <= 18 and 3 <= w <= 14 and 133 <= b[2] <= 138 else None
-        if 15 <= h <= 19 and 3 <= w <= 15 and 133 <= b[2] <= 138: return 'S'
-        if 20 <= h <= 24 and 3 <= w <= 18 and 130 <= b[2] <= 135: return 'B'
+        fit = lambda f: cls.KINDS[f][0][0] <= h <= cls.KINDS[f][0][1] and cls.KINDS[f][1][0] <= w <= cls.KINDS[f][1][1]             and cls.KINDS[f][2][0] <= b[2] <= cls.KINDS[f][2][1]
+        if dark: return 'K' if fit('K') else None
+        if fit('S'): return 'S'
+        if fit('B'): return 'B'
         return None
-    @staticmethod
-    def _icon(b, w0, w1, h0, h1, dark=False):
-        return b is not None and OwnStats.kind(b, dark) is None and w0 <= b[1] - b[0] <= w1 and h0 <= b[3] - b[2] <= h1
+    @classmethod
+    def _icon(cls, b, w0, w1, h0, h1, dark=False):
+        return b is not None and cls.kind(b, dark) is None and w0 <= b[1] - b[0] <= w1 and h0 <= b[3] - b[2] <= h1
     @classmethod
     def _chain(cls, L, j, step, font, dark=False, maxn=4):
         """Digit-sized blobs from L[j] on (step +1: to the right, -1: to the left), at most 6 px apart."""
@@ -1004,8 +1079,8 @@ class OwnStats:
                 ch = cls._chain(Dl, j + 1, 1, 'K', True, maxn=2)
                 if ch[-1][1] < dic[0]: out['knocks'] = ('K', ch)
         return out
-    @staticmethod
-    def patch(a, b, font):
+    @classmethod
+    def patch(cls, a, b, font):
         """The digit's ink from 0 (plate) to 1 (stroke), at its own contrast, as 12 x 18 grey cells; None if too faint."""
         x0, x1, y0, y1 = b
         box = a[y0 - 2:y1 + 2, max(0, x0 - 3):x1 + 3]
@@ -1013,7 +1088,7 @@ class OwnStats:
              else np.minimum(np.minimum(box[..., 0], box[..., 1]), box[..., 2])).astype(np.float32)
         s = v.ravel(); k1, k2 = int(0.25 * (s.size - 1)), int(0.97 * (s.size - 1))
         s = np.partition(s, (k1, k2)); lo, hi = float(s[k1]), float(s[k2])        # plate behind / the strokes
-        if hi - lo < 40: return None
+        if hi - lo < cls.CONTRAST: return None
         g = np.clip((v[2:-2, x0 - max(0, x0 - 3):x0 - max(0, x0 - 3) + x1 - x0] - lo) / (hi - lo), 0, 1)
         return (_lin(18, g.shape[0]) @ g @ _lin(12, g.shape[1]).T).ravel()
     @classmethod
@@ -1049,6 +1124,92 @@ class OwnStats:
             try: v = cls.number(a, font, ch)
             except Exception: v = None
             if v is not None: out[k] = v
+        return out
+
+class Legends43(Legends):
+    """Legends on a 4:3 stretched recording, read on the scanner's remapped top (pcs_scan.view_top). The player's own
+    name is drawn small and coloured, then scaled up and video-compressed: little of its colour is left (7 to 88
+    pixels of the badge's colour on synthetic stretched frames, where 16:9 has 300 to 410; white names 0), so less is
+    asked; the white test (the own name has no white letters, the others 200 or more) still decides. Shares the
+    portraits of a Legends already loaded."""
+    MINE = 5
+    def __init__(self, path=None, like=None):
+        if like is not None: self.T = like.T
+        else: super().__init__(path)
+
+class Banner43(Banner):
+    """Banner on a 4:3 stretched recording, read on the scanner's remapped top (pcs_scan.view_top)."""
+    WHITE, NEAR = 190, 70
+
+class SquadsLeft43(SquadsLeft):
+    """SquadsLeft on a 4:3 stretched recording, read on the scanner's remapped top (pcs_scan.view_top). The text is
+    softer (the game draws the HUD at its 4:3 render size), so the white cut is lower and the shapes may differ more;
+    in exchange each digit must also be read the same by the own-stats digit test (same font as the big kills digits,
+    grey cells at the digit's own contrast, shapes softened like the text): on synthetic stretched frames from two
+    recordings the cut alone took a faint 8 for a 9 or a 6 now and then."""
+    WHITE = 200; FILL = (0.12, 0.36); DH, DW = (18, 24), (3, 20); BITS = 34
+    @classmethod
+    def confirm(cls, a, boxes, out):
+        return ''.join(str(OwnStats43.digit(a, b, 'B')[0]) for b in boxes) == out
+
+def _soften(T, sx=0.5625, sy=0.75):
+    """Digit shapes (font -> labels, n x 216 grey cells 12 x 18, widths) as a 4:3 stretched recording shows them: the
+    game draws the HUD at its 4:3 render size (0.5625 of the width, 0.75 of the height of a 1440p 16:9 HUD), then the
+    picture is scaled back up. Each shape goes down to that size and back up, then is spread again from 0 to 1."""
+    out = {}
+    for f, (labels, S, Wd) in T.items():
+        R = []
+        for c in S:
+            g = Image.fromarray((c.reshape(18, 12) * 255).astype(np.uint8))
+            g = np.asarray(g.resize((max(2, round(12 * sx)), max(2, round(18 * sy))), Image.BOX).resize((12, 18), Image.BILINEAR), np.float32)
+            lo, hi = float(np.percentile(g, 25)), float(g.max())
+            R.append(np.clip((g - lo) / max(hi - lo, 1.0), 0, 1).ravel())
+        out[f] = (labels, np.array(R, np.float32), Wd)
+    return out
+
+class OwnStats43(OwnStats):
+    """OwnStats on a 4:3 stretched recording, read on the scanner's remapped top (pcs_scan.view_top). Its digits are
+    doubtful more often (softer text), so a number may stop being read while it is still on screen with a new value:
+    read() also gives '_seen', the numbers whose place was found on the strip, read or not, and the game's total is
+    refused when its number was seen but not read after its last read (pcs_scan.timeline): a total too low is worse
+    than none."""
+    INK, INK_K = 30, 0.35
+    REF = [0, 1, 32, 33]                     # plate rows further out: the softened digits bleed a row or two
+    @classmethod
+    def read(cls, a):
+        out = super().read(a)
+        try: seen = tuple(sorted(cls.layout(a))) if cls.T else ()
+        except Exception: seen = ()
+        if seen: out['_seen'] = seen
+        return out
+    T = _soften(OwnStats.T)
+    @classmethod
+    def white(cls, a):
+        """As OwnStats.white; the damage icon, drawn smaller and scaled up, often falls apart into pieces one empty
+        column apart: pieces that together have the icon's size where it sits (x 2235..2280) are joined."""
+        W = super().white(a); out = []; i = 0
+        while i < len(W):
+            b = W[i]; k = i; m = b
+            if 2235 <= b[0] <= 2280:
+                while k + 1 < len(W) and W[k + 1][0] - m[1] <= 1 and W[k + 1][1] - b[0] <= 41:
+                    k += 1; m = (b[0], W[k][1], min(m[2], W[k][2]), max(m[3], W[k][3]))
+                if k > i and 34 <= m[1] - m[0] <= 41 and 22 <= m[3] - m[2] <= 27:
+                    out.append(m); i = k + 1; continue
+            out.append(b); i += 1
+        return out
+    @classmethod
+    def dark(cls, a):
+        """As OwnStats.dark; the knocks icon's lighter middle often drops out, leaving its two sides: pieces that are
+        not digits and together have the icon's size (33..38 x 24..28) are joined."""
+        D = super().dark(a); out = []; i = 0
+        while i < len(D):
+            b = D[i]; k = i; m = b; j = None
+            while k + 1 < len(D) and D[k + 1][1] - b[0] <= 38 and cls.kind(D[k + 1], True) is None:
+                k += 1; m = (b[0], D[k][1], min(m[2], D[k][2]), max(m[3], D[k][3]))
+                if 33 <= m[1] - m[0] <= 38 and 24 <= m[3] - m[2] <= 28: j = (k, m)
+            if j and cls.kind(b, True) is None:
+                out.append(j[1]); i = j[0] + 1; continue
+            out.append(b); i += 1
         return out
 
 SINGLE_JUMP = 250      # damage: largest rise accepted from the read before a last value seen once (see stat_final)

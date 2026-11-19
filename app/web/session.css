@@ -37,7 +37,7 @@
 .wt-list{min-width:240px}
 .wt-list h3{margin:0 0 6px;font:600 13px var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
 .wt-item{display:flex;align-items:center;gap:8px;padding:4px 0;border-top:1px solid var(--line)}
-.wt-item.seen{opacity:.6}
+.wt-item.wt-seen{opacity:.6}   /* not .seen: app.css uses it for the review overlay */
 .wt-talk p{margin:6px 0 10px}
 /* review player: what a session left (review-extras.js) */
 .rv-extras{margin-top:12px;padding:12px 16px;display:flex;flex-direction:column;gap:8px}
@@ -46,4 +46,18 @@
 .rx-marks{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 .rx-mark{background:var(--panel-2);border:1px solid var(--line);color:var(--ink);border-radius:6px;padding:4px 10px;cursor:pointer;font:inherit}
 .rx-mark:hover{border-color:var(--muted)}
+/* session plan (session.js): the moment everyone is on, and the list */
+.wt-plan{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:8px 14px;border-radius:6px;
+  background:var(--panel);border:1px solid var(--line)}
+.wt-plan-now{display:flex;align-items:center;gap:10px;flex-wrap:wrap;min-width:0}
+.wt-plan-now b{overflow-wrap:anywhere}
+.wt-plan-nav{gap:8px}
+.wt-plan select{background:var(--panel-2);color:var(--ink);border:1px solid var(--line);border-radius:6px;padding:5px 8px;font:inherit}
+.wt-planlist{min-width:280px;max-width:520px}
+.wt-planlist .wt-item.now{background:var(--info-soft);border-radius:4px}
+.wt-pn{font:600 13px var(--mono);color:var(--muted);min-width:20px;text-align:right}
+.wt-pt{display:flex;flex-direction:column;flex:1;min-width:0}
+.wt-pt small{font-size:12px}
+.rx-mark.skipped{opacity:.7;border-style:dashed}
+.rx-sessions{display:flex;flex-direction:column;gap:4px;font-size:13px}
 @media (max-width:999px){.wt-transport{flex-wrap:wrap}}

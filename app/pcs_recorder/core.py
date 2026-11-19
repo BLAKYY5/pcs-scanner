@@ -91,15 +91,22 @@ def stop_tree(proc, wait_s: float = 10) -> None:
 
 
 def result_files(out: Path) -> list[Path]:
-    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks."""
+    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks and the
+    comms transcript (`comms.py`: sent to the hub on its own, only while the player says yes, never to Drive)."""
     if not out.exists():
         return []
-    return sorted(p for p in out.rglob("*") if p.is_file() and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
+    from .comms import is_comms_file
+    return sorted(p for p in out.rglob("*") if p.is_file() and not is_comms_file(p.name)
+                  and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
 
 
-class NeedsSignIn(ConnectionError):
-    """Results couldn't be sent because the Google sign-in is missing or expired (message shows a Sign in button)."""
-    action = "signin"
+class NoHub(ConnectionError):
+    """No team hub address yet: results stay on this PC until the player joins the hub (told once, no pop-up)."""
+    kind = "nohub"
+    TEXT = "No team hub yet: your results stay on this PC until you join your team's hub (Home → Get set up)"
+
+    def __init__(self, text: str = ""):
+        super().__init__(text or self.TEXT)
 
 
 class Recorder:
@@ -123,9 +130,10 @@ class Recorder:
         self.youtube = None                      # youtube.Uploader, attached by the app
         self.talk = None                         # talk.Talk (review talk of a Watch together session), by the app
         self.night = None                        # night.Night (night uploads, turning the PC off)
+        self.check = None                        # precheck.RecCheck (recording check on Home), by the app
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
-        self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub / Drive, per recording
+        self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub state per recording
         self.hub_next, self.hub_fails, self.hub_fail_url = 0.0, 0, ""   # hub retries: backoff after network errors
         self.hub_told = ""                     # why the hub can't be reached, last told in Activity (once per change)
         self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
@@ -156,6 +164,8 @@ class Recorder:
         with self.lock:
             apex = self.is_apex_running()
             self.apex = apex                     # read by the window (it polls less often during games)
+            if not apex and self.check is not None:
+                self.check.apex_closed()             # next Apex session: the check may tell again
             if apex and self.talk is not None and self.talk.active:
                 try:                                 # the game recording comes first: keep what was said, stop
                     self.talk.stop(why="Apex started")
@@ -196,7 +206,12 @@ class Recorder:
             self.status = f"Couldn't start recording: {e}"
             self.ui.notify("PCS Recorder", f"Recording didn't start: {e}")
             log.exception("start failed")
-            crash.report_exception("record_start", e, crash.obs_log_tail())
+            if self.check is not None:
+                try:
+                    self.check.record_failed(e)      # what else is red (Medal running…), one message
+                except Exception:
+                    log.exception("recording check failed")
+            crash.report_exception("record_start", e, crash.obs_log_tail(), self._check_ctx())
             return
         key = f"rec-{int(self.clock())}"
         n = 2
@@ -210,10 +225,22 @@ class Recorder:
         self.status = "Recording Apex"
         self.rec_check_at = self.clock() + RECORDING_CHECK_S
         self.hub.report(self._report(key))
+        if self.check is not None:
+            try:
+                self.check.apex_started()            # quick items + one message if red; Apex sound in the background
+            except Exception:
+                log.exception("recording check failed")
         try:
             self._restarted(key)
         except Exception:
             log.exception("restart check failed")
+
+    def _check_ctx(self) -> dict:
+        """The recording check's one-line summary for a crash report (item states, capture app names only)."""
+        try:
+            return {"check": self.check.summary()} if self.check is not None else {}
+        except Exception:
+            return {}
 
     def _check_recording(self) -> None:
         """Once, a little after the start: is OBS really recording? (A recording can "start" and never run: OBS
@@ -230,7 +257,7 @@ class Recorder:
         if running is None:
             log.warning("OBS isn't recording %d s after the start", RECORDING_CHECK_S)
             crash.report("record_start", f"OBS isn't recording {RECORDING_CHECK_S} s after the start",
-                         "", crash.obs_log_tail())
+                         "", crash.obs_log_tail(), self._check_ctx())
 
     def _stop_and_offer_scan(self) -> None:
         key, self.current = self.current, None
@@ -246,11 +273,12 @@ class Recorder:
         if not e.path:                           # a session with no file: tell the coach why (crash report)
             mins = round((self.clock() - e.started) / 60, 1)
             if stop_error is not None:
-                crash.report_exception("record_stop", stop_error, crash.obs_log_tail(), {"minutes": mins})
+                crash.report_exception("record_stop", stop_error, crash.obs_log_tail(),
+                                       {"minutes": mins, **self._check_ctx()})
             else:
                 crash.report("record_stop", "No recording file when Apex closed" + ("" if path else
                              ": OBS wasn't recording"), f"OBS gave {Path(path).name if path else 'no file'}",
-                             crash.obs_log_tail(), {"minutes": mins})
+                             crash.obs_log_tail(), {"minutes": mins, **self._check_ctx()})
         if e.path:
             self._write_events(key)
             self._start_silence_check(e.path, self.clock() - e.started)
@@ -590,6 +618,8 @@ class Recorder:
         and if that takes too long, the .mkv is the complete recording (a half-written .mp4 can't be read:
         the scan of a 2-hour session once found nothing because of that)."""
         mkv = Path(path)
+        if mkv.suffix.lower() == ".mp4":                 # hybrid MP4 (OBS 30.2+): no remux; done once it stops growing
+            return self._settled(mkv, wait_s if wait_s is not None else 60, poll)
         if mkv.suffix.lower() != ".mkv":
             return str(mkv)
         mp4 = mkv.with_suffix(".mp4")
@@ -609,6 +639,22 @@ class Recorder:
                 last = size
             time.sleep(poll)
         return str(mkv if mkv.exists() else mp4)
+
+    @staticmethod
+    def _settled(f: Path, wait_s: float, poll: float) -> str:
+        """An .mp4 OBS wrote directly: OBS finishes it (the index at the end) as the recording stops. Wait until its
+        size holds still for one poll (at most wait_s), then use it."""
+        end, last = time.time() + wait_s, -1
+        while time.time() < end:
+            try:
+                size = f.stat().st_size
+            except OSError:
+                size = -1
+            if size > 0 and size == last:
+                break
+            last = size
+            time.sleep(poll)
+        return str(f)
 
     # ---------------------------------------------------------- hotkeys during a recording
     def hotkey(self, action: str) -> str | None:
@@ -848,6 +894,17 @@ class Recorder:
         self.next_upload = self.clock() + 60
         if getattr(ex, "kind", "") == "paused":               # Apex started during a part: goes on later
             return
+        if getattr(ex, "kind", "") == "nohub":                # no hub address yet: one Activity line, no pop-up
+            note = "not sent yet: no team hub"
+            if e.note != note:
+                e.note = note
+                retention.save_index(self.idx)
+            if self.hub_told != "nohub":
+                self.hub_told = "nohub"
+                say = getattr(self.ui, "activity", None)
+                text = f"{ex}. They are sent by themselves once you join."
+                say(text) if say else self.ui.notify("Results not sent yet", text)
+            return
         reach = getattr(ex, "reach", "")
         if reach:                                             # can't reach the hub: one Activity line, no pop-up
             from .hub import reason
@@ -875,10 +932,9 @@ class Recorder:
         e.status, e.note = "uploaded", hub_note
         self.hub_told = ""
         retention.save_index(self.idx)
-        hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
+        hub_ok = getattr(where, "hub_ok", None)
         self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),
-                          "why": getattr(where, "hub_why", "") if hub_ok is False else "",
-                          "drive": {True: "sent", False: "failed"}.get(drive_ok, "")}
+                          "why": getattr(where, "hub_why", "") if hub_ok is False else ""}
         self._save_sent()
 
     def _save_sent(self) -> None:
@@ -896,7 +952,7 @@ class Recorder:
     HUB_BACKOFF = (60, 120, 240, 480, 900)
 
     def _retry_hub(self) -> None:
-        """Recordings whose results reached Drive but not the hub: sent to the hub on their own schedule until it
+        """Recordings whose results reached Drive (older versions) but not the hub: sent to the hub on their own schedule until it
         takes them. Never while Apex runs (tick), never twice once the hub said 200. A refused key waits for a new
         key or address; 429 waits for Retry-After (both known by pcs_recorder.hub without asking the hub)."""
         upload_hub = getattr(self.hub, "upload_hub", None)

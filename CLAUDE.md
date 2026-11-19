@@ -2,7 +2,7 @@
 
 Windows app for the Apex Legends team Project Conquerors (PCS), coached by Blakey. It records Apex with its own
 private OBS, scans the recordings (drop, landing, rings, harvesters, kill feed, sound cues), sends the results to
-the team's Drive or hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
+the team hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
 
 Blakey is the coach and the only person who decides what ships. He is a capable Python reader but not the one
 writing this code: explain outcomes in plain words, not internals.
@@ -31,17 +31,25 @@ writing this code: explain outcomes in plain words, not internals.
 scanner/pcs_scan.py     the video scanner (CLI + library). VERSION lives here: the app's version.
 scanner/pcs_hud.py      HUD reading helpers (ring clock, layout 16:9 / 4:3 stretched, glyphs)
 scanner/pcs_audio.py    sound cues on the game track (ring-moving alarm so far)
-scanner/pcs_maps.json, pcs_fonts.json, rank_rp.npy   reference data the scanner ships with
+scanner/pcs_ring.py, pcs_respawn.py, pcs_bars.py, pcs_mapicons.py, pcs_fights.py, pcs_usage.py, pcs_minimap.py,
+pcs_ranked.py           more readers (ring circles, respawns, own bars, care packages, fights, heals, minimap, RP)
+scanner/pcs_maps.json, pcs_fonts.json, pcs_banner.json, pcs_ranked.json, rank_rp.npy   reference data it ships with
 app/pcs_app.py          entry point: single instance, tray, window (pywebview), Tk toasts, updater finish
-app/pcs_core.py         paths, settings, Google Drive / YouTube sign-in, update check + install, run_scan
+app/pcs_core.py         paths, settings, YouTube sign-in, update check + install, run_scan
 app/pcs_server.py       localhost HTTP API + static web UI (token-protected), Backend class
 app/pcs_levels.py       loudness per track, fight and mic-peak detection for the review player
 app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket), core (Recorder),
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
-                        eec (results from export/hub), night (night uploads, shutdown), labels (session types)
-app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together) (no build step, no framework)
+                        eec (results from export/hub), night (night uploads, shutdown), labels (session types),
+                        hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
+                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord)
+app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
+app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
+                        review-extras.js, clip.js/.css (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
+app/pcs_install.py, pcs_setup.py, pcs_launcher.py   installed folder: installer (the release file), launcher (see Updater)
+tools/                  developer tools, not in the exe (region cache, check set, audio cross-check, mode emblems)
 .github/workflows/build.yml   Windows build, tests, PyInstaller onedir app + launcher + onefile installer, selftest, release
 ```
 
@@ -76,7 +84,7 @@ BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
 gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
 build and compare it with a scan from the previous build (same games and values).
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is released).
 
 ## How the pieces work (things that bit us)
 
@@ -89,8 +97,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   by exe name `voice_exe`; keys `discord_audio`, `hk_mute_discord`, track key `discord` and OBS input
   "PCS Discord" kept for compatibility), 3 = microphone (`mic_device`). A settings change that alters
   `config_signature` restarts OBS at the next Apex start.
-- **Recording file**: OBS writes mkv, then remuxes to mp4. Use the mp4 only when it's ≥ 0.98 × the mkv size and
-  stable, else the mkv. A half-written mp4 once produced a "0 games" scan.
+- **Recording file**: OBS 30.2+ records hybrid MP4 (`obs.rec_format`, from obs64.exe's version in the config and
+  the running OBS's version in `prepare`): an .mp4 from the start, no remux, used once its size holds still
+  (`Recorder._settled`). Older OBS: mkv, then remuxed to mp4; use the mp4 only when it's ≥ 0.98 × the mkv size and
+  stable, else the mkv. A half-written mp4 once produced a "0 games" scan. Checked 19 Nov 2026: a hybrid MP4 and
+  the same bits in a plain MP4 scan identically; track cutting and concat work on it.
 - **Scan validity**: `read_nothing` (no layout votes, no games) = failed scan, retry. `no_game` needs the video
   to have been read, no games and no feed lines; those recordings are deleted first by retention.
 - **Game mode**: the ranked badge share alone is unreliable. A scrim needs proof: the scrim drop screen (all 20
@@ -98,12 +109,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   Per game, `games[].modeSeen` (`pcs_scan.mode_seen`) = {mode, from: the signs that named it (badge = RP panel share,
   drop, select = rank badges at legend select, banner = loading banner word, emblem), conflict, emblem (asset id),
   emblemReads}; `games[].mode` = its mode or `unknown`. Order kept from before: RP panel -> ranked, drop screen ->
-  scrim; then the other signs must agree. Two signs naming different modes, or the emblem of a playlist we can't
+  scrim; then the other signs must agree. Since the 17 Nov 2026 game update Ranked shows a drop-point screen laid out
+  like the scrim one, titled "RANKED - DROPZONE" where custom lobbies show the map's name: a drop screen read on a frame
+  whose banner says ranked is kept as `games[].rankedDrop` (data only: it starts no game, proves no scrim), and any
+  ranked sign (RP panel, rank badges at legend select, banner RANKED) beats a `drop` read (then `drop.ranked: true`).
+  A banner read never hides the drop screen (1.10.8 to 1.10.14 it did: no scrim was recognised). Two signs naming different modes, or the emblem of a playlist we can't
   name, = no mode (unlabelled), never a guess (an unnamed emblem is ignored next to ranked
   signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
   emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
-- **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 only): the round emblem at
+- **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 and 4:3 stretched): the round emblem at
   the top right (x 2422..2539, y 8..123 at 1440p in a game; 134 px lower on the "waiting for players" screen). Pubs =
   red "unranked" emblem, Wildcard = teal; ranked shows a rank badge there instead. Compared as 16 x 16 colour cells on
   the cells the emblem fully covers with `pcs_banner.json` `emblems` (derived from the game's own emblem images by
@@ -137,7 +152,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
 - **Updater**: downloads `PCS-Scanner.update.exe` (next to the launcher), spawns it detached with `--finish-update
   CUR PID`. Since the installed folder, that file is the installer: it waits for the old process, installs, puts the
   launcher at CUR and restarts (old onefile versions 1.10.2+ send the same command, so they update to it unchanged;
-  install failing = the old version is started again). Before: it copied itself over the old exe and restarted. Versions ≤ 1.10.1 need one manual install.
+  install failing = the old version is started again). Before: it copied itself over the old exe and restarted.
+  Every player is on 1.10.12 or newer (same updater): their app takes the release's one `.exe` and starts it with
+  `--finish-update <old exe> <old pid> [--show]`, so keep the single `PCS-Scanner.exe` release file (the installer) and
+  that command line (`test_update_relaunch_arguments`, `test_installer_finish_update_from_old_version`). Going back:
+  an installed app offered an older-style onefile release takes it the same way (the onefile copies itself over the
+  launcher); the version folders stay in `app\` until removed by hand.
   Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
   (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
   without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
@@ -152,12 +172,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
 - **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, "Your choices", team hub (one paste of the
-  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log),
-  Google (optional once on the hub). Choices (coach's decisions 18 Nov 2026), each applied at once by
+  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log).
+  No Google step (no Drive). Choices (coach's decisions 18 Nov 2026), each applied at once by
   `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
   start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
   mic recorded, "Send my mic track" on, `share_tracks`), comms transcripts Yes / No (`transcript_consent`, default
-  off; only the answer is kept, nothing is built yet). Shown until name + (hub or Google) + both questions answered
+  off; see "Comms transcripts"). Shown until name + hub + both questions answered
   (`share_asked`, `transcript_asked`; changing either switch in Settings counts too), or hidden.
 - **Teammates' mic tracks** (`pcs_recorder/teamtracks.py`, hub `/api/team-tracks`, `PUT /api/me/sharing`): with
   `share_tracks` (plus comms consent, mic on, "Send my mic track" on) the answer goes to the hub and the teammates'
@@ -168,6 +188,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   The review player plays them in the mixer ("<name> mic"), each game of the recording with its own offset
   (their jump − own jump), only inside that game. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
+- **Comms transcripts** (`pcs_recorder/comms.py`, worker `app/pcs_transcribe.py`, hub `hub/comms.py`; 19 Nov 2026):
+  with `transcript_consent` (+ `comms_consent`, mic on) the player's **own mic track** (events.json `tracks` index of
+  "mic") is turned into text after the recording was scanned: never the voice-app track (everyone's voices), never the
+  game sound, nobody else's track. Whisper large-v3-turbo on the CPU (int8, faster-whisper), one recording at a time,
+  below normal, half the logical cores; never while Apex runs, records, scans or records review talk (`_backup_busy`):
+  Apex starting stops it (`stop_tree`), finished 10-min parts stay in `<rec>.comms.partial.json` and the next run goes on
+  from there; a stop is not a failed try (3 tries, last 3 days of recordings). Output `<rec>.scan/<rec>.comms.json`
+  (segments start / end in recording seconds, text, speaker = player name), left out of `result_files` (never Drive),
+  sent to the hub on its own (`upload_hub`) only while the yes holds; state in `transcripts.json`. The worker cuts parts
+  at the quietest half second, gives a short Apex word list + the scan's map POIs as prompt, fixes a few spellings
+  (Watson -> Wattson) and drops Whisper's subtitle-credit lines on silence. **Not in the exe**: faster-whisper +
+  CTranslate2 + onnxruntime are ~200 MB that every start would unpack, so they are the optional "Transcripts"
+  component (`build.yml` builds `PCS-Transcripts.zip`, a run artifact, `pcs-transcribe.exe --selftest` checked); the app
+  downloads it once only when `comms.COMPONENT` pins a published zip (url + SHA-256 + size; None so far: Settings says
+  "Not available yet"). Publish it as a release that is never "latest" (the updater reads the latest release). The
+  model (1.6 GB, 5 files) comes from a pinned Hugging Face commit with each file's SHA-256 (`MODEL_FILES`), https only,
+  into `transcripts/` in the data folder, after the yes only. Developers: `PCS_TRANSCRIBE_PY` (a Python with
+  faster-whisper; runs the worker from source) and `PCS_WHISPER_MODEL` (a model folder). Review player: a "Your comms
+  (text)" lane under the timeline and a Comms tab with a word filter (click = seek). Hook for the hub's scan worker:
+  `Comms.where()` and the worker's `--stream 0` on a `.mic.m4a`. Measured 19 Nov 2026 (5700X3D): see the PR.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
   (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
   all day, 0.2 % for the whole app after). Hotkey thread: 20 looks a
@@ -179,10 +219,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
-- **Results to hub and Drive**: with a hub address set, results go to the hub only (Drive is not used, even signed
-  in: leaving-Drive plan, coach's decision 18 Nov 2026; Home shows "Results: Team hub", setup has no Drive step,
-  Settings hides the Drive sign-in and the coach's address); without one, to Drive. A recording is "uploaded" once its
-  destination took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+- **Results to the hub**: results go to the team hub only. Google Drive results were removed 19 Nov 2026
+  (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
+  Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent
+  yet: no team hub", one Activity line, no pop-up) and are sent once the player joins; Home and Settings show
+  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) and an old `google_token.json` are left
+  alone and never read; `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
@@ -215,8 +257,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   others may be used alone (controller players).
 - **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
   No coach address or account name is built into the exe (a security review found one in `build.json`; removed
-  18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
-  player types in Settings (`coach_email`, once per address: `shared_with`). Coach-only: importing recordings by hand.
+  18 Nov 2026, `test_no_personal_email_in_app` guards it). The Settings field "Coach's Google email" (`coach_email`)
+  was removed 19 Nov 2026 with the Drive results. Coach-only: importing recordings by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file
@@ -224,7 +266,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   answer), not the app's Coach role, decides who may write. Drawings are 0..1 coordinates of the video frame, drawn
   on a canvas fitted to the picture (`fitInk`), repainted only when the set of notes on screen changes. "Squad"
   notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
-  never. Last answer cached in `notes-cache/` for offline. Full screen is the player box (F / button), the video's
+  never. Last answer cached in `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
+  each note the player sends "Got it" (once) or a short reply (≤ 500 characters), the coach answers back (no Got it
+  for him); everyone who sees a note sees its replies (they come with the notes, so offline too); sending needs the
+  hub (`notes.reply`, `/api/notes/reply` / `unreply`, no queue). A hub without replies sends no `replies` field: no
+  reply box. A reply draft survives the list being redrawn. Full screen is the player box (F / button), the video's
   own full-screen button is hidden, or the drawings would not show.
 - **Watch together** (`pcs_recorder/watch.py`, `web/session.js` + `session.css`, hub 0.5 `/api/videos`, `/api/sessions`,
   contract in the hub's `AGENT.md`): the coach and the squad watch one game together, every player's view side by
@@ -252,6 +298,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   and a "Review talk" switch (`web/review-extras.js`, `/api/library/<id>/extras`, audio downloaded once to
   `talk-cache/` and served at `/talk/<id>`): talk follows the video at the session's speed; talk while paused holds
   the video, plays, then goes on.
+  Session plan (hub `/api/coach/plans`, made on the hub's Coach → Session plans): the coach's ordered moments (game,
+  time after the jump, one-line note). Team tab: "Start with plan" (coach); in the session a bar above the views shows
+  "Moment n of m" with the note on every screen, the coach has Previous / Next (P / N) and Go per moment in the list
+  (control action `item`: the hub takes everyone to its game, time and view, paused; a player browsing on their own
+  comes back), and "Use a plan…" when the session has none. A hub without plans: no plans listed, nothing else
+  changes. When the session ends the hub keeps a summary (who was there and how long, length, moments covered /
+  skipped, bookmarks, flags, notes, drawings): the review player's "Watch together" box shows it under the session
+  bookmarks, with the plan's moments of that recording's games as buttons (skipped ones dashed).
 - **Review talk recording** (`pcs_recorder/talk.py`, coach's app only, only with `comms_consent`): the private OBS
   records the mic and voice-app tracks (the only per-program audio capture available; ffmpeg has none) into
   `talk/` (never the recordings folder), then the two tracks are copied out and the temporary video deleted. Never
@@ -259,6 +313,24 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   folder and file name are set back after; if that fails, the next game start prepares OBS again. Segments
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
+- **Clips for Discord** (`pcs_recorder/clips.py`, `web/clip.js` + `clip.css`, idea #8, 19 Nov 2026): review player →
+  Clip (key C): start / end (Here buttons, keys I / O, or a typed time) or a moment from the list (events, own marks,
+  coach notes, session bookmarks) with 3-30 s before / after; the range shows on the timeline. Sound: the recording's
+  own tracks except the voice-app track (it holds teammates' voices without their own consent; the server refuses it
+  too), plus downloaded teammates' mic tracks, each at its offset per game: only when the player shares their own
+  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment (a teammate who said no
+  since the download, or a hub out of reach = left out, listed under the clip). Coach notes on screen in the range
+  (text + drawings, as the player shows them) are drawn with Pillow on transparent PNGs at the clip's size and laid
+  over for their time. Discord = under 10 MB (aimed at 9.0 MB: AMF overshot by 6 %; bitrate from the length, 1080 /
+  720 / 540 / 480 and 30 fps as it drops, at most ~3 min with sound; encoded again lower if still over 10 MB); Full
+  quality = the recording's size and frame rate, ~20 Mbit/s at 1440p60 (a fixed quality gave 58 Mbit/s). H.264 + AAC
+  MP4, yuv420p, faststart. Encoder on the recorder's card (NVENC / AMF / Quick Sync from `s.encoder`), decoding on the
+  card (`-hwaccel d3d11va -c:v <codec>`: AV1 needs the decoder named), then the card's encoder with CPU decoding, then
+  x264. Measured on the coach's RX 9070 XT, AV1 1440p60: 30 s -> 9.5 MB in 11 s, 85 s -> 9.6 MB in 30 s. Never while
+  Apex runs or a game records (refused; Apex starting stops it, `.part` removed), below-normal priority, one at a time.
+  Saved in a `Clips` folder next to the recording (the Recordings list doesn't look inside; retention never touches
+  it). Show in folder (`explorer /select,`) and Copy file (CF_HDROP + "Preferred DropEffect" copy, paste in Discord
+  with Ctrl+V) act only on clips the app made in this run. Nothing is uploaded.
 - **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.2 collection `minimaps`): the review player
   draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`;
   without the overlay the HUD minimap's reads from `minimapTrack`, `pcs_server.seen_rows`, `seenFrom: "minimap"`)
@@ -294,7 +366,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   (`1.10.9+dev.52` for a test build, `+source` from source); `scanner` stays the plain version.
 - **Scanner speed**: readers take the uint8 frame and make int16 only the small areas they compute on; per-pixel
   min / max over the colours use `pcs_hud.minmax` (channel planes), never `.min(2)` / `.max(2)` / `np.ptp(axis=2)`,
-  which are about 8x slower. A speed change must give identical results: compare every reader old vs new on the
+  which are about 8x slower. The weapon match (the biggest reader, ~30 ms per new feed line) does numpy's irfft2 in its
+  own two steps and the second only on the rows it keeps (bit-identical, -30 %); debug overlay cells are compared with
+  all glyphs at once (19 Nov 2026: analysis 41.5 -> 33.9 ms per keyframe). A speed change must give identical results: compare every reader old vs new on the
   region caches (0 differences) and the check set table.
 - **Scan plumbing** (18 Nov 2026, to keep the scan unnoticeable): `keyframes()` reads ffmpeg's pipe unbuffered
   (`bufsize=0`, `readinto` one new buffer per frame). The old `bufsize=10**8` + `.read(n)` cost 134 ms and 0.18 CPU-s
@@ -305,6 +379,18 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   build) until the scan completes: when Apex starts, the app stops the scan (`core.stop_tree`, nothing stays in
   memory) instead of suspending it, and the next run goes on from the chunks still to do. `result_files` never
   sends `.partial`. 4:3 stretched views fill only the boxes their readers look at (`view_top` rows 0..640).
+- **Scan on the team server** (`pcs_recorder/serverscan.py`, hub `hub/scanjobs.py`, setting `server_scan`, off by
+  default; prototype 19 Nov 2026): the headless scan process (`pcs_app.py --scan`) first tries the hub. It makes a
+  light copy (stream copy of the keyframe packets + track 1, `-copyts`: ~0.7-0.95 GB per hour, seconds, no decoding),
+  sends it through `/api/uploads` kind `scan-source` with the recording's length, this PC's chunk count, decoder family
+  and scanner version (results depend on all four), and polls `/api/scan-jobs/<id>`. The scanner's 60 fps reads
+  (`pcs_hud._corner`: frame-exact jump, landing, ring 1) need frames between keyframes: with `--clips DIR` the scanner
+  reads them from clips (cut `-ss a -t d -i rec -c copy -copyts`; `-t` before `-i`, or the clip comes out empty) and
+  lists missing windows in `<rec>.needs.json`; the hub's first pass asks the app for those clips, the second pass
+  re-uses the chunks (`--keep-chunks`) and only redoes the end. `--duration` cuts the chunks where the whole recording
+  would. Results land in the usual results folder and are sent as after a local scan. Any failure (worker off 409,
+  other scanner version 409, old hub, failed job, > 3 h) = local scan at once. Checked identical to a local scan (all
+  of scan.json / feed.json but perf, scannedAt) on 3 recordings, CPU and GPU decoding.
 - **Leftover unpacked copies**: the onefile exe unpacks ~600 MB to `%TEMP%\_MEI*` per start (and per scan); a crash or
   forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
   are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
@@ -349,7 +435,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   a window: the screen's background is often a saturated orange right behind them, and the hue test flipped with tiny
   pixel differences between the CPU and GPU decoders (7 Nov, one game: octane on CPU, pathfinder on GPU; the screen
   says octane). Look-alikes: the lobby's party list (rejected by position), odd single frames (rejected by duration),
-  and the orange background filling the badge window at the wrong roster position (rejected by size). 16:9 only so far.
+  and the orange background filling the badge window at the wrong roster position (rejected by size). 4:3 stretched: see
+  "4:3 stretched top band".
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
   only: ranked (RANKED, and RANKED - DROPZONE read as one word since 17 Nov 2026), wildcard, pubs (the word TRIOS
@@ -360,7 +447,22 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
 - **Squads left**: `pcs_hud.SquadsLeft` reads the number in front of "SQUADS LEFT" (top right) once a second,
   digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
   time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close
-  to the placement. 16:9 only.
+  to the placement. 4:3 stretched: `SquadsLeft43` (see "4:3 stretched top band").
+- **4:3 stretched top band** (19 Nov 2026): on a 4:3 stretched recording (1440 x 1080 stretched to 16:9) the legend
+  select screen, loading banner, playlist emblem, squads counter and own stats strip are read on the scanner's remapped
+  top (`view_top`: rows of the top band x 4/3, same as the ring clock and kill feed). The game draws that HUD at its
+  4:3 render size, so text is softer: `Legends43` (own name: little colour left, `MINE` 5), `Banner43` (white cut 190,
+  70 cells), `SquadsLeft43` (white cut 200; each digit must also be read the same by the grey own-stats test, font 'B'),
+  `OwnStats43` (lower ink cut, plate rows further out, the table's shapes softened (`_soften`), the damage and knocks
+  icons joined from their pieces; `read` also gives `_seen` = numbers whose place was found: a game total is refused
+  when its number was seen but not read twice after its last read). Layout known (`mode`, or votes for stretched) =
+  stretched view only; while nothing is known in a chunk (votes tied) both views are read and the select read whose
+  named slots score higher wins (the 16:9 reader "reads" a stretched roster with slots misplaced); a stretched banner
+  read must name its mode or map then. 16:9 recordings: identical scans (4 recordings, 18 games, every field of
+  scan.json and feed.json). Checked on synthetic stretched copies only (`tools/stretch43.py`; no real 4:3 recording
+  on the coach's PC): per keyframe never a wrong number for own stats (2 recordings, ~2,400 keyframes), squads 1 wrong
+  read (a higher count, ignored by the timeline). Not done: 16:10 (1728 x 1080) stretched, the RP panel / RP lines,
+  minimap, squad cards, bars and heals (bottom band) on stretched recordings.
 - **Own stats**: `pcs_hud.OwnStats` reads the recording player's kills, assists, knocks and damage from the strip under
   the squads counter. Nothing there is at a fixed place (plates come and go, the group shifts left as numbers grow,
   pubs has no knocks plate and smaller kills / assists digits): the strip is cut into white shapes (brighter than the
@@ -529,6 +631,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   (17 Nov, 360 keyframes): 352 the same, the rest read vs not read on one keyframe, never two items. The review player draws
   heals (small teal dots), ult uses (blue diamonds) and tacticals (small grey dots) on the events lane; heals and ults
   also in Events ("Shield battery", "Ultimate used · Seer").
+- **Ammo and heals carried** (`pcs_ammo.py`, 16:9 only, ~1 ms per own-HUD keyframe). Weapon panel bottom right: the
+  magazine is two big digits (x 2306..2376, rows 1285..1326), the reserve three smaller ones under it (x 2305..2374,
+  rows 1337..1362). Both are padded with dim leading zeros ('04', '076'), so every digit has a fixed cell; a leading cell
+  too faint for a digit is read again at lower contrast and may only be '0'. Empty magazine = '00' with a red box. L-STAR
+  (∞ for the magazine) and modes with no reserve limit (∞ under the magazine: 7 Nov) read as nothing. The weapon in hand
+  (slot 1 / 2) = the white name under the panel. Heal slot left of the tactical: the selected item's count (white,
+  right-aligned at x 717, rows 1347..1364; columns searched below row 1352 left of x 702, where the icon reaches) and the
+  item by colour (blue = shield cell / battery, not told apart; white = syringe; red = med kit; orange = phoenix, unseen).
+  Only the selected kind is shown, so this is "heals of that kind", not all heals. Empty slot = its key hint box (x
+  673..701, rows 1380..1406) with no icon and no count, trusted only with the magazine read on the same frame (the death
+  box screen hides the slot). Digits: 12 x 18 grey cells against `pcs_banner.json` `ammo` (fonts M, R, H, 'X' = not a
+  digit; built from our dev frames; the heal font's 9 is its 6 turned half round: no 9 seen in dev). Per game:
+  `ammoTimeline` {cols [t, slot, mag, reserve], rows: a row per change}, `healTimeline` {cols [t, item, count]},
+  `ammoEvents` [{t, kind: lowAmmoFight, mag, reserve, magFull, fightEnd} | {t, kind: outOfHeals, end}], `ammoSummary`
+  {reads, healReads, fightsChecked, lowAmmoFights, outOfHeals, outOfHealsSeconds}, and each fight gets `ammoAtStart`.
+  Low-ammo fight = the last read within 20 s before the fight's start shows less than one full magazine in reserve
+  (magFull = the largest magazine read in that slot over the 3 min before) or nothing left. Out of heals = the empty slot
+  read twice in a row after the player had heals in that game. Spectating frames are left out. Review: amber / red marks
+  on the events lane, Events "Fight started low on ammo" / "Out of heals", game bar "Low-ammo fights a of b", "Out of
+  heals". Check: hand-read samples (`pcs-handoff\checkset\ammo\`; see HANDOFF 19 Nov).
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:
@@ -575,6 +697,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   run unchanged. Cache folder: `--cache` or `PCS_REGION_CACHE` (the coach's: `D:\tools\pcs-test-exe\region-cache`).
   It is game footage: never in the repo. 16:9 recordings only. Caches built before 16 Nov 2026 cut the counters box
   at x = 1990, which hides the skull of ranked kills: OwnStats leaves those kills unread on them (real frames are fine).
+- **Synthetic 4:3 stretched video** (`tools/stretch43.py video <16:9 rec> <out.mp4>`): each keyframe rebuilt as a 4:3
+  stretched player's recording shows its HUD (top band squashed to the top, bottom band to the bottom, middle centred,
+  then down to 1440 x 1080 and up again), all-intra H.264 with the same times and the game audio. HUD readers only:
+  the full map and drop screen are not rebuilt the way the game draws them. Game footage: never in the repo.
 - **Check set** (`tools/check_set.py score <file.json>`): truths read by eye at given times (squads left, kills,
   assists, knocks, damage, legends, mode, map), scored against the readers on the region cache: per field, truths /
   read / correct at the nearest keyframe and within 3 s, misses listed. Format in the module and

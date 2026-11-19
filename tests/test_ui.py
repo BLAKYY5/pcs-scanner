@@ -1,4 +1,4 @@
-"""Tests for the app's local server (what the window talks to).
+﻿"""Tests for the app's local server (what the window talks to).
 Run:  python tests/test_ui.py
 """
 import json
@@ -155,6 +155,11 @@ def test_recording_date_and_game_data_for_review():
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
             "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
             "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
+            "ammoEvents": [{"t": 700.0, "kind": "lowAmmoFight", "mag": 12, "reserve": 8, "magFull": 28, "fightEnd": 720.0},
+                           {"t": 800.0, "kind": "outOfHeals", "end": 850.0}],
+            "ammoSummary": {"reads": 300, "healReads": 290, "fightsChecked": 2, "lowAmmoFights": 1, "outOfHeals": 1,
+                            "outOfHealsSeconds": 50.0},
+            "ammoTimeline": {"cols": ["t", "slot", "mag", "reserve"], "rows": [[600.0, 1, 28, 200]]},
             "samples": [[550.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False]]}
     old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}              # a scan from before 1.10.8
     for v, games, rs in ((named, [game, old], "2026-11-07T21:42:00"), (by_scan, [old], "2026-11-03T22:17:00"), (bare, [old], None)):
@@ -191,6 +196,10 @@ def test_recording_date_and_game_data_for_review():
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
         assert g["heals"][0]["item"] == "battery" and g["abilities"][0]["kind"] == "ult" and o["heals"] is None
         assert "battery: 'Shield battery'" in js and "'Ultimate used'" in js and "laneOnly: true" in js and "if (e.laneOnly) return;" in js
+        # ammo (pcs_ammo): events and the summary reach the page (Events, events lane, game bar); the timelines stay in the scan
+        assert g["ammoEvents"][0]["kind"] == "lowAmmoFight" and g["ammoSummary"]["outOfHeals"] == 1 and "ammoTimeline" not in g
+        assert o["ammoEvents"] is None
+        assert "'Fight started low on ammo'" in js and "'Out of heals'" in js and "Low-ammo fights" in js
         assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
         assert o["drop"]["spots"] == []
         # a missing file: the player can say so (404), not "format not supported"
@@ -286,6 +295,8 @@ def test_recorder_settings_and_start_with_windows():
         code, state, _ = call(srv, "/api/settings", {"crash_reports": False})    # Settings > Team hub switch
         assert code == 200 and b.auto.s.crash_reports is False
         assert state["recorder"]["settings"]["crash_reports"] is False
+        code, state, _ = call(srv, "/api/settings", {"server_scan": True})      # Settings > Team hub: scan on the server
+        assert code == 200 and b.auto.s.server_scan is True and state["recorder"]["settings"]["server_scan"] is True
         srv.stop()
     finally:
         st.save = st_save
@@ -388,10 +399,16 @@ def test_scan_queue_waits_for_apex():
     real_running, real_proc = rcore.apex_running, runtime.scan_process
     rcore.apex_running = lambda: apex[0]
     runtime.scan_process = lambda v, out: (started.append(v), P())[1]
-    b.auto = None
     sent = []
-    core_upload = core.drive_upload_quiet
-    core.drive_upload_quiet = lambda paths: sent.append(paths) or True
+
+    class Sender:                                            # the recorder's Sender, without a hub
+        @staticmethod
+        def upload(files):
+            sent.append(files)
+            raise rcore.NoHub()
+    (TMP / "queue-recs").mkdir(exist_ok=True)
+    b.auto = _Auto(str(TMP / "queue-recs"))
+    b.auto.sender = Sender()
     try:
         assert b.queue_scans([vid]) == 1
         assert b.queue_scans([vid]) == 0                     # already queued
@@ -403,9 +420,14 @@ def test_scan_queue_waits_for_apex():
                 break
             time.sleep(0.25)
         assert started == [str(VIDEO)] and sent, (started, sent)
-        assert any("done, sent to Google Drive" in m["text"] for m in b.messages), list(b.messages)
+        for _ in range(20):
+            if any("Not sent: no team hub yet" in m["text"] for m in b.messages):
+                break
+            time.sleep(0.1)
+        assert any("Not sent: no team hub yet" in m["text"] for m in b.messages), list(b.messages)
     finally:
-        rcore.apex_running, runtime.scan_process, core.drive_upload_quiet = real_running, real_proc, core_upload
+        rcore.apex_running, runtime.scan_process = real_running, real_proc
+        b.auto = None
 
 
 def test_scan_by_hand_stops_when_apex_starts():
@@ -557,53 +579,27 @@ def test_coach_role():
         _backup_done(srv, fake)
 
 
-def test_coach_email_from_settings():
-    """The scans folder on Drive is shared with the coach's address the player typed in Settings, once per address;
-    without one nothing is shared."""
+def test_coach_email_field_removed():
+    """The Settings field "Coach's Google email" is gone (the coach role comes from the hub key): the page has no
+    field, the state no coachEmail, an old saved value is kept but never read, an old page sending it is ignored."""
     b = pcs_server.Backend()
     srv = pcs_server.Server(b)
     srv.start()
-    calls = {"share": [], "folders": []}
-
-    class Svc:
-        def files(self):
-            class F:
-                def list(self, **kw):
-                    return _X({"files": [{"id": f} for f in calls["folders"]]})
-
-                def create(self, body, fields):
-                    calls["folders"].append("F1")
-                    return _X({"id": "F1"})
-            return F()
-
-        def permissions(self):
-            class P:
-                def create(self, fileId, sendNotificationEmail, body):
-                    calls["share"].append((fileId, body["emailAddress"]))
-                    return _X({})
-            return P()
-
-    class _X:
-        def __init__(self, v):
-            self.v = v
-
-        def execute(self):
-            return self.v
     try:
-        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
-        assert core.scans_folder(Svc()) == "F1" and calls["share"] == []          # no address: not shared
-        code, r, _ = call(srv, "/api/settings", {"coach_email": "not an address"})
-        assert code == 500 and "address" in r["error"]
-        code, st, _ = call(srv, "/api/settings", {"coach_email": " coach@example.com "})
-        assert code == 200 and st["coachEmail"] == "coach@example.com"
-        assert core.scans_folder(Svc()) == "F1" and calls["share"] == [("F1", "coach@example.com")]
-        core.scans_folder(Svc())
-        assert len(calls["share"]) == 1                                           # once per address
-        call(srv, "/api/settings", {"coach_email": "new.coach@example.com"})
-        core.scans_folder(Svc())
-        assert calls["share"][-1] == ("F1", "new.coach@example.com") and len(calls["share"]) == 2
+        core.SETTINGS["coach_email"], core.SETTINGS["shared_with"] = "old.coach@example.com", "old.coach@example.com"
+        code, st, _ = call(srv, "/api/settings", {"coach_email": "new.coach@example.com", "player": "Tester"})
+        assert code == 200 and "coachEmail" not in st and st["player"] == "Tester"
+        assert core.SETTINGS["coach_email"] == "old.coach@example.com"                  # left alone, not read
+        assert call(srv, "/api/settings", {"coach_email": "not an address"})[0] == 200   # no check: ignored
+        root = Path(__file__).resolve().parent.parent
+        js = (root / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        assert "coach_email" not in js and "coachEmail" not in js and "Coach's Google email" not in js
+        for name in ("coach_email", "share_folder", "scans_folder", "drive_upload_quiet", "drive_service"):
+            assert not hasattr(core, name), name
+        for f in ("pcs_server.py", "pcs_app.py", "pcs_core.py"):
+            assert "shared_with" not in (root / "app" / f).read_text(encoding="utf-8"), f
     finally:
-        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None); core.SETTINGS["player"] = ""
         core.save_settings()
         srv.stop()
 
@@ -627,21 +623,25 @@ def test_no_personal_email_in_app():
     assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
-def test_drive_gets_results_only():
-    """Google Drive gets the small result files only, never a mic track or a log (PRIVACY.md says so)."""
-    sent, saved = [], (core.drive_service, core.scans_folder, core.upload)
+def test_no_google_drive_results():
+    """Results never go to Google Drive any more: no Drive sign-in route, no Drive upload, no "google" (Drive) state;
+    PRIVACY.md says Drive is not used and the mic goes to the hub only."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
     try:
-        core.drive_service = lambda interactive=True: object()
-        core.scans_folder = lambda svc: "folder"
-        core.upload = lambda svc, folder, p, log: sent.append(os.path.basename(p))
-        assert core.drive_upload_quiet(["a/x.scan.json", "a/x.feed.json", "a/x.mic.m4a", "a/x.log", "a/x.mp4"])
+        code, st, _ = call(srv, "/api/state")
+        assert code == 200 and "google" not in st
+        assert call(srv, "/api/signin", {})[0] == 404
     finally:
-        core.drive_service, core.scans_folder, core.upload = saved
-    assert sent == ["x.scan.json", "x.feed.json"], sent
+        srv.stop()
     root = Path(__file__).resolve().parent.parent
+    for f in ("pcs_core.py", "pcs_server.py", "pcs_app.py", "pcs_recorder/runtime.py", "pcs_recorder/core.py"):
+        text = (root / "app" / f).read_text(encoding="utf-8")
+        assert "auth/drive" not in text and "'drive', 'v3'" not in text and "drive_upload" not in text, f
+        assert "PCS Scans" not in text and "google_token.json" not in text, f
     privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
-    assert "never your microphone track" in privacy and "never to Google Drive" in privacy
-
+    assert "not used any more" in privacy and "never to Google Drive" in privacy
 
 def test_team_link_weapon_icons():
     """The weapon icons come from the Google Drive link the player pastes in Settings: only Drive links are taken,
@@ -708,7 +708,7 @@ def test_update_finisher():
         core.finish_update(str(cur), "999999")             # that process doesn't exist: no waiting
     finally:
         sys.executable, core.spawn_detached = real_exe, real_spawn
-    # started by an older version (no --show) or from the corner message: back in the tray, saying it updated
+    # Update pressed in the corner message or the tray (no --show): back in the tray, saying it updated
     assert cur.read_bytes() == b"MZ new version" and started == [[str(cur), "--background", "--updated"]]
     assert "copied, starting the new version (tray)" in Path(core.UPDATE_LOG).read_text()
     # the player pressed Update in the open window: the window comes back
@@ -719,7 +719,7 @@ def test_update_finisher():
     finally:
         sys.executable, core.spawn_detached = real_exe, real_spawn
     assert started == [[str(cur)]]
-    # copy failed: the old version is started as before, with its window (it doesn't know --updated)
+    # copy failed: the old version is started again, with its window (it wasn't updated)
     assert core.relaunch_args(str(cur), False, False) == [str(cur)]
 
 
@@ -890,6 +890,40 @@ def test_update_relaunch_arguments():
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
     assert "if background and not updated and not" in src and "'--updated' in sys.argv" in src
     assert "show='--show' in sys.argv" in src
+    # installed versions (1.10.12+) update to a new release with this same protocol: one .exe per release
+    wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    # the release file is the installer (one .exe, same name); old onefile apps run it with the command line above
+    assert "files: dist/setup/PCS-Scanner.exe" in wf and "i = sys.argv.index('--finish-update')" in src
+    assert "if \"--finish-update\" in args:" in (Path(__file__).resolve().parent.parent / "app" / "pcs_setup.py").read_text(encoding="utf-8")
+    # installed as a folder: the same command, staged next to the launcher (the player's file), CUR = the launcher
+    import pcs_install
+    launcher = TMP / "inst-desk" / "PCS-Scanner.exe"
+    launcher.parent.mkdir(exist_ok=True)
+    spawned.clear()
+    saved = (pcs_install.is_installed_app, os.environ.get(pcs_install.LAUNCHER_ENV), sys.executable, core.spawn_detached,
+             core.download, getattr(sys, "frozen", None), dict(core.BUILD))
+    pcs_install.is_installed_app = lambda: True
+    os.environ[pcs_install.LAUNCHER_ENV] = str(launcher)
+    sys.executable, core.spawn_detached, sys.frozen = str(TMP / "app" / "dev-1" / "PCS-Scanner.exe"), spawned.append, True
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    core.download = lambda url, p, **k: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
+    try:
+        assert core.install_update(url, lambda m: None, 12, show=False)
+    finally:
+        pcs_install.is_installed_app = saved[0]
+        if saved[1] is None:
+            os.environ.pop(pcs_install.LAUNCHER_ENV, None)
+        else:
+            os.environ[pcs_install.LAUNCHER_ENV] = saved[1]
+        sys.executable, core.spawn_detached, core.download = saved[2:5]
+        core.BUILD.clear()
+        core.BUILD.update(saved[6])
+        if saved[5] is None:
+            del sys.frozen
+        else:
+            sys.frozen = saved[5]
+    staged = str(launcher.parent / "PCS-Scanner.update.exe")
+    assert spawned == [[staged, "--finish-update", str(launcher), str(os.getpid())]], spawned
 
 
 def test_update_download_checked():
@@ -987,7 +1021,7 @@ def test_sign_in_tokens_encrypted():
     version is encrypted the first time it is read, and an unreadable file means "sign in again"."""
     f = TMP / "appdata" / "test_token.json"
     info = {"token": "at-123", "refresh_token": "rt-secret-456", "client_id": "cid", "client_secret": "cs",
-            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.SCOPES}
+            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.YT_SCOPES}
     core.write_token(str(f), json.dumps(info))
     assert core.read_token(str(f)) == info
     if os.name == "nt":
@@ -999,17 +1033,17 @@ def test_sign_in_tokens_encrypted():
         assert b"rt-secret-456" not in f.read_bytes()
     assert core.read_token(str(f)) == info
     # google-auth reads it back
-    creds = core._saved_creds(str(f), core.SCOPES)
+    creds = core._saved_creds(str(f), core.YT_SCOPES)
     assert creds is not None and creds.refresh_token == "rt-secret-456"
     # unreadable (another user's encryption, damaged): no sign-in, no crash
     f.write_text(json.dumps({"dpapi": "AAAA"}))
-    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.SCOPES) is None
+    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.YT_SCOPES) is None
     f.write_text("not json")
     assert core.read_token(str(f)) is None
     assert core.read_token(str(TMP / "appdata" / "missing_token.json")) is None
     # the sign-in code writes through write_token, never in clear
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
-    assert "write_token(TOKEN_F, creds.to_json())" in src and "write_token(YT_TOKEN_F, creds.to_json())" in src
+    assert "write_token(YT_TOKEN_F, creds.to_json())" in src
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
@@ -1941,15 +1975,16 @@ def test_tailscale_state():
 
 def test_setup_card_page():
     """Home's "Get set up" card: name, the choices (auto-record, mic sharing, transcripts: one screen, one line each),
-    hub, Google; the join call; the choices go through /api/setup/choice. Done once both questions are answered."""
+    hub; the join call; the choices go through /api/setup/choice. Done once both questions are answered."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
     order = [setup.index(t) for t in ("Your EEC name", "Your choices", "Record Apex by itself",
-                                      "Share mic tracks with my team", "Comms transcripts", "Join the team hub",
-                                      "Google Drive")]
+                                      "Share mic tracks with my team", "Comms transcripts", "Join the team hub")]
     assert order == sorted(order), order
     assert "/api/hub/join" in js and "/api/setup/choice" in js
-    assert "Only if your team agreed that comms are recorded" in setup and "Coming later" in setup
+    assert "Only if your team agreed that comms are recorded" in setup and "TRANSCRIPT_HINT" in setup
+    hint = js[js.index("const TRANSCRIPT_HINT"):js.index("function transcriptState")]
+    assert "own mic" in hint and "Coming later" not in js
     done = js[js.index("function setupDone"):js.index("function choiceHTML")]
     assert "choicesDone(st)" in done and "st.rec" not in done           # auto-record off is a valid answer
     b = pcs_server.Backend(_Auto(str(TMP / "setuprecs")))
@@ -1971,8 +2006,7 @@ def test_hub_uploads_refused_key_and_old_hub():
         f.write_text("{}")
     s = _S(str(folder))
     s.hub_url, s.player = fake.url, "Tester"
-    drive = {"ok": False}
-    sender = runtime.Sender(s, lambda paths: drive["ok"])
+    sender = runtime.Sender(s)
     try:
         hub.set_key(GOOD_KEY)
         where = sender.upload(files)
@@ -1994,17 +2028,6 @@ def test_hub_uploads_refused_key_and_old_hub():
             except ConnectionError as e:
                 assert "refused your key" in str(e) and BAD_KEY not in str(e)
         assert len([1 for _, p, a in fake.seen if a == "Bearer " + BAD_KEY]) == 1          # tried once only
-        # on the hub, Drive is never used, even signed in and with the hub refusing (leaving-Drive plan step 5)
-        drive["ok"], drive_calls = True, []
-        sender.drive_upload = lambda paths: drive_calls.append(paths) or True
-        try:
-            sender.upload(files)
-            raise AssertionError("results went somewhere while the hub refused the key")
-        except ConnectionError as e:
-            assert "refused your key" in str(e)
-        assert drive_calls == []
-        sender.drive_upload = lambda paths: drive["ok"]
-        drive["ok"] = False
         hub.set_key(GOOD_KEY)                                                            # new key: sent again
         assert sender.upload(files) == ["the team hub"]
         # an old hub: same upload, no import answer
@@ -2017,32 +2040,41 @@ def test_hub_uploads_refused_key_and_old_hub():
                 assert where == ["the team hub"] and where.hub_note == "Sent to hub"
         finally:
             old.stop()
-        # no hub set: nothing goes to a hub
+        # no hub set: nothing goes anywhere, the results stay on this PC (no Google Drive any more)
         s.hub_url = ""
         n = len(fake.seen)
-        drive["ok"] = True
-        assert sender.upload(files) == ["Google Drive"] and len(fake.seen) == n
+        from pcs_recorder.core import NoHub
+        try:
+            sender.upload(files)
+            raise AssertionError("results sent without a hub")
+        except NoHub as e:
+            assert "No team hub yet" in str(e)
+        assert len(fake.seen) == n
     finally:
         fake.stop()
         _fresh_hub()
 
 
 def test_hub_only_results_page():
-    """On the hub the page drops Google Drive (leaving-Drive plan step 5): no Drive step in Get set up, the Home tile
-    says the results go to the team hub, Settings hides the Drive sign-in and the coach's address, and saving works
-    without those fields."""
+    """No Google Drive on the page any more: Get set up has three steps (name, choices, hub) and is done only with
+    the hub; Home and Settings show "Results: Team hub", or "No team hub yet" with the results kept on this PC; no
+    Google (Drive) sign-in button or coach's address; saving works without those fields."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-    assert "function driveOff()" in js and "r.settings.hub_url" in js[js.index("function driveOff()"):][:200]
+    assert "function hubSet()" in js and "r.settings.hub_url" in js[js.index("function hubSet()"):][:200]
+    assert "driveOff" not in js and "S.google" not in js and "/api/signin" not in js and "su-google" not in js
+    assert "function setupDone(st) { return st.name && st.hub && choicesDone(st); }" in js
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
-    assert "const drive = !st.hub && !driveOff(), total = drive ? 4 : 3" in setup and "${n} of ${total} done" in setup and "${drive ? li(st.google" in setup
+    assert "const total = 3;" in setup and "${n} of ${total} done" in setup and "Google Drive" not in setup
+    assert "Until you join, your results stay on this PC." in setup
     home = js[js.index("function renderHome"):js.index("function renderHome") + 6000]
-    assert "driveOff() ?" in home and "Sent to the team hub" in home
+    assert "hubSet() ?" in home and "Sent to the team hub" in home and "No team hub yet" in home
+    assert "Kept on this PC until you join the hub" in home
     sett = js[js.index("function renderSettings"):js.index("function settingsBody")]
-    assert "${driveOff() ?" in sett and "Your results go to the team hub.</small>" in sett
-    assert "const fsi = $('#f-signin'); if (fsi)" in sett
+    assert "${hubSet() ?" in sett and "Your results go to the team hub.</small>" in sett
+    assert "Your results stay on this PC until you join your team's hub" in sett and "f-signin" not in sett
     body = js[js.index("function settingsBody"):js.index("function settingsBody") + 600]
-    assert "for (const k of ['team_link', 'coach_email']) { const el = $('#f-' + k); if (el)" in body
-    assert "$('#f-team_link').value" not in js and "$('#f-coach_email').value" not in js
+    assert "for (const k of ['team_link']) { const el = $('#f-' + k); if (el)" in body
+    assert "$('#f-team_link').value" not in js
 
 
 def test_team_window_signed_in():
@@ -2100,6 +2132,7 @@ class NotesHub:
         from urllib.parse import parse_qs, urlsplit
         import threading
         self.notes, self.seen, self.calls = {}, {}, []
+        self.replies, self.with_replies = {}, True        # replies under notes (hub 0.6.x); False = an older hub
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -2130,11 +2163,33 @@ class NotesHub:
                     if not coach and want != me[0]:
                         return self._send(403, {"detail": "no", "error": "forbidden"})
                     known = q.get("recording") == hub.REC and want == "Moe"
-                    notes = [dict(x, seen=me[0] in hub.seen.get(x["id"], []), **({"seenBy": {s: "t" for s in hub.seen.get(x["id"], [])}} if coach else {}))
+                    notes = [dict(x, seen=me[0] in hub.seen.get(x["id"], []), **({"seenBy": {s: "t" for s in hub.seen.get(x["id"], [])}} if coach else {}),
+                                  **({"replies": hub.replies.get(x["id"], [])} if hub.with_replies else {}))
                              for x in hub.notes.values() if known]
                     return self._send(200, {"recording": q.get("recording"), "player": want, "known": known,
                                             "players": ["Moe"] if coach and known else [],
                                             "me": {"name": me[0], "role": me[1]}, "notes": notes})
+                if "/replies" in p and hub.with_replies:
+                    parts = p.split("/")                 # /api/annotations/<id>/replies[/<rid>]
+                    nid = parts[3]
+                    if nid not in hub.notes:
+                        return self._send(404, {"detail": "No such note.", "error": "not_found"})
+                    rs = hub.replies.setdefault(nid, [])
+                    if self.command == "DELETE":
+                        r = next((x for x in rs if x["id"] == parts[5]), None)
+                        if not r:
+                            return self._send(404, {"detail": "No such reply.", "error": "not_found"})
+                        if not coach and r["by"] != me[0]:
+                            return self._send(403, {"detail": "Only your own replies.", "error": "forbidden"})
+                        rs.remove(r)
+                        return self._send(200, {"deleted": True, "replies": rs})
+                    kind = "ack" if body.get("ack") else "text"
+                    r = next((x for x in rs if kind == "ack" and x["kind"] == "ack" and x["by"] == me[0]), None)
+                    if not r:
+                        r = {"id": f"re-{sum(map(len, hub.replies.values())) + 1}", "note": nid, "by": me[0],
+                             "role": me[1], "kind": kind, "text": body.get("text", ""), "at": "2026-11-19T20:00:00Z"}
+                        rs.append(r)
+                    return self._send(200, {"reply": r, "replies": rs})
                 if p.endswith("/seen"):
                     hub.seen.setdefault(p.split("/")[3], []).append(me[0])
                     return self._send(200, {"seen": True})
@@ -2247,6 +2302,78 @@ def test_coach_notes():
         core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if not p.startswith(str(folder))]
 
 
+def test_note_replies():
+    """Under a note: the player sends "Got it" (once) or a short reply, the coach answers back; the replies come
+    with the notes and stay readable offline; a hub from before replies: no reply box (no `replies` field)."""
+    hub = _fresh_hub()
+    fake = NotesHub()
+    rec = TMP / "notes3" / (NotesHub.REC + ".mp4")
+    rec.parent.mkdir(exist_ok=True)
+    rec.write_bytes(b"x")
+    auto = _Auto(str(TMP / "notesrecs3"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        hub.set_key(GOOD_KEY)
+        nid = b.note_change(vid, "save", {"player": "Moe", "note": {"t": 3, "text": "Rotate earlier"}})["notes"][0]["id"]
+        hub.set_key(PLAYER_KEY)
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["notes"][0]["replies"] == []
+        code, r, _ = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})
+        assert code == 200 and [(x["kind"], x["by"]) for x in r["notes"][0]["replies"]] == [("ack", "Moe")], r
+        assert fake.calls[-2][:4] == ("POST", f"/api/annotations/{nid}/replies", {}, {"ack": True})
+        call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})          # "Got it" twice: one
+        r = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "text": "  On it  "})[1]
+        assert [x["text"] for x in r["notes"][0]["replies"]] == ["", "On it"]
+        assert fake.calls[-2][3] == {"text": "On it"}
+        # empty, too long, a bad id: refused before anything reaches the hub
+        n = len(fake.calls)
+        for bad in ({"note_id": nid, "text": "  "}, {"note_id": nid, "text": "x" * 501}, {"note_id": "../x", "ack": True}):
+            assert call(srv, "/api/notes/reply", {"id": vid, **bad})[0] == 500
+        assert len(fake.calls) == n
+        # the coach answers back; the player removes his text reply
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/notes/reply", {"id": vid, "player": "Moe", "note_id": nid, "text": "Good"})[1]
+        assert [(x["by"], x["role"]) for x in r["notes"][0]["replies"]][-1] == ("Blakey", "coach")
+        hub.set_key(PLAYER_KEY)
+        rid = r["notes"][0]["replies"][1]["id"]
+        r = call(srv, "/api/notes/unreply", {"id": vid, "note_id": nid, "reply_id": rid})[1]
+        assert [x["text"] for x in r["notes"][0]["replies"]] == ["", "Good"]
+        assert call(srv, "/api/notes/unreply", {"id": vid, "note_id": nid, "reply_id": r["notes"][0]["replies"][1]["id"]})[0] == 500
+        # offline: the replies saved with the notes still show; sending one says why it failed
+        fake.stop()
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["offline"] and [x["text"] for x in r["notes"][0]["replies"]] == ["", "Good"]
+        code, r, _ = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})
+        assert code == 500 and r["error"]
+    finally:
+        srv.stop()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+    # a hub from before replies: notes come without the field, the page then shows no reply box
+    from pcs_recorder import notes
+    assert "replies" not in notes.clean_note({"id": "an-1", "t": 1})
+    n = notes.clean_note({"id": "an-1", "t": 1, "replies": [{"id": "re-1", "by": "<b>Moe</b>", "role": "admin",
+                                                              "kind": "x", "text": 5, "at": None, "junk": 1}, "bad"]})
+    assert n["replies"] == [{"id": "re-1", "by": "<b>Moe</b>", "role": "player", "kind": "text", "text": "5", "at": ""}]
+    assert notes.clean_note({"id": "an-1", "replies": "nope"})["replies"] == []
+
+
+def test_review_reply_box_in_page():
+    """The review player draws replies, a "Got it" button and a reply box under each note (only when the hub sends
+    replies), and a reply draft survives the notes list being drawn again."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for s in ("function repliesHTML", 'data-a="ack"', "'/api/notes/reply'", "'/api/notes/unreply'",
+              "if (!Array.isArray(n.replies)) return ''", "replyDrafts[inp.dataset.reply]", "Replies need the team hub."):
+        assert s in js, s
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    assert ".nreply{" in css and ".nreplies{" in css
+
+
 def test_coach_notes_delete():
     hub = _fresh_hub()
     fake = NotesHub()
@@ -2307,7 +2434,7 @@ def test_hub_retry_with_real_hub_requests():
     class UI:
         def notify(self, t, m, sticky=False, action=None):
             notes.append((t, m))
-    sender = runtime.Sender(s, lambda paths: True)                                      # Drive works
+    sender = runtime.Sender(s)
     rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False)
     rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
 
@@ -2321,7 +2448,7 @@ def test_hub_retry_with_real_hub_requests():
     try:
         hub.set_key(BAD_KEY)
         rec._retry_uploads()
-        assert rec.idx["k"].status == "scanned" and "not sent yet" in rec.idx["k"].note    # waits, never to Drive
+        assert rec.idx["k"].status == "scanned" and "not sent yet" in rec.idx["k"].note    # waits on this PC
         # what an older version left: results on Drive only, hub pending
         rec.idx["k"].status, rec.idx["k"].note = "uploaded", ""
         rec.sent["k"] = {"hub": "pending", "why": "Hub not reachable", "drive": "sent"}
@@ -2366,6 +2493,7 @@ class SessionHub:
         self.calls, self.ws_auth, self.socks, self.reports = [], [], [], []
         self.audio_gets, self.uploads, self.upload_code = [], [], 200
         self.ahead, self.state = clock_ahead, None
+        self.has_plans, self.extras_more = True, {}
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -2426,14 +2554,25 @@ class SessionHub:
                 if p == "/api/sessions" and self.command == "GET":
                     return self._send(200, {"sessions": [{"id": "s-1", "coach": "Blakey", "game": {"map": "SP"},
                                                           "members": ["Blakey"], "canJoin": True}] if hub.state else []})
+                if p == "/api/coach/plans":
+                    if not hub.has_plans:
+                        return self._send(404, {"detail": "Not Found"})
+                    if not coach:
+                        return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
+                    return self._send(200, {"plans": [{"id": "pl-1", "title": "Tuesday", "moments": 3, "games": 2},
+                                                      {"id": "pl-2", "title": "Empty", "moments": 0, "games": 0}, "junk"]})
                 if p == "/api/videos":
                     return self._send(200, {"games": [{"gameKey": "g-1", "map": "SP", "players": ["Moe"], "videos": ["Moe"]}]})
                 if p == "/api/sessions" and self.command == "POST":
                     if not coach:
                         return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
-                    hub.state = {"id": "s-1", "coach": "Blakey", "gameKey": body["gameKey"], "povs": [], "focus": "Moe",
-                                 "playing": False, "t": 0, "at": 0, "speed": 1, "strokes": [], "members": {}, "rev": 0,
-                                 "range": [-150, 600]}
+                    hub.state = {"id": "s-1", "coach": "Blakey", "gameKey": body["gameKey"] or "g-1", "povs": [],
+                                 "focus": "Moe", "playing": False, "t": 0, "at": 0, "speed": 1, "strokes": [], "members": {},
+                                 "rev": 0, "range": [-150, 600]}
+                    if body.get("plan"):
+                        hub.state["plan"] = {"id": body["plan"], "title": "Tuesday", "at": 0, "covered": {"m-1": 1},
+                                             "items": [{"id": "m-1", "gameKey": "g-1", "t": 45, "note": "drop"},
+                                                       {"id": "m-2", "gameKey": "g-2", "t": 300, "note": "fight"}]}
                     return self._send(200, hub.state)
                 if p == "/api/sessions/s-1" and self.command == "GET":
                     return self._send(200, hub.state)
@@ -2447,7 +2586,8 @@ class SessionHub:
                     return self._send(200, {"recording": "x", "player": me[0], "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "bookmarks": [{"t": 75.0, "text": "Rotate here"}],
                          "talk": [{"id": "ta-0123456789ab", "track": "mic", "segments": [
-                             {"a0": 0, "a1": 10, "g0": 70, "g1": 80, "speed": 1, "gameKey": "g-1"}]}]}]})
+                             {"a0": 0, "a1": 10, "g0": 70, "g1": 80, "speed": 1, "gameKey": "g-1"}]}],
+                         **hub.extras_more}]})
                 if p.startswith("/api/session-audio/"):
                     data = b"TALK" * 1000
                     hub.audio_gets.append(p)
@@ -2664,6 +2804,91 @@ def test_watch_together_never_during_a_game():
     js = (Path(pcs_server.WEB) / "session.js").read_text(encoding="utf-8")
     assert "apex: 'Apex started, so you left the session. The others keep watching.'" in js
     assert "stopPlayers();" in js
+
+
+def test_watch_session_plan_through_the_app():
+    """Session plans: the coach's list (hub with plans; none from an older hub), a session started on a plan,
+    Next / Previous as control action `item`, another plan picked; afterwards the review player gets each session's
+    summary and the plan's moments, numbers checked."""
+    hub = _fresh_hub()
+    fake = SessionHub()
+    folder = TMP / "planrx"
+    folder.mkdir(exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    rec.write_bytes(b"x" * 100)
+    auto = _Auto(str(TMP / "planrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    srv = pcs_server.Server(b)
+    srv.start()
+
+    def wait_for(cond, s=5):
+        end = time.time() + s
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    try:
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert [(p["id"], p["moments"]) for p in r["plans"]] == [("pl-1", 3), ("pl-2", 0)]
+        code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "", "plan": "pl-1"})
+        assert code == 200 and snap["state"]["plan"]["at"] == 0 and snap["state"]["gameKey"] == "g-1"
+        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
+        assert wait_for(lambda: b.watch.connected)
+        call(srv, "/api/watch/control", {"action": "item", "index": 1, "junk": 2})
+        assert fake.calls[-1][1:3] == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
+        call(srv, "/api/watch/control", {"action": "plan", "plan": "pl-1"})
+        assert fake.calls[-1][2] == {"action": "plan", "plan": "pl-1"}
+        call(srv, "/api/watch/end", {})
+        # a plain start sends no plan (as before)
+        call(srv, "/api/watch/start", {"gameKey": "g-2"})
+        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "g-2"})
+        call(srv, "/api/watch/end", {})
+        # a hub without plans: the list still works, with none
+        fake.has_plans = False
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert r["available"] and r["plans"] == [] and r["games"]
+        # a player never asks for plans
+        hub.set_key(PLAYER_KEY)
+        n = len(fake.calls)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert "plans" not in r and not any(c[1] == "/api/coach/plans" for c in fake.calls[n:])
+        # the review player: session summaries and the plan's moments of this recording's games
+        fake.extras_more = {
+            "sessions": [{"id": "s-9", "started": 1795000000.5, "length": 1830.4,
+                          "attendance": [{"name": "Blakey", "seconds": 1830}, {"name": "Moe<b>", "seconds": "x"}],
+                          "bookmarks": 2, "flags": 1, "notes": 1, "drawings": 3, "talk": 0,
+                          "plan": {"title": "Tuesday", "total": 3, "covered": 2, "skipped": 1}}, "junk"],
+            "plan": [{"t": 45, "note": "drop", "covered": True}, {"t": "x", "note": "bad time"},
+                     {"t": 300, "note": "fight", "covered": False, "player": "Moe"}]}
+        g = call(srv, f"/api/library/{vid}/extras")[1]["games"][0]
+        s0 = g["sessions"][0]
+        assert len(g["sessions"]) == 1 and s0["started"] == 1795000000.5 and s0["length"] == 1830
+        assert s0["attendance"] == [{"name": "Blakey", "seconds": 1830}, {"name": "Moe<b>", "seconds": None}]
+        assert s0["plan"] == {"title": "Tuesday", "total": 3, "covered": 2, "skipped": 1} and s0["drawings"] == 3
+        assert [(m["t"], m["note"], m["covered"]) for m in g["plan"]] == [(45.0, "drop", True), (300.0, "fight", False)]
+        # an older hub's extras (no sessions, no plan) still read
+        fake.extras_more = {}
+        g = call(srv, f"/api/library/{vid}/extras")[1]["games"][0]
+        assert g["sessions"] == [] and g["plan"] == [] and g["bookmarks"][0]["text"] == "Rotate here"
+    finally:
+        srv.stop()
+        fake.stop()
+        b.watch.leave()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+    web = Path(pcs_server.WEB)
+    js = (web / "session.js").read_text(encoding="utf-8")
+    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "Moment ${at + 1} of ${items.length}",
+                 "N / P = next / previous moment", "control('item', {index: i})", "Use a plan…"):
+        assert text in js, text
+    rx = (web / "review-extras.js").read_text(encoding="utf-8")
+    for text in ("Session plan", "planned moments", "skipped", "sessionLine"):
+        assert text in rx, text
 
 
 def test_watch_page_files():
@@ -3311,6 +3536,45 @@ def test_window_polls_only_when_seen():
     finally:
         page.close()
         srv.stop()
+
+
+def test_recording_check_on_home():
+    """Home → Recording check: in /api/state, Check again runs it (not during the encoder test), the page's words."""
+    from pcs_recorder import precheck as pc
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    s = st.Settings(folder=str(TMP / "recs"), encoder="av1_texture_amf", comms_consent=True).clamp()
+    c = pc.RecCheck(s, None, a.rec)
+    c.threaded = False
+    runs = []
+    c._run = lambda manual=False: (runs.append(manual), c._set({"apps": pc.apps_item([("Medal.exe", "")]),
+                                             "disk": pc.item("disk", "ok", "500 GB free")}),
+                      setattr(c, "running", False))
+    a.check = c
+    b = pcs_server.Backend(a)
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        assert code == 200 and state["recorder"]["check"] == {"running": False, "at": None, "items": [], "red": 0}
+        code, r, _ = call(srv, "/api/reccheck", {})
+        assert code == 200 and runs == [True] and r["check"]["red"] == 1, r         # Check again = manual
+        assert [i["id"] for i in r["check"]["items"]] == ["disk", "apps"]           # shown in a fixed order
+        apps = r["check"]["items"][1]
+        assert apps["state"] == "bad" and apps["label"] == "Other capture apps" and apps["fix"].startswith("Close Medal")
+        a._setting_up = True                                                        # encoder test running: refused
+        code, r, _ = call(srv, "/api/reccheck", {})
+        assert code == 500 and "set-up" in r["error"] and runs == [True]
+        a._setting_up = False
+        b2 = pcs_server.Backend(_Auto(str(TMP / "recs")))                         # no check (older stand-in): None
+        assert b2.rec_check() is None
+    finally:
+        srv.stop()
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for words in ("Recording check", "Check again", "How to fix: ", "/api/reccheck", "Ready to record", "say something"):
+        assert words in js, words
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    assert ".reccheck .checks" in css and "animation" not in css.split("/* recording check")[1]
 
 
 def run_all(tests):
@@ -4138,6 +4402,28 @@ def test_team_tracks_in_review_page():
     assert "pcs_recorder.teamtracks" in build
 
 
+def test_comms_in_review_page():
+    """The review player shows the player's own comms transcript: a lane under the timeline, a Comms tab with a word
+    filter, click = seek; the library item carries it; Settings says where it stands."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "laneC" in js and "function drawComms" in js and "seek(+el.dataset.t)" in js[js.index("function drawComms"):]
+    assert "transcriptState()" in js
+    srv_py = (Path(pcs_server.WEB).parent / "pcs_server.py").read_text(encoding="utf-8")
+    assert 'it["comms"] = comms.transcript_of' in srv_py and '"transcripts": self.comms.public()' in srv_py
+    build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms" in build and "pcs_transcribe" in build and "PCS-Transcripts.zip" in build
+    app_py = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms, pcs_transcribe" in app_py and "b.comms_tick()" in app_py
+    from pcs_recorder import comms
+    rec = TMP / "commsrev" / "Apex Legends_2026.11.19-21.00.mp4"
+    (rec.parent / (rec.stem + ".scan")).mkdir(parents=True, exist_ok=True)
+    comms.comms_path(rec).write_text(json.dumps({"kind": "comms", "speaker": "me", "language": "fr", "segments": [
+        {"start": 12.5, "end": 14, "text": "full", "speaker": "me"}, {"start": "bad", "text": "x"}]}), encoding="utf-8")
+    t = comms.transcript_of(rec)
+    assert t["segments"] == [{"start": 12.5, "end": 14, "text": "full", "speaker": "me"}] and t["language"] == "fr"
+    assert comms.transcript_of(rec.with_name("none.mp4")) is None
+
+
 # ------------------------------------------------------------------ public hub: uploads in parts, https, reachability
 class PartsHub:
     """A hub on localhost speaking the 0.6 uploads contract (`mode` "new") or a 0.5 hub without it ("old": 404 to
@@ -4518,7 +4804,7 @@ def test_hub_unreachable_told_once_in_activity():
 
         def activity(self, text):
             lines.append(text)
-    sender = runtime.Sender(s, lambda paths: True)
+    sender = runtime.Sender(s)
     clock = {"t": 1000.0}
     rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False, clock=lambda: clock["t"])
     rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
@@ -4549,6 +4835,177 @@ def test_hub_status_in_settings_page():
     fn = js[js.index("function hubStatusHTML"):js.index("function wireHubKey")]
     assert "h.reach" in fn and "re.state !== 'ok'" in fn
 
+
+
+# ------------------------------------------------------------------ clips for Discord (review player)
+class _ClipAuto:
+    """Just enough of the auto-recorder for the clip routes: settings, nothing recording."""
+
+    def __init__(self, folder, hub_url):
+        self.s = _S(str(folder))
+        self.s.hub_url = hub_url
+        self.s.encoder = "jim_nvenc"
+        self.s.share_tracks = self.s.comms_consent = self.s.mic_audio = self.s.send_mic = True
+        self.rec = _Rec()
+
+
+class _ClipTT:
+    """Teammates' tracks downloaded for the recording: Zed (scan 7, still shared) and Kai (scan 9, said no since)."""
+
+    def __init__(self, folder):
+        self.folder = folder
+        for i in ("7", "9"):
+            (folder / f"t{i}.mic.m4a").write_bytes(b"mic")
+
+    def for_recording(self, path):
+        return [{"id": "7", "player": "Zed", "parts": [{"start": 0, "end": None, "off": 1.0}]},
+                {"id": "9", "player": "Kai", "parts": [{"start": 0, "end": None, "off": 2.0}]}]
+
+    def file(self, path, sid):
+        f = self.folder / f"t{sid}.mic.m4a"
+        return f if f.is_file() else None
+
+
+def _clip_server(tmpname):
+    import subprocess
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        raise Skipped("no ffmpeg")
+    folder = TMP / tmpname
+    folder.mkdir(exist_ok=True)
+    v = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    tones = []
+    for f in (300, 500, 700):
+        tones += ["-f", "lavfi", "-i", f"sine=f={f}:d=600"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=10:d=600"]
+                   + tones + ["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-c:a", "aac", "-b:a", "16k", str(v)], check=True)
+    v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"], "events": []}))
+    fake = TeamHub(v.stem)
+    hubm = _fresh_hub()
+    hubm.set_key(GOOD_KEY)
+    _clip_server.internet_up = hubm.internet_up
+    hubm.internet_up = lambda: True                          # no name lookup of the outside world in tests
+    b = pcs_server.Backend(_ClipAuto(folder, fake.url))
+    b._clip_busy = lambda: b.busy_why                        # no real Apex look in tests
+    b.busy_why = None
+    b._teamtracks = _ClipTT(folder)
+    started = []
+
+    class FakeClipper:
+        made = set()
+
+        def start(self, spec):
+            started.append(spec)
+            return {"running": True, "step": "Starting"}
+
+        def state(self):
+            return {"running": False}
+
+        def stop(self):
+            started.append("stop")
+
+        own_clip = __import__("pcs_recorder.clips", fromlist=["Clipper"]).Clipper.own_clip
+        lock = threading.Lock()
+    b._clipper = FakeClipper()
+    srv = pcs_server.Server(b)
+    srv.start()
+    vid = next(x["id"] for x in b.library() if x["path"] == str(v))
+    return b, srv, fake, v, vid, started
+
+
+def test_clip_routes_and_privacy():
+    """Make clip: the recording's own tracks but never the voice-app track (teammates' voices without their own
+    consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
+    own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
+    b, srv, fake, v, vid, started = _clip_server("clipapi")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200, r
+        spec = started[-1]
+        assert spec["own"] == [0, 2] and spec["obs_encoder"] == "jim_nvenc" and spec["video"] == str(v)
+        assert [(Path(f).name, p) for f, _, p in spec["team"]] == [("t7.mic.m4a", "Zed")], spec["team"]
+        assert spec["leftOut"] == ["Kai's mic: not shared any more"], spec["leftOut"]
+        assert ("GET", "/api/team-tracks?recording=" + v.stem) in fake.calls
+        # the voice app's track: refused, nothing started
+        n = len(started)
+        code, r, _ = call(srv, "/api/clips/make", {**body, "tracks": [0, 1]})
+        assert code == 400 and "voice app" in r["error"] and len(started) == n, r
+        # own sharing off: no teammate tracks at all (no hub request needed)
+        b.auto.s.share_tracks = False
+        calls = len(fake.calls)
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and started[-1]["team"] == [] and len(fake.calls) == calls
+        assert all("your own mic sharing is off" in x for x in started[-1]["leftOut"])
+        b.auto.s.share_tracks = True
+        # hub out of reach: teammates left out, the clip still made
+        fake.stop()
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and started[-1]["team"] == [], r
+        assert all("could not confirm" in x for x in started[-1]["leftOut"]) and len(started[-1]["leftOut"]) == 2
+        # too long for Discord, too short, Apex running
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "end": 400})
+        assert code == 400 and "Too long for 10 MB" in r["error"], r
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "size": "full", "end": 400})
+        assert code == 200 and started[-1]["size"] == "full"
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "end": 10.5})
+        assert code == 400 and "at least 1 second" in r["error"]
+        b.busy_why = "Apex is running. Close Apex to make a clip"
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": []})
+        assert code == 400 and "Close Apex" in r["error"], r
+        b.busy_why = None
+        assert call(srv, "/api/clips/state")[1] == {"running": False}
+        assert call(srv, "/api/clips/stop", {})[0] == 200 and started[-1] == "stop"
+        # coach notes: the hub's (or cached) notes of the player asked for
+        b.notes = lambda i, p=None: {"notes": [{"t": 12, "dur": 5, "text": f"for {p}"}]}
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "notes": True, "player": "Moe"})
+        assert code == 200 and started[-1]["notes"] == [{"t": 12, "dur": 5, "text": "for Moe"}]
+    finally:
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_show_and_copy_only_own_clips():
+    """Show in folder / Copy file act only on a clip the app made in this run, never on any path the page sends."""
+    b, srv, fake, v, vid, started = _clip_server("clipshow")
+    shown, copied = [], []
+    b.reveal_file, b.copy_file = shown.append, copied.append
+    try:
+        clip = v.parent / "Clips" / "x clip.mp4"
+        clip.parent.mkdir(exist_ok=True)
+        clip.write_bytes(b"clip")
+        for what in ("show", "copy"):
+            assert call(srv, f"/api/clips/{what}", {"file": str(clip)})[0] == 404       # not made by the app
+            assert call(srv, f"/api/clips/{what}", {"file": str(v)})[0] == 404
+        b.clipper.made = {os.path.normcase(os.path.abspath(str(clip)))}
+        assert call(srv, "/api/clips/show", {"file": str(clip)})[0] == 200 and shown == [str(clip)]
+        assert call(srv, "/api/clips/copy", {"file": str(clip)})[0] == 200 and copied == [str(clip)]
+        clip.unlink()
+        assert call(srv, "/api/clips/copy", {"file": str(clip)})[0] == 404             # gone: nothing to copy
+    finally:
+        fake.stop()
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_in_review_page():
+    """The review player has the Clip bar; the page never offers the voice app's track and uses the server's
+    numbers for the 10 MB limit; the module is in the exe."""
+    from pcs_recorder import clips
+    web = Path(pcs_server.WEB)
+    js = (web / "clip.js").read_text(encoding="utf-8")
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert '<script src="clip.js"></script>' in html and 'href="clip.css"' in html
+    assert "clipSetup(d, v)" in (web / "app.js").read_text(encoding="utf-8")
+    assert "x.key !== 'discord'" in js and "/api/clips/make" in js and "'/api/clips/' + b.dataset.act" in js
+    assert 'data-act="show"' in js and 'data-act="copy"' in js
+    nums = dict(re.findall(r"(CLIP_TARGET|CLIP_MIN_KBPS|CLIP_AUDIO_KBPS) = (\d+)", js))
+    assert int(nums["CLIP_TARGET"]) == clips.DISCORD_TARGET and int(nums["CLIP_MIN_KBPS"]) == clips.MIN_VIDEO_KBPS
+    assert int(nums["CLIP_AUDIO_KBPS"]) == clips.audio_kbps(1, "discord")
+    assert "@keyframes" not in (web / "clip.css").read_text(encoding="utf-8")       # no endless animation
+    root = web.parent.parent
+    assert "pcs_recorder.clips" in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "import pcs_recorder.clips" in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
 
 if __name__ == "__main__":
     try:

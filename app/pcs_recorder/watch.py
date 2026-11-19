@@ -87,12 +87,31 @@ class Watch:
                "sessions": self._call("GET", "/api/sessions").get("sessions", []), "games": []}
         if role == "coach":
             out["games"] = self._call("GET", "/api/videos", timeout=10).get("games", [])
+            out["plans"] = self.plans()
         out["current"] = self.sid if not self.ended else None
         self._list = (self.clock(), out)
         return out
 
-    def start(self, game_key: str) -> dict:
-        st = self._call("POST", "/api/sessions", {"gameKey": str(game_key or "")})
+    def plans(self) -> list:
+        """Coach: his session plans (hub `/api/coach/plans`); a hub without them, or any trouble: none."""
+        try:
+            r = hub.request(self._url(), "GET", "/api/coach/plans", timeout=8)
+            if r.status_code != 200:
+                return []
+            rows = r.json().get("plans") or []
+        except Exception as e:
+            log.info("plans: %s", e)
+            return []
+        return [{"id": str(p.get("id") or ""), "title": str(p.get("title") or "")[:80],
+                 "moments": int(p.get("moments") or 0), "games": int(p.get("games") or 0), "updated": p.get("updated")}
+                for p in rows if isinstance(p, dict) and p.get("id")]
+
+    def start(self, game_key: str, plan: str | None = None) -> dict:
+        """A new session on a game, or on a session plan's first moment (the coach's plan; hub with plans)."""
+        body = {"gameKey": str(game_key or "")}
+        if plan:
+            body["plan"] = str(plan)[:40]
+        st = self._call("POST", "/api/sessions", body)
         self._attach(st)
         return self.snapshot()
 
@@ -102,7 +121,7 @@ class Watch:
         return self.snapshot()
 
     def control(self, body: dict) -> dict:
-        st = self._call("POST", f"/api/sessions/{self._need()}/control", _pick(body, ("action", "t", "speed", "player", "gameKey", "id")))
+        st = self._call("POST", f"/api/sessions/{self._need()}/control", _pick(body, ("action", "t", "speed", "player", "gameKey", "id", "index", "plan")))
         self._apply({"type": "state", "state": st})
         return self.snapshot()
 
@@ -197,7 +216,11 @@ class Watch:
                 continue
             games.append({**g, "jumpAt": num(g.get("jumpAt")),
                           "bookmarks": [{**b, "t": num(b.get("t"))} for b in g.get("bookmarks") or [] if isinstance(b, dict)],
-                          "talk": [t for t in g.get("talk") or [] if isinstance(t, dict)]})
+                          "talk": [t for t in g.get("talk") or [] if isinstance(t, dict)],
+                          "sessions": [_session_summary(x) for x in g.get("sessions") or [] if isinstance(x, dict)],
+                          "plan": [{"t": num(x.get("t"), None), "note": str(x.get("note") or "")[:200], "covered": bool(x.get("covered")),
+                                    "player": str(x.get("player") or "")[:40] or None}
+                                   for x in g.get("plan") or [] if isinstance(x, dict) and num(x.get("t"), None) is not None]})
         return {**d, "games": games, "available": True}
 
     def audio(self, aid: str) -> Path:
@@ -414,6 +437,29 @@ def sslopt() -> dict:
     except ImportError:                               # websocket-client then loads Windows' own list
         pass
     return opt
+
+
+def _session_summary(x: dict) -> dict:
+    """One Watch together session's summary (hub with plans) for the review player: numbers checked, names as text."""
+    from .notes import num
+
+    def n(v):
+        f = num(v, None)
+        return None if f is None else int(round(f))
+
+    def epoch(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        return f if 0 < f < 1e11 else None
+    p = x.get("plan") if isinstance(x.get("plan"), dict) else None
+    return {"id": str(x.get("id") or "")[:40], "started": epoch(x.get("started")), "length": n(x.get("length")),
+            "attendance": [{"name": str(a.get("name") or "")[:40], "seconds": n(a.get("seconds"))}
+                           for a in x.get("attendance") or [] if isinstance(a, dict)],
+            **{k: n(x.get(k)) for k in ("bookmarks", "flags", "notes", "drawings", "talk")},
+            "plan": {"title": str(p.get("title") or "")[:80], **{k: n(p.get(k)) for k in ("total", "covered", "skipped")}}
+            if p else None}
 
 
 def _sid(sid) -> str:

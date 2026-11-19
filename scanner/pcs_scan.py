@@ -18,9 +18,9 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo
 
-VERSION = '1.10.14'
+VERSION = '1.11.0'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 
 def build_stamp(here=HERE):
@@ -226,7 +226,13 @@ def new_game(t, mp):
     return {'tStart': t, 'tEnd': t, 'map': mp, 'drop': None, 'harvRaw': [], 'mapFrames': 0, 'calib': []}
 
 def assemble(events):
-    games = []; g = None; events = HUD.select_runs(events); banner = []
+    games = []; g = None; events = HUD.select_runs(events); banner = []; rdrop = []
+    def ranked_drop(g, t):
+        """Ranked's drop-point screen seen just before the game (kept as data: it never starts a game or proves a scrim)."""
+        R = [x for x in rdrop if 0 <= t - x[0] < 180]; rdrop.clear()
+        if not R: return
+        best = max(R, key=lambda x: len(x[1]['spots']))[1]
+        g['rankedDrop'] = dict(best, tFirst=R[0][0], tLast=R[-1][0], frames=len(R))
     def titled(g, t):
         """Give the game the mode and map words of the loading banner seen just before its legend select
         (the word read most often; a word the scanner doesn't know yet is kept as its shape)."""
@@ -242,11 +248,12 @@ def assemble(events):
     for ev in events:
         t, kind, d = ev['t'], ev['kind'], ev['data']
         if kind == 'banner': banner.append((t, d)); continue
+        if kind == 'rankedDrop': rdrop.append((t, d)); continue
         if kind == 'select':    # legend select screen: a new game starts here
             if g and g.get('select') and t - g['select']['tLast'] <= 5: HUD.merge_select(g['select'], d, t); g['tEnd'] = max(g['tEnd'], t); continue
             if g and g['drop'] and g['mapFrames'] == 0 and not g.get('select') and t - g['drop']['tLast'] < 180:
                 g['select'] = HUD.new_select(d, t); g['tEnd'] = t; continue      # same game: its drop screen came first
-            g = new_game(t, None); g['select'] = HUD.new_select(d, t); titled(g, t); games.append(g); continue
+            g = new_game(t, None); g['select'] = HUD.new_select(d, t); titled(g, t); ranked_drop(g, t); games.append(g); continue
         if kind == 'drop':
             if g and g.get('select') and not g['drop'] and g['mapFrames'] == 0 and t - g['select']['tLast'] < 180:
                 g['map'] = d['map']; g['tStart'] = g['tEnd'] = t; g['drop'] = dict(d, tFirst=t, tLast=t); continue   # same game: legend select came first
@@ -261,7 +268,7 @@ def assemble(events):
         if g is not None and g['map'] is None: g['map'] = d['map']      # game opened by its legend select: first map seen
         elif g is not None and g.get('banner') and g['mapFrames'] == 0 and g['map'] != d['map']: g['map'] = d['map']   # the full map outranks the banner word
         if g is None or g['map'] != d['map'] or (t - g['tEnd'] > 25 * 60 and not g['drop']):
-            g = new_game(t, d['map']); games.append(g)
+            g = new_game(t, d['map']); ranked_drop(g, t); games.append(g)
         elif d['harv'] and len(g['harvRaw']) >= 5 and not any(e['kind'] == 'drop' for e in events):  # ranked only
             known = np.array([h[:2] for h in g['harvRaw']])
             near = [np.min(np.linalg.norm(known - np.array(h), axis=1)) < 1.0 for h in d['harv']]
@@ -294,6 +301,7 @@ def assemble(events):
                     'drop': g['drop'], 'dropMap': g.get('dropMap'), 'harvesters': hv, 'calib': g['calib']})
         if g.get('select'): out[-1]['select'] = {k: v for k, v in g['select'].items() if not k.startswith('_')}
         if g.get('banner'): out[-1]['banner'] = g['banner']
+        if g.get('rankedDrop'): out[-1]['rankedDrop'] = g['rankedDrop']
     # a game opened by its legend select where nobody opened the full map: same map as the nearest game of the
     # session (less than 45 min away), marked as a guess
     known = [g for g in out if g['map'] != '?']
@@ -423,7 +431,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); rpfeed = pcs_ranked.Tracker(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
+    legends = HUD.Legends(); legends43 = HUD.Legends43(like=legends); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -433,19 +441,44 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
         def view_top_once():    # 4:3 stretched: the remapped top, built once per keyframe
             if not top: top.append(view_top(img))
             return top[0]
-        if False in cands:     # legend select screen (16:9 only so far): start of a game, the squad's legends
-            try: d = legends.read(img)
-            except Exception: d = None
-            if d: events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
-            else:               # loading banner before it: the mode and the map in words
-                try: bn = HUD.Banner.read(img)
-                except Exception: bn = None
-                if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
+        lay = mode if mode is not None else votes[True] > votes[False]      # the layout as known before this keyframe
+        # legend select screen (start of a game, the squad's legends), else the loading banner (mode and map in words).
+        # Both sit in the top band, so a 4:3 stretched recording is read on its remapped top (view_top). The stretched
+        # view is tried only once the recording is known to be stretched, or while nothing is known yet and the 16:9
+        # read found nothing (the start of a chunk is often the lobby, before any ring or map read could vote).
+        # While unknown, both views are read: the 16:9 reader also "reads" a stretched roster now and then (slots
+        # misplaced: a slot gets its neighbour's legend), so the select read whose named slots score higher wins, and
+        # a stretched banner read must name its mode or map (an unnamed word could be anything white).
+        guess = not lay and mode is None and votes[True] == votes[False]
+        tops = [None] if lay else ([img] if False in cands else []) + ([None] if guess else [])
+        sel = []
+        for v in tops:
+            st43 = v is None
+            try: r = (legends43 if st43 else legends).read(view_top_once() if st43 else v)
+            except Exception: r = None
+            if r: sel.append(r)
+        if len(sel) > 1:
+            score = lambda r: sum(x['score'] for x in r['squad'] if x['legend'])
+            sel = [max(sel, key=score)] if score(sel[1]) > score(sel[0]) else sel[:1]
+        if sel: d = sel[0]; events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
+        for v in ([] if d else tops):
+            st43 = v is None
+            try: bn = (HUD.Banner43 if st43 else HUD.Banner).read(view_top_once() if st43 else v)
+            except Exception: bn = None
+            if bn and st43 and guess and not (bn.get('mode') or bn.get('map')): bn = None
+            if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn; break
         # The readers take the uint8 frame and make int16 only the small areas they compute on: converting the whole
         # 1440p frame cost about 6 ms each time, up to three times per keyframe (results are identical).
+        # A banner read does not end the keyframe: the scrim drop screen shows the map's name in the same place at the
+        # top left (custom lobbies, e.g. "WORLD'S EDGE (SEASON 17)"), read as a banner with unknown words. Skipping the
+        # drop reader there lost every scrim's drop screen, so no scrim mode (1.10.8 to 1.10.14; found on Oct 2026 scrims).
+        if bn: d = None
         for st in ([] if d else cands):
             HUD.LOOSE = st
             d = read_dropscreen(view_drop(img) if st else img, st)
+            if d and bn and bn.get('mode') == 'ranked':     # Ranked's drop-point screen ("RANKED - DROPZONE", 17 Nov
+                d['ranked'] = True                          # 2026 update): same layout as the scrim one, kept as data only
+                events.append({'t': round(t, 2), 'kind': 'rankedDrop', 'data': d}); break
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
             d = mr.read(view_map(img) if st else img, st)
             if d:
@@ -463,6 +496,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     except Exception: ic = None
                     if ic and (ic['care'] or ic['strongholds']): perf.setdefault('_icons', []).append((round(t, 2), d['map'], ic))
                 break
+        if bn and not d: d = bn     # a loading banner only: as before (no HUD reads on it)
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
@@ -482,27 +516,34 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 except Exception: pass
             try: perf.setdefault('_storm', []).append((round(t, 2), pcs_fights.read_storm(img)))   # ring damage: red screen edges
             except Exception: pass
-            if not st:          # "N SQUADS LEFT" (16:9 only so far)
-                try: rp = pcs_ranked.panel_rp(img)        # ranked: the game's RP so far, under the rank emblem
+            if not st:          # ranked: the game's RP so far, under the rank emblem (16:9 only so far)
+                try: rp = pcs_ranked.panel_rp(img)
                 except Exception: rp = None
                 if rp is not None and not (hud and hud[2] and hud[2]['spec']): perf.setdefault('_rp', []).append((round(t, 2), rp))
-                try: sq = HUD.SquadsLeft.read(img)
-                except Exception: sq = None
-                if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
-                try: own = HUD.OwnStats.read(img)
-                except Exception: own = {}
-                if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
-                    perf.setdefault('_own', []).append((round(t, 2), own))
+            # "N SQUADS LEFT" and the own stats strip under it: 4:3 stretched on the remapped top, with the stretched
+            # readers (softer text: the game draws the HUD at its 4:3 render size)
+            try: sq = (HUD.SquadsLeft43 if st else HUD.SquadsLeft).read(view_top_once() if st else img)
+            except Exception: sq = None
+            if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
+            try: own = (HUD.OwnStats43 if st else HUD.OwnStats).read(view_top_once() if st else img)
+            except Exception: own = {}
+            if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
+                perf.setdefault('_own', []).append((round(t, 2), own))
+            if not st:
                 if t - mm_at >= pcs_minimap.EVERY and not (hud and hud[2] and hud[2]['spec']):   # HUD minimap: position
                     try: mm = pcs_minimap.grab(img)
                     except Exception: mm = None
                     if mm is not None: mm_at = t; perf.setdefault('_minimap', []).append((round(t, 2), mm))
-        if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
-            if (not d or bn) and t - emb_at >= EMBLEM_EVERY:     # playlist emblem, top right (pubs, Wildcard)
-                emb_at = t
-                try: em = HUD.ModeEmblem.read(img)
+        lay = mode if mode is not None else votes[True] > votes[False]
+        if (not d or bn) and t - emb_at >= EMBLEM_EVERY:     # playlist emblem, top right (pubs, Wildcard)
+            emb_at = t
+            try: em = HUD.ModeEmblem.read(view_top_once() if lay else img)
+            except Exception: em = None
+            if not em and not lay and mode is None and votes[True] == votes[False]:    # layout not known yet
+                try: em = HUD.ModeEmblem.read(view_top_once())
                 except Exception: em = None
-                if em: perf.setdefault('_emblem', []).append((round(t, 2),) + em)
+            if em: perf.setdefault('_emblem', []).append((round(t, 2),) + em)
+        if not lay:      # squad cards (16:9 only so far)
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
             if cards: perf.setdefault('_cards', []).append((round(t, 2), cards, bool(hud[2]['spec']) if hud and hud[2] else None))
@@ -514,6 +555,9 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 try: us = pcs_usage.read(img, t, perf)                   # heal panel, ult and tactical icons
                 except Exception: us = None
                 if us: perf.setdefault('_usage', []).append(us)
+                try: am = pcs_ammo.read(img, t)                         # ammo in hand, heals carried
+                except Exception: am = None
+                if am: perf.setdefault('_ammo', []).append(am)
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -594,12 +638,14 @@ class Resume:
 def _segment_k(args):
     return args[0], _segment(args[1])
 
-def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
+def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     """Split the recording into chunks and scan them in parallel; merge the results in time order.
     workers: processes at the same time (default WORKERS); chunks: pieces (default: as before, see default_chunks);
-    resume: a folder for finished chunks (Resume), so a stopped scan goes on from there."""
+    resume: a folder for finished chunks (Resume), so a stopped scan goes on from there; total: the recording's length
+    when `path` is a copy whose own length differs by a few ms (the team server's keyframes-only copy): the chunks are
+    then cut where they are on the player's PC."""
     import multiprocessing as mp
-    total = duration(path); dec = pick_decoder(path)
+    total = total or duration(path); dec = pick_decoder(path)
     chunks = chunks or default_chunks(total)
     workers = max(1, min(workers or WORKERS, chunks))
     edges = [total * k / chunks for k in range(chunks + 1)]; edges[-1] = total + 5
@@ -623,11 +669,12 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
+        ammo += pf.pop('_ammo', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -644,6 +691,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
+    perf['_ammo'] = sorted(ammo, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
     return events, samples, labels, perf
@@ -687,11 +735,15 @@ def mode_seen(g, R, emblem, starts, gi):
     named = {k: v for k, v in seen.items() if v}
     if 'ranked' in named.values() and named.get('emblem') == 'other':
         named.pop('emblem')         # rank badges are round emblems too: an unnamed emblem never outvotes ranked signs
+    if seen['drop'] and 'ranked' in named.values():
+        # Since the 17 Nov 2026 update Ranked shows a drop-point screen ("RANKED - DROPZONE") laid out like the scrim
+        # drop screen: any ranked sign beats it. The drop read stays as data, marked ranked, never scrim proof.
+        g['drop']['ranked'] = True; seen['drop'] = None; named.pop('drop')
     if badge:                       # the RP panel: ranked, as before, unless the banner or emblem names another mode
         if any(v in ('wildcard', 'pubs') for v in named.values()):
             out['conflict'] = True; out['from'] = sorted(named); return out
         out['mode'] = 'ranked'; out['from'] = sorted(k for k, v in named.items() if v == 'ranked'); return out
-    if seen['drop']:                # scrim proof: the drop screen, no RP panel (rule unchanged)
+    if seen['drop']:                # scrim proof: the drop screen and no ranked sign (Wildcard / pubs signs: as before)
         out['mode'] = 'scrim'; out['from'] = ['drop']; return out
     names = set(named.values())
     if len(names) > 1:
@@ -731,6 +783,10 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
             st = {}
             end = max((t_ for t_, _ in own if g['tStart'] <= t_ < hi), default=None)
             for k in ('kills', 'assists', 'knocks', 'damage'):
+                # 4:3 stretched (OwnStats43 '_seen'): the number was on the strip but not read twice after its last read:
+                # it may have grown meanwhile, so no total
+                last = max((t_ for t_, o in own if k in o and g['tStart'] <= t_ < hi), default=None)
+                if last is not None and sum(1 for t_, o in own if last < t_ < hi and k not in o and k in o.get('_seen', ())) >= 2: continue
                 f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi, end,
                                    HUD.SINGLE_JUMP if k == 'damage' else None)   # damage: a consistent last read counts
                 if f:
@@ -783,8 +839,13 @@ def main():
     ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
     ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
+    # scan on the team server: the file is a keyframes-only copy of the recording (pcs_recorder.serverscan)
+    ap.add_argument('--duration', type=float, default=0, help=argparse.SUPPRESS)      # the recording's own length
+    ap.add_argument('--clips', default='', help=argparse.SUPPRESS)    # folder of 60 fps clips; missing ones -> .needs.json
+    ap.add_argument('--keep-chunks', action='store_true', help=argparse.SUPPRESS)    # keep .partial for a second pass
     A = ap.parse_args(); os.makedirs(A.out, exist_ok=True)
     global USE_HW, LAYOUT; USE_HW = not A.cpu; LAYOUT = {'auto': None, '16:9': False, '4:3': True}[A.layout]
+    if A.clips: HUD.CLIPS = A.clips
     jobs = [(f, 'video') for f in A.files] + [(f, 'image') for f in A.image]
     if not jobs: ap.print_help(); return
     for path, kind in jobs:
@@ -798,7 +859,7 @@ def main():
         else:
             resume = os.path.join(A.out, name + '.partial')       # finished chunks, until the scan is complete
             if A.fresh: Resume(resume, path, [], ('', []), snap).clear()
-            events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume)
+            events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume, A.duration or None)
         t_tl = time.time()
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
@@ -861,6 +922,8 @@ def main():
             except Exception as e: perf['rankedError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
+        except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},
@@ -872,7 +935,9 @@ def main():
         if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)
-        if kind == 'video': Resume(resume, path, [], ('', []), snap).clear()     # complete: the kept chunks go
+        if kind == 'video' and not A.keep_chunks: Resume(resume, path, [], ('', []), snap).clear()     # complete: the kept chunks go
+        if HUD.CLIPS is not None:       # team server: the 60 fps windows no clip covered (the app cuts and sends them)
+            json.dump({'windows': sorted(HUD.NEEDS)}, open(os.path.join(A.out, name + '.needs.json'), 'w'))
         print(f'  -> {len(games)} game(s): ' + '; '.join(f"{g['map']} drop={'yes' if g['drop'] else 'no'} harvesters={len(g['harvesters'])} ring phases={len(g.get('ring', []))} landing={'yes' if g.get('landing') else 'no'}" for g in games))
         print(f'  saved {op}')
         if perf.get('frames'):

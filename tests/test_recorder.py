@@ -70,8 +70,7 @@ class FakeHub:
 
     def upload(self, files):
         if self.down:
-            from pcs_recorder.core import NeedsSignIn
-            raise NeedsSignIn("Your Google sign-in has expired")
+            raise ConnectionError("the team hub didn't answer")
         self.uploads.append([f.name for f in files])
         return ["the team hub"]
 
@@ -723,6 +722,42 @@ def test_no_game_recordings():
     assert no_game(retention.Entry(path=str(folder / "missing.mp4"), started=now)) is False
 
 
+def test_hybrid_mp4_recording():
+    """OBS 30.2+ records straight into an .mp4 (hybrid MP4): no remux after the session, the file is used once OBS
+    has finished writing it (size holding still). Older OBS keeps .mkv + remux. Both in OBS's config and when the
+    running OBS is prepared."""
+    import threading
+    from pcs_recorder import obs as obsmod
+    assert obsmod.rec_format((33, 0, 1)) == obsmod.rec_format((30, 2, 0)) == "hybrid_mp4"
+    assert obsmod.rec_format((30, 1, 2)) == obsmod.rec_format((29, 1, 3)) == obsmod.rec_format(()) == "mkv"
+    real = obsmod.exe_version
+    try:
+        for ver, fmt in (((33, 0, 1), "hybrid_mp4"), ((30, 0, 0), "mkv")):
+            obsmod.exe_version = lambda path=None, v=ver: v
+            obsmod.write_config(settings.Settings(folder=str(TMP / "hy")), "av1_texture_amf", 2560, 1440)
+            ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
+            assert f"RecFormat2={fmt}\n" in ini and "AutoRemux=true" in ini, ini
+    finally:
+        obsmod.exe_version = real
+    folder = TMP / f"hybrid-{time.time_ns()}"
+    folder.mkdir()
+    mp4 = folder / "Apex Legends_x.mp4"
+    mp4.write_bytes(b"\0" * UNIT)
+    r = Recorder(settings.load(), FakeOBS(folder), FakeHub(), FakeUI(), fake_scan, is_apex_running=lambda: False)
+
+    def finish():                                           # OBS still writing the index for a moment
+        time.sleep(0.1)
+        with open(mp4, "ab") as f:
+            f.write(b"\1" * UNIT)
+    t = threading.Thread(target=finish)
+    t.start()
+    t0 = time.time()
+    assert r._final_file(str(mp4), wait_s=5, poll=0.3) == str(mp4)
+    t.join()
+    assert mp4.stat().st_size == 2 * UNIT and time.time() - t0 < 2      # waited for the end, not for the limit
+    assert not (folder / "Apex Legends_x.mkv").exists()
+
+
 def test_half_written_mp4_is_never_scanned():
     """OBS copies the .mkv into an .mp4 after the session; a half-written .mp4 that stops growing for a moment
     must not be taken (a 2-hour session was once scanned as 'no game' that way). The .mkv is used instead."""
@@ -814,7 +849,7 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
-    assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
+    assert fails[0][3] is None and "didn't answer" in fails[0][1]
     hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
@@ -949,7 +984,7 @@ def test_upload_part_never_delays_a_recording():
         mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
         apex = {"on": False}
         obs, ui = FakeOBS(s.folder_path), FakeUI()
-        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        sender = Sender(s, stop=lambda: apex["on"])
         r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
         r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
         r.tick()                                                 # the upload starts in its own thread
@@ -1900,6 +1935,78 @@ def test_legend_select_starts_a_game():
                 assert cells(s[0], o[0]) > 150, (other_mode, cells(s[0], o[0]))
 
 
+def test_scrim_drop_screen_read_under_a_banner():
+    """The scrim drop screen shows the map's name at the top left (custom lobbies: "WORLD'S EDGE (SEASON 17)"), which
+    the loading-banner reader reads as a banner with unknown words. The drop screen must still be read there: from
+    1.10.8 to 1.10.14 a banner read ended the keyframe, every scrim lost its drop screen and its scrim mode."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+
+    def word(img, y0, y1, seed, n):                                  # made-up block letters starting at x = 194
+        r = np.random.default_rng(seed); h = y1 - y0
+        for k in range(n):
+            x = 194 + k * (h + 8)
+            img[y0:y1, x:x + h] = 255
+            for _ in range(2):
+                yy, xx = int(r.integers(0, h - h // 3)), int(r.integers(h // 4, h - h // 3))
+                img[y0 + yy:y0 + yy + h // 3, x + xx:x + h] = 60
+    img = np.full((1440, 2560, 3), 60, np.uint8)
+    word(img, 138, 198, 1, 6); word(img, 273, 298, 2, 9)
+    assert HUD.Banner.read(img), "the test frame must read as a banner"
+    banner_only = img.copy()
+    img[200:1000, 1600:2400] = (90, 40, 40)                          # marks the frame as "drop screen" for the stub below
+    spots = [{"poi": f"we-{k}", "inside": True, "x": 10.0 + k, "y": 20.0, "kind": "enemy"} for k in range(20)]
+    real = SCAN.read_dropscreen
+    SCAN.read_dropscreen = lambda a, loose=False: ({"map": "WE", "err": 0.02, "spots": spots}
+                                                   if (a[600, 2000] == (90, 40, 40)).all() else None)
+    try:
+        frames = [(100.0 + k, img) for k in range(4)] + [(104.0 + k, banner_only) for k in range(3)]
+        events, samples, _ = SCAN.scan_frames(frames, quiet=True)
+    finally:
+        SCAN.read_dropscreen = real
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["banner", "drop"] * 4 + ["banner"] * 3, kinds              # a banner alone stays a banner
+    games = SCAN.assemble(events); SCAN.timeline(games, samples)
+    assert len(games) == 1 and games[0]["drop"] and games[0]["map"] == "WE", games
+    assert games[0]["mode"] == "scrim" and games[0]["modeSeen"]["from"] == ["drop"], games[0].get("modeSeen")
+
+    # Ranked's drop-point screen (17 Nov 2026 update) looks the same, titled "RANKED - DROPZONE": the banner reads
+    # mode ranked on it. It is kept as data (rankedDrop) and never starts a game or proves a scrim.
+    keep = HUD.BANNER_T
+    HUD.BANNER_T = {"mode": {"ranked": [HUD.Banner.read(banner_only)["modeSig"]]}, "map": {}}
+    SCAN.read_dropscreen = lambda a, loose=False: ({"map": "SP", "err": 0.02, "spots": spots}
+                                                   if (a[600, 2000] == (90, 40, 40)).all() else None)
+    try:
+        events, samples, _ = SCAN.scan_frames([(600.0 + k, img) for k in range(3)], quiet=True)
+    finally:
+        SCAN.read_dropscreen = real; HUD.BANNER_T = keep
+    assert [e["kind"] for e in events] == ["banner", "rankedDrop"] * 3, [e["kind"] for e in events]
+    assert all(e["data"]["ranked"] for e in events if e["kind"] == "rankedDrop")
+    sq = [{"slot": 1, "legend": "alpha", "self": True, "locked": True, "hue": 40}]
+    events += [{"t": 638.0 + 2 * k, "kind": "select", "data": {"squad": sq, "ranked": True}} for k in range(14)]
+    games = SCAN.assemble(events); SCAN.timeline(games, [])
+    assert len(games) == 1 and games[0]["drop"] is None and games[0]["tStart"] == 664.0, games
+    rd = games[0]["rankedDrop"]
+    assert (rd["tFirst"], rd["tLast"], rd["frames"], len(rd["spots"]), rd["ranked"]) == (600.0, 602.0, 3, 20, True), rd
+    assert games[0]["mode"] == "ranked" and games[0]["banner"]["mode"] == "ranked", games[0]["modeSeen"]
+
+    # any ranked sign beats a drop screen read without the RANKED title; Wildcard / pubs signs don't (as before)
+    def seen(**kw):
+        g = {"tStart": 100.0, "drop": {"map": "WE", "spots": spots}, **kw}
+        return g, SCAN.mode_seen(g, kw.pop("R", []), [], [100.0], 0)
+    g, m = seen()
+    assert m["mode"] == "scrim" and m["from"] == ["drop"] and "ranked" not in g["drop"], m
+    for kw in ({"select": {"ranked": True}}, {"banner": {"mode": "ranked"}}):
+        g, m = seen(**kw)
+        assert m["mode"] == "ranked" and "drop" not in m["from"] and g["drop"]["ranked"] is True, (kw, m)
+    g, m = seen(R=[1, 1, 1, 0])
+    assert m["mode"] == "ranked" and g["drop"]["ranked"] is True, m
+    g, m = seen(banner={"mode": "wildcard"})
+    assert m["mode"] == "scrim" and "ranked" not in g["drop"], m
+
+
 def test_mode_from_playlist_emblem():
     """The playlist emblem at the top right (pubs: red "unranked" emblem, Wildcard: teal) gives a game its mode when
     nothing else does (games[].modeSeen); signs that disagree, or another playlist's emblem, leave it unlabelled.
@@ -2649,6 +2756,78 @@ def test_usage_heals_and_abilities():
     assert leg == 'seer' and iou == 1.0, (leg, iou, margin)
 
 
+def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
+    """A 1440p frame with the ammo panel and heal slot drawn from the reader's own digit shapes (pcs_banner.json 'ammo'):
+    mag 2 cells, reserve 3 (leading zeros dim), heal count right-aligned at x 717."""
+    import numpy as np
+    from PIL import Image
+    import pcs_ammo as A
+    a = np.full((1440, 2560, 3), 25, np.uint8)
+    def put(font, lab, box, ink=230, back=30):
+        labels, S = A.T[font]
+        g = S[list(labels).index(lab)].reshape(18, 12)
+        x0, x1, y0, y1 = box
+        im = np.asarray(Image.fromarray((g * 255).astype(np.uint8)).resize((x1 - x0, y1 - y0), Image.BILINEAR)) / 255.0
+        a[y0:y1, x0:x1] = (back + im * (ink - back))[..., None].astype(np.uint8)
+    B = A.cell_boxes(a)
+    if mag is not None:
+        for k, ch in enumerate(f'{mag:02d}'): put('M', ch, B['M'][k], 120 if (k == 0 and ch == '0' and mag) else 230)
+    if res is not None:
+        s = f'{res:03d}'; lead = len(s) - len(s.lstrip('0'))
+        for k, ch in enumerate(s): put('R', ch, B['R'][k], 55 if k < lead and k < 2 else 200)
+    if heal is not None:
+        x = 717
+        for ch in reversed(str(heal)):
+            w = 7 if ch == '1' else 12
+            put('H', ch, (x - w - 1, x + 1, A.HEAL_ROWS[0], A.HEAL_ROWS[1]), 245, 30); x -= w + 4
+    if item == 'shield': a[1322:1360, 656:684] = (40, 70, 200)
+    if hint: a[1380:1406, 673:701] = 235
+    if slot == 2: a[1390:1402, 2300:2420:2] = 240
+    if slot == 1: a[1390:1402, 2080:2240:2] = 240
+    return a
+
+
+def test_ammo_reader_and_events():
+    """Ammo panel and heal slot (pcs_ammo): magazine, reserve (dim leading zeros), heal count and item; an empty heal
+    slot only with the key hint and the ammo read; nothing on an empty frame. Per game: a fight that starts with less
+    than a magazine in reserve is a low-ammo fight; the heal slot empty twice after having heals = out of heals."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ammo as A
+    assert set(A.T) == {'M', 'R', 'H'}, list(A.T)
+    assert A.read(np.zeros((1440, 2560, 3), np.uint8), 1.0) is None
+    r = A.read(_ammo_frame(24, 72, 12, 'shield'), 5.0)
+    assert r == (5.0, 24, 72, 'shield', 12, 2), r
+    r = A.read(_ammo_frame(8, 140, 3, 'shield', slot=1), 6.0)
+    assert r == (6.0, 8, 140, 'shield', 3, 1), r
+    assert A.read(_ammo_frame(30, 210, hint=True), 7.0)[3:5] == ('none', 0)             # heal slot empty
+    assert A.read(_ammo_frame(hint=True), 7.0) is None                                  # no ammo read: not trusted
+    assert A.read(_ammo_frame(30, 210), 7.0)[3:5] == (None, None)                        # no key hint: unknown
+    # per game
+    rows = [(10.0, 28, 200, 'shield', 4, 1), (20.0, 28, 180, 'shield', 4, 1), (21.0, 28, 180, 'shield', 4, 1),   # fight 1 at 25: fine
+            (40.0, 28, 20, 'medkit', 1, 1),                                              # fight 2 at 45: 20 left < 28
+            (50.0, 12, 20, 'none', 0, 1), (52.0, 12, 20, 'none', 0, 1),                  # out of heals at 50 ...
+            (70.0, 28, 20, 'syringe', 2, 1),                                             # ... until 70
+            (90.0, 28, 0, None, None, 2),                                                # spectating: left out
+            (130.0, 6, 0, 'none', 0, 1), (131.0, 6, 0, 'none', 0, 1)]                    # next game: never had heals
+    bars = [(90.0, {'state': 'spectating'}, [], True)]
+    games = [{'tStart': 0.0, 'tEndGame': 100.0, 'fights': [{'t0': 25.0, 't1': 35.0}, {'t0': 45.0, 't1': 48.0}]},
+             {'tStart': 120.0, 'fights': [{'t0': 132.0, 't1': 140.0}]}]
+    A.attach(games, rows, bars)
+    g = games[0]
+    assert [e['kind'] for e in g['ammoEvents']] == ['lowAmmoFight', 'outOfHeals'], g['ammoEvents']
+    assert g['ammoEvents'][0]['t'] == 45.0 and g['ammoEvents'][0]['reserve'] == 20 and g['ammoEvents'][0]['magFull'] == 28
+    assert g['ammoEvents'][1] == {'t': 50.0, 'kind': 'outOfHeals', 'end': 70.0}, g['ammoEvents'][1]
+    assert g['fights'][0]['ammoAtStart']['low'] is False and g['fights'][1]['ammoAtStart']['low'] is True
+    assert g['ammoSummary'] == {'reads': 7, 'healReads': 7, 'fightsChecked': 2, 'lowAmmoFights': 1, 'outOfHeals': 1,
+                                'outOfHealsSeconds': 20.0}, g['ammoSummary']
+    assert [r[0] for r in g['ammoTimeline']['rows']] == [10.0, 20.0, 40.0, 50.0, 70.0], g['ammoTimeline']   # same reads kept once
+    assert g['healTimeline']['rows'][0] == [10.0, 'shield', 4]
+    h = games[1]
+    assert h['ammoEvents'] == [{'t': 132.0, 'kind': 'lowAmmoFight', 'mag': 6, 'reserve': 0, 'magFull': 6, 'fightEnd': 140.0}], h['ammoEvents']
+    assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
@@ -2899,7 +3078,8 @@ def test_hub_answer_shown_on_recording():
 
 
 class HubThenDrive(FakeHub):
-    """A Sender stand-in: Drive takes the results, the hub fails with `fail` (a HubError kind) until it is None.
+    """A Sender stand-in for results an older version sent to Google Drive only: the first upload "goes through"
+    without the hub (hub_ok False = "Not on hub yet"), the hub fails with `fail` (a HubError kind) until it is None.
     `blocked` = what Sender.hub_blocked() would say (refused key, 429 wait)."""
 
     def __init__(self):
@@ -2909,7 +3089,7 @@ class HubThenDrive(FakeHub):
     def upload(self, files):
         from pcs_recorder.runtime import Sent
         out = Sent(["Google Drive"])
-        out.drive_ok, out.hub_ok, out.hub_why = True, False, "Hub not reachable"
+        out.hub_ok, out.hub_why = False, "Hub not reachable"
         out.hub_note = "Not sent to hub: the team hub didn't answer"
         return out
 
@@ -2950,7 +3130,7 @@ def test_hub_retried_when_only_drive_took_it():
     r._retry_uploads()
     assert r.idx["k0"].status == "uploaded" and r.hub_state("k0") == {"hub": "pending", "why": "Hub not reachable"}
     assert any(t == "Results sent" and "by itself" in m for t, m, *_ in ui.notes), ui.notes
-    assert retention.load_sent(r.idx)["k0"]["drive"] == "sent"                         # kept on disk
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                        # kept on disk
     r._retry_hub()
     assert len(hub.hub_calls) == 1 and r.hub_state("k0")["hub"] == "pending"
     r._retry_hub(); r._retry_hub()
@@ -3037,18 +3217,52 @@ def test_hub_and_drive_both_fine_or_no_hub():
     r, hub, ui, clock = _hub_recorder()
 
     def both(files):
-        out = Sent(["the team hub", "Google Drive"])
-        out.hub_ok, out.drive_ok, out.hub_note = True, True, "Sent to hub: 2 games"
+        out = Sent(["the team hub"])
+        out.hub_ok, out.hub_note = True, "Sent to hub: 2 games"
         return out
     hub.upload = both
     r._retry_uploads()
-    assert r.sent["k0"] == {"hub": "sent", "why": "", "drive": "sent"}
+    assert r.sent["k0"] == {"hub": "sent", "why": ""}
     r._retry_hub()
     assert not hub.hub_calls
     r, hub, ui, clock = _hub_recorder()
-    hub.upload = lambda files: Sent(["Google Drive"])                                  # no hub address
+    hub.upload = lambda files: Sent(["somewhere else"])                                # hub not tried
     r._retry_uploads()
     assert r.hub_state("k0")["hub"] == ""
+
+
+def test_no_hub_results_stay_on_pc():
+    """No hub address (Google Drive results removed): the results stay on this PC, the player is told once in
+    Activity (no pop-up), the recording says why; joining the hub sends them. An old sent.json with a "drive" field
+    still loads."""
+    from pcs_recorder.core import NoHub
+    from pcs_recorder.runtime import Sender, Sent
+    r, hub, ui, clock = _hub_recorder(n=2)
+    r.s.hub_url = ""
+    sender = Sender(r.s)
+    try:
+        sender.upload([Path("x.scan.json")])
+        raise AssertionError("no NoHub")
+    except NoHub as e:
+        assert "No team hub yet" in str(e) and "stay on this PC" in str(e)
+    said = []
+    ui.activity = said.append
+    r.hub = sender
+    for _ in range(3):
+        r.next_upload = 0
+        r._retry_uploads()
+    assert all(e.status == "scanned" for e in r.idx.values())
+    assert r.idx["k0"].note == "not sent yet: no team hub"
+    assert len(said) == 1 and "No team hub yet" in said[0] and not ui.notes, (said, ui.notes)   # once, no pop-up
+    r.s.hub_url = "http://hub.test:8420"                                              # joined
+    hub.upload = lambda files: (lambda o: (setattr(o, "hub_ok", True), o)[1])(Sent(["the team hub"]))
+    r.hub = hub
+    r.next_upload = 0
+    r._retry_uploads(); r._retry_uploads()
+    assert all(e.status == "uploaded" for e in r.idx.values()), r.idx
+    import json
+    retention.SENT_FILE.write_text(json.dumps({"k0": {"hub": "pending", "why": "", "drive": "sent"}}))
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                       # older file still read
 
 
 def _silence_recorder(levels, tracks=("game", "discord", "mic"), consent=True, mutes=()):
@@ -3637,6 +3851,144 @@ def test_stretched_views_fill_reader_boxes():
     assert np.array_equal(SCAN.view_top(img)[:SCAN.TOP_ROWS], old_top[:SCAN.TOP_ROWS])
 
 
+def _stretch43():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import stretch43
+    return stretch43.stretch
+
+
+def test_stretched_top_readers():
+    """4:3 stretched recordings: the playlist emblem, the legend select screen, the loading banner, the squads counter
+    and the own stats strip are read on the scanner's remapped top (view_top). Test frames: 16:9 HUD pictures turned
+    into what a 4:3 stretched player records (tools/stretch43.py: rows squashed to 75 % towards the top, drawn at the
+    1440 x 1080 render size and scaled back up). The 16:9 readers keep their old values."""
+    import numpy as np
+    from PIL import Image
+    SCAN = _scanner()
+    import pcs_hud as HUD
+    stretch = _stretch43()
+    top = lambda img: SCAN.view_top(stretch(img))
+    assert (HUD.SquadsLeft.WHITE, HUD.SquadsLeft.BITS, HUD.OwnStats.INK, HUD.OwnStats.INK_K, HUD.Banner.WHITE) == (232, 26, 35, 0.5, 215)
+
+    # playlist emblem (in game and on the waiting screen)
+    E = HUD.ModeEmblem
+    rng = np.random.default_rng(5)
+    for key, mode, rgb, mask in [e for e in E.T if e[1]]:
+        for y, x in ((8, 2422), (142, 2420)):
+            img = np.full((1440, 2560, 3), 90, np.uint8)
+            img[:300, 2160:] = rng.integers(60, 200, (300, 400, 3), dtype=np.uint8)
+            h, w = E.SIZE
+            big = np.asarray(Image.fromarray(rgb.astype(np.uint8)).resize((w, h), Image.NEAREST))
+            m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 0
+            img[y:y + h, x:x + w][m] = big[m]
+            r = E.read(top(img))
+            assert r and r[:2] == (key, mode), (mode, y, r)
+
+    # squads counter: test digits drawn from the table's shapes (one pixel bolder, as the game's font) are not the game's
+    # own glyphs, so some come out doubtful once softened; a stretched read is right or nothing, never another number
+    def cells(digit):
+        bits = next(t for d, t in HUD.SquadsLeft.T if d == digit)
+        g = np.array([(bits >> (191 - i)) & 1 for i in range(192)], np.uint8).reshape(16, 12)
+        g = np.asarray(Image.fromarray(g * 255).resize((14, 22), Image.NEAREST)) > 127
+        g[:, :-1] |= g[:, 1:]
+        return g.astype(np.float32)[..., None]
+
+    def hud(number, plate=40):
+        img = np.full((1440, 2560, 3), plate, np.uint8)
+        for x in range(2140, 2286, 16): img[77:99, x:x + 4] = 255
+        img[77:99, 2288:2292] = 255
+        x = 2130
+        for ch in reversed(str(number)):
+            box = img[77:99, x - 14:x].astype(np.float32); img[77:99, x - 14:x] = box * (1 - cells(ch)) + 255 * cells(ch); x -= 18
+        return img
+    got = {n: HUD.SquadsLeft43.read(top(hud(n))) for n in (20, 17, 13, 9, 4, 1, 58, 36)}
+    assert all(v in (n, None) for n, v in got.items()) and {17, 13, 1} <= {n for n, v in got.items() if v == n}, got
+    assert HUD.SquadsLeft43.read(top(np.full((1440, 2560, 3), 40, np.uint8))) is None
+
+    # own stats strip
+    put = lambda *a, **k: _own_put(HUD, *a, **k)
+
+    def strip(kills=None, assists=None, knocks=None, damage=None, font="B", plate=40):
+        img = np.full((1440, 2560, 3), plate, np.uint8)
+        d0, _ = put(img, "S", str(damage), x_end=2336)
+        img[132:156, d0 - 40:d0 - 3] = 255
+        left = d0 - 70
+        if knocks is not None:
+            img[126:162, left - 105:left] = 250
+            img[131:157, left - 80:left - 44] = 20
+            put(img, "K", str(knocks), x_start=left - 41)
+            left -= 125
+        if kills is not None:
+            a0 = left - 20 - 15 * len(str(assists))
+            put(img, font, str(assists), x_start=a0)
+            img[132:157, a0 - 41:a0 - 3] = 255
+            k0, _ = put(img, font, str(kills), x_end=a0 - 41 - 24)
+            img[132:157, k0 - 34:k0 - 9] = 255
+        return img
+    # the strip's places come from its icons (the damage icon and the knocks icon fall apart once softened: joined
+    # again); the test digits are the table's averaged shapes, softer than the game's, so some stay doubtful: every
+    # number read must be right, and the plates must be found
+    O = HUD.OwnStats43
+    seen = set()
+    for kw in ({"damage": 54}, {"damage": 174}, {"knocks": 2, "damage": 160}, {"kills": 3, "assists": 1, "knocks": 2, "damage": 716},
+               {"kills": 12, "assists": 10, "knocks": 6, "damage": 2051}, {"kills": 2, "assists": 0, "damage": 589, "font": "S"}):
+        want = {k: v for k, v in kw.items() if k != "font"}
+        assert HUD.OwnStats.read(strip(**kw)) == want                 # 16:9 reader on the 16:9 picture
+        got = O.read(top(strip(**kw)))
+        assert set(got.pop("_seen")) == set(want), (kw, got)            # every plate found, read or not
+        assert all(want[k] == v for k, v in got.items()), (kw, got)
+        seen |= set(got)
+    assert seen == {"kills", "assists", "knocks", "damage"}, seen
+    assert O.read(top(np.full((1440, 2560, 3), 40, np.uint8))) == {}
+    # a game's total: refused when the number was on the strip but not read twice after its last read (it may have
+    # grown); read to the end: as before
+    rd = [(t, {"damage": 300, "_seen": ("damage",)}) for t in range(10, 20)]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd)
+    assert games[0]["own"]["damage"] == 300, games[0]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd + [(20, {"_seen": ("damage",)}), (21, {"_seen": ("damage",)})])
+    assert "own" not in games[0], games[0]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd + [(20, {"_seen": ("damage",)})])          # once: a doubtful digit, as in 16:9
+    assert games[0]["own"]["damage"] == 300, games[0]
+
+    # legend select screen in a whole scan: read on the remapped top once the layout is known (forced here), and
+    # also while nothing is known yet (a chunk that starts in the lobby); a 16:9 scan of the same screens is unchanged
+    tiles = {n: np.clip(rng.integers(1, 255, (16, 25)).repeat(4, 0).repeat(4, 1), 1, 255).astype(np.uint8) for n in ("alpha", "bravo", "charlie")}
+    f = TMP / "legends-43.npz"
+    np.savez_compressed(f, **{"legend_" + n: t for n, t in tiles.items()})
+    COL = [(240, 160, 40), (40, 180, 190), (140, 200, 50)]
+
+    def screen():
+        img = np.full((1440, 2560, 3), 60, np.uint8)
+        for k, n in enumerate(tiles):
+            y0 = int(round(172 + 106.5 * k))
+            img[y0 + 9:y0 + 73, 215:315] = tiles[n][..., None]
+            img[y0 + 60:y0 + 80, 300:328] = COL[k]
+            img[y0 + 64:y0 + 76, 312:316] = 255
+            img[y0 + 30:y0 + 46, 196:204] = COL[k]
+            for x in range(330, 520, 6): img[y0 + 10:y0 + 30, x:x + 3] = COL[k] if k == 1 else (255, 255, 255)
+        for y in range(170, 254, 8): img[y:y + 4, 72:156] = 230             # rank badges (ranked)
+        return img
+    old = os.environ.get("PCS_WEAPON_ICONS"); os.environ["PCS_WEAPON_ICONS"] = str(f); layout = SCAN.LAYOUT
+    try:
+        flat = screen()
+        for lay, img in ((True, stretch(flat)), (None, stretch(flat)), (None, flat), (False, flat)):
+            SCAN.LAYOUT = lay
+            events, _, _ = SCAN.scan_frames([(100.0 + k, img) for k in range(10)], quiet=True)
+            sel = [e for e in events if e["kind"] == "select"]
+            assert len(sel) == 10, (lay, [e["kind"] for e in events])
+            assert [s["legend"] for s in sel[0]["data"]["squad"]] == ["alpha", "bravo", "charlie"], (lay, sel[0])
+            assert [s["self"] for s in sel[0]["data"]["squad"]] == [False, True, False] and sel[0]["data"]["ranked"], (lay, sel[0])
+        SCAN.LAYOUT = False                                     # a 16:9 scan never tries the stretched view
+        assert not [e for e in SCAN.scan_frames([(100.0, stretch(flat))], quiet=True)[0] if e["kind"] == "select"]
+    finally:
+        SCAN.LAYOUT = layout
+        os.environ.pop("PCS_WEAPON_ICONS", None)
+        if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
+
+
 def test_clean_old_unpacked_copies():
     """At start the app removes the copies of itself left unpacked in %TEMP% (crash, shutdown), and nothing else:
     not the one it runs from, not one being unpacked, not one in use, not another program's folder."""
@@ -4024,6 +4376,455 @@ def test_ranked_rp_and_badges():
     assert R.last_twice([5, 5, None, 7, 7, 8]) == (7, 2) and R.last_twice([5, None, 5]) == (None, 0)
 
 
+# ------------------------------------------------------------------ scan on the team server (serverscan.py)
+
+def _ss_video(folder: Path, secs: int = 6) -> Path:
+    """A small mp4 with a keyframe every second (30 fps) and one audio track, like a recording."""
+    import subprocess
+    v = folder / "Apex Legends_2026.11.15-17.09.mp4"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s=320x180:r=30:d={secs}",
+                    "-f", "lavfi", "-i", f"sine=440:d={secs}", "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4",
+                    "-g", "30", "-bf", "0", "-q:v", "4", "-c:a", "aac", "-shortest", str(v)], check=True)
+    return v
+
+
+def test_server_scan_light_copy_and_clips_give_the_same_frames():
+    """The light copy holds only keyframes (same times); a clip cut for a window gives the scanner's 60 fps reader
+    exactly the frames the whole recording gives."""
+    import shutil
+    import subprocess
+    if shutil.which("ffmpeg") is None:
+        print("  (no ffmpeg: skipped)")
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_hud
+    from pcs_recorder import serverscan
+    folder = TMP / f"ss-{time.time_ns()}"
+    folder.mkdir()
+    v = _ss_video(folder)
+    light = folder / "light" / v.name
+    light.parent.mkdir()
+    subprocess.run(serverscan.light_cmd(str(v), light), check=True)
+    pk = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "packet=pts_time,flags", "-of", "csv=p=0", str(light)]).decode().split()
+    assert [p.split(",")[1].startswith("K") for p in pk] == [True] * len(pk) and len(pk) == 6, pk
+    assert [round(float(p.split(",")[0]), 2) for p in pk] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    aud = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                                   "-of", "csv=p=0", str(light)]).decode().split()
+    assert len(aud) == 1
+    clips = folder / "clips"
+    clips.mkdir()
+    subprocess.run(serverscan.clip_cmd(str(v), 2.0, 3.05, clips / "clip000.mp4"), check=True)
+    whole = [(round(t, 3), f.copy()) for t, f in pcs_hud._corner(str(v), 2.0, 3.05)]
+    old = pcs_hud.CLIPS, list(pcs_hud.NEEDS), pcs_hud._clip_list
+    try:
+        pcs_hud.CLIPS, pcs_hud._clip_list = str(clips), None
+        pcs_hud.NEEDS[:] = []
+        fromclip = [(round(t, 3), f.copy()) for t, f in pcs_hud._corner(str(light), 2.0, 3.05)]
+        assert pcs_hud.NEEDS == []
+        missing = list(pcs_hud._corner(str(light), 4.0, 4.5))          # no clip for this window: asked for
+        assert missing == [] and pcs_hud.NEEDS == [[4.0, 4.5]]
+    finally:
+        pcs_hud.CLIPS, pcs_hud._clip_list = old[0], old[2]
+        pcs_hud.NEEDS[:] = old[1]
+    assert len(whole) == len(fromclip) > 20, (len(whole), len(fromclip))
+    assert all(a[0] == b[0] and np.array_equal(a[1], b[1]) for a, b in zip(whole, fromclip))
+
+
+class _FakeHubForScan:
+    """The hub's scan-job routes as the app sees them (job: queued -> needs_clips -> done)."""
+
+    def __init__(self, files):
+        self.files, self.calls, self.status, self.sent = files, [], "queued", None
+
+    def send_in_parts(self, url, kind, f, fields=None, stop=None, tries=3):
+        self.calls.append(("upload", kind, Path(f).name, dict(fields or {})))
+        return {"job": {"id": "sj-0000000000000001", "status": "queued"}}
+
+    def request(self, url, method, path, **kw):
+        self.calls.append((method, path))
+
+        class R:
+            def __init__(s, code, data=None, content=b""):
+                s.status_code, s._d, s.content = code, data, content
+
+            def json(s):
+                return s._d
+        if method == "GET" and "/files/" in path:
+            return R(200, content=self.files[path.rsplit("/", 1)[-1]])
+        if method == "GET":
+            st = self.status
+            if st == "queued":
+                self.status = "needs_clips"
+                return R(200, {"status": "queued"})
+            if st == "needs_clips":
+                return R(200, {"status": "needs_clips", "needs": [[100.0, 101.05], [200.0, 202.6]]})
+            return R(200, {"status": "done", "passes": 2, "seconds": 90, "files": list(self.files)})
+        if method == "POST" and path.endswith("/clips"):
+            self.sent = [f[1][0] for f in kw["files"]]
+            self.status = "done"
+            return R(200, {"status": "queued"})
+        if method == "DELETE":
+            return R(200, {"status": "cancelled"})
+        return R(404, {})
+
+
+def _ss_patch(serverscan, **kw):
+    """Swap module functions for fakes; returns a function that puts them back."""
+    targets = {"request": serverscan.hub, "send_in_parts": serverscan.hub}
+    old = {}
+    for k, v in kw.items():
+        mod = targets.get(k, serverscan)
+        old[k] = (mod, getattr(mod, k))
+        setattr(mod, k, v)
+
+    def undo():
+        for k, (mod, v) in old.items():
+            setattr(mod, k, v)
+    return undo
+
+
+def _ss_run(runs):
+    def run(cmd, timeout=900):
+        runs.append(cmd)
+        Path(cmd[-1]).write_bytes(b"v" * 100)
+    return run
+
+
+def test_server_scan_round_trip_with_clips():
+    import json
+    from pcs_recorder import serverscan
+    folder = TMP / f"ssr-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "Apex Legends_2026.11.15-17.09.mp4"
+    v.write_bytes(b"x" * 1000)
+    out = folder / "out"
+    files = {v.stem + ".scan.json": b'{"games": [1]}', v.stem + ".feed.json": b'{"lines": []}'}
+    fake = _FakeHubForScan(files)
+    runs = []
+    undo = _ss_patch(serverscan, request=fake.request, send_in_parts=fake.send_in_parts, _run=_ss_run(runs),
+                     media_duration=lambda p: 3213.683, chunks_for=lambda t: 8, scanner_version=lambda: "9.9.9")
+    try:
+        got = serverscan.ServerScan(str(v), str(out), "http://hub", say=lambda m: None, sleep=lambda s: None).run()
+    finally:
+        undo()
+    assert sorted(p.name for p in got) == sorted(files)
+    assert (out / (v.stem + ".scan.json")).read_bytes() == files[v.stem + ".scan.json"]
+    up = [c for c in fake.calls if c[0] == "upload"][0]
+    assert up[1] == "scan-source" and up[2] == v.name and up[3]["duration"] == 3213.683 and up[3]["chunks"] == 8
+    assert up[3]["scanner"] == "9.9.9"
+    assert "noise=drop=not(key)" in runs[0] and "-copyts" in runs[0]           # light copy: keyframes, own times
+    assert len(runs) == 3 and fake.sent == ["clip000.mp4", "clip001.mp4"]      # one clip per window asked for
+    assert runs[1][runs[1].index("-ss") + 1] == "99.950" and runs[1].index("-t") < runs[1].index("-i")
+    assert not (out / "server").exists() and not (out / serverscan.STATE).exists()   # light copy and state gone
+    assert json.loads((out / (v.stem + ".scan.json")).read_text()) == {"games": [1]}
+
+
+def test_server_scan_falls_back_to_this_pc():
+    """Off, no hub, worker off on the hub, an old hub or a bug: None, and the app scans here."""
+    import json
+    from pcs_recorder import hub, serverscan, settings as st
+    folder = TMP / f"ssf-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "rec.mp4"
+    v.write_bytes(b"x")
+    keep = st.SETTINGS_FILE.read_text(encoding="utf-8") if st.SETTINGS_FILE.exists() else None
+
+    def off(*a, **k):
+        raise hub.HubError("the team hub answered 409: off", "http", 409, code="server_scan_off")
+    undo = _ss_patch(serverscan, send_in_parts=off, _run=_ss_run([]), media_duration=lambda p: 60.0,
+                     chunks_for=lambda t: 1, scanner_version=lambda: "9.9.9")
+    try:
+        st.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "http://hub", "server_scan": False}), encoding="utf-8")
+        assert serverscan.wanted() == (False, "http://hub")
+        assert serverscan.scan(str(v), str(folder / "o1"), say=lambda m: None) is None
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "", "server_scan": True}), encoding="utf-8")
+        assert serverscan.wanted()[0] is False
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "http://hub", "server_scan": True}), encoding="utf-8")
+        assert serverscan.wanted() == (True, "http://hub")
+        said = []
+        assert serverscan.scan(str(v), str(folder / "o2"), say=said.append) is None
+        assert "Scanning on this PC" in said[-1] and not (folder / "o2" / "server").exists(), said
+        serverscan.hub.send_in_parts = lambda *a, **k: None                    # hub without /api/uploads
+        assert serverscan.scan(str(v), str(folder / "o3"), say=said.append) is None
+        assert "older hub" in said[-1]
+
+        def boom(*a, **k):
+            raise RuntimeError("bug")
+        serverscan.hub.send_in_parts = boom                                     # never lose a scan to a bug
+        assert serverscan.scan(str(v), str(folder / "o4"), say=said.append) is None
+    finally:
+        undo()
+        if keep is None:
+            st.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            st.SETTINGS_FILE.write_text(keep, encoding="utf-8")
+
+
+def test_server_scan_picks_up_its_job_after_a_stop():
+    """Stopped while Apex ran: the next try asks the hub for the same job instead of sending the recording again."""
+    import json
+    from pcs_recorder import serverscan
+    folder = TMP / f"ssp-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "rec.mp4"
+    v.write_bytes(b"x")
+    out = folder / "out"
+    out.mkdir()
+    (out / serverscan.STATE).write_text(json.dumps({"job": "sj-0000000000000001"}), encoding="utf-8")
+    fake = _FakeHubForScan({"rec.scan.json": b"{}"})
+    fake.status = "done"
+    undo = _ss_patch(serverscan, request=fake.request, send_in_parts=fake.send_in_parts, _run=_ss_run([]))
+    try:
+        got = serverscan.ServerScan(str(v), str(out), "http://hub", say=lambda m: None, sleep=lambda s: None).run()
+    finally:
+        undo()
+    assert [p.name for p in got] == ["rec.scan.json"]
+    assert not [c for c in fake.calls if c[0] == "upload"]
+
+
+def test_server_scan_decoder_family_follows_this_pc():
+    import json
+    from pcs_recorder import serverscan
+    f = serverscan.APP_DIR / "decoder.json"
+    keep = f.read_text() if f.exists() else None
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"av1-2560x1440-gpu": ["CPU", []]}))
+        assert serverscan.decoder_family() == "cpu"
+        f.write_text(json.dumps({"av1-2560x1440-gpu": ["GPU d3d11va", ["-hwaccel", "d3d11va"]]}))
+        assert serverscan.decoder_family() == "gpu"
+        f.unlink()
+        assert serverscan.decoder_family() == "gpu"
+    finally:
+        if keep is not None:
+            f.write_text(keep)
+def _check_settings(**kw):
+    kw = {"encoder": "av1_texture_amf", "comms_consent": True, **kw}
+    s = settings.Settings(folder=str(TMP / f"vids-{time.time_ns()}"), **kw)
+    return s.clamp()
+
+
+class _Usage:
+    def __init__(self, free_gb):
+        self.free = free_gb * 1e9
+
+
+def test_rec_check_items():
+    """Each item of the recording check: green / red / amber with a short fix line, nothing personal in the summary."""
+    from pcs_recorder import precheck as pc
+    s = _check_settings()
+    # disk: a 4 h session at the chosen bitrate
+    need = s.gb_per_hour * pc.SESSION_H
+    assert pc.disk_item(s, lambda p: _Usage(need + 50))["state"] == "ok"
+    low = pc.disk_item(s, lambda p: _Usage(need / 2))
+    assert low["state"] == "bad" and "GB free" in low["text"] and low["fix"]
+
+    def gone(p):
+        raise OSError("drive missing")
+    assert pc.disk_item(s, gone)["state"] == "bad"
+    # other capture apps: Medal red, NVIDIA overlay / AMD Instant Replay / Game Bar amber, our own OBS ignored
+    ours = str(pc.obsmod.OBS_EXE)
+    assert pc.apps_item([("obs64.exe", ours), ("explorer.exe", "")])["state"] == "ok"
+    red = pc.apps_item([("Medal.exe", "C:/x/Medal.exe"), ("MedalEncoder.exe", ""), ("Overwolf.exe", "")])
+    assert red["state"] == "bad" and red["text"].startswith("Medal, Overwolf are running") and "Close Medal" in red["fix"]
+    amber = pc.apps_item([("NVIDIA Share.exe", "")], amd_replay=True, gamebar_bg=True)
+    assert amber["state"] == "warn" and "Alt+Z" in amber["fix"] and "Record what happened" in amber["fix"]
+    assert pc.apps_item([("obs64.exe", "C:/Program Files/obs-studio/bin/64bit/obs64.exe")])["state"] == "warn"
+    # encoder: the test's result is reused
+    assert pc.encoder_item(s, "amd radeon rx 9070 xt")["state"] == "ok"
+    assert "AV1 on your AMD card" in pc.encoder_item(s, "amd radeon rx 9070 xt")["text"]
+    assert pc.encoder_item(s, "nvidia geforce rtx 3060 ti")["state"] == "bad"          # card changed since the test
+    assert pc.encoder_item(s, None, last_failed=True)["state"] == "warn"
+    assert pc.encoder_item(s, None, setting_up=True)["state"] == "wait"
+    assert pc.encoder_item(_check_settings(encoder=""), None)["state"] == "bad"
+    # game sound: only once Apex runs
+    assert pc.game_item(s, False)["text"] == "Checked when Apex starts"
+    assert pc.game_item(s, True, 0.2)["state"] == "ok" and pc.game_item(s, True, 0.0, done=True)["state"] == "bad"
+    assert pc.game_item(_check_settings(game_audio=False), True)["state"] == "off"
+    # voice app and mic
+    assert pc.voice_item(s, set())["state"] == "bad" and "Discord isn't open" in pc.voice_item(s, set())["text"]
+    early = pc.voice_item(s, set(), apex=False)                                         # before Apex: normal, grey
+    assert early["state"] == "wait" and "checked when Apex starts" in early["text"]
+    assert pc.voice_item(s, {"discord.exe"}, 0.3)["state"] == "ok"
+    assert pc.voice_item(s, {"discord.exe"}, 0.0)["state"] == "wait"                   # nobody talks: not red
+    assert pc.voice_item(settings.Settings().clamp(), set())["state"] == "off"          # no team consent
+    mics = [{"id": "{0.0.1.00000000}.{abc}", "name": "Mic"}]
+    assert pc.mic_item(s, mics, True)["state"] == "bad"                                 # Windows privacy blocks it
+    s2 = _check_settings(mic_device="{0.0.1.00000000}.{gone}")
+    assert pc.mic_item(s2, mics, False)["state"] == "bad" and pc.mic_item(s, [], False)["state"] == "bad"
+    assert pc.mic_item(s, mics, False, 0.01)["state"] == "ok" and pc.mic_item(s, mics, False, 0.0)["state"] == "warn"
+    # the summary for crash reports: states and app names only
+    items = {"obs": pc.obs_item(True, False, "OBS didn't answer on port 4466: refused"), "apps": red,
+             "disk": low, "mic": pc.mic_item(s2, mics, False)}
+    line = pc.summary(items)
+    assert line.startswith("obs:bad(") and "apps:bad(Medal, Overwolf)" in line and "disk:bad" in line, line
+    assert "vids-" not in line and "{gone}" not in line and len(line) <= 300
+
+
+class _FakeAdapter:
+    """Stands in for runtime.ObsAdapter: ensure_ready() starts OBS (obs["on"]) when it isn't running."""
+    def __init__(self, fail=None, obs=None):
+        self.fail, self.calls, self.ready = fail, 0, False
+        self.obs = obs if obs is not None else {"on": False}
+
+    def ensure_ready(self):
+        self.calls += 1
+        self.obs["on"] = True
+        if self.fail:
+            raise RuntimeError(self.fail)
+        self.ready = True
+
+
+def _check_for(s, rec=None, adapter=None, ui=None, procs=(), peaks=None):
+    from pcs_recorder import precheck as pc
+    c = pc.RecCheck(s, adapter if adapter is not None else _FakeAdapter(), rec, ui)
+    c.threaded = False
+    c.procs = lambda: list(procs)
+    c.disk = lambda p: _Usage(500)
+    c.mics = lambda: [{"id": "{0.0.1.00000000}.{abc}", "name": "Mic"}]
+    c.mic_blocked = c.amd_replay = c.gamebar = lambda: False
+    c.installed = lambda: True
+    c.read_gpu = lambda: "amd radeon rx 9070 xt"
+    ad = c.adapter
+    obs_ = ad.obs if isinstance(ad, _FakeAdapter) else {"on": False}
+    c.obs_state, c.closes = obs_, []
+    c.obs_running = lambda: obs_["on"]
+    c.close_obs = lambda: (c.closes.append(1), obs_.update(on=False))
+    c.listened = []
+
+    def listen(s_, names, seconds, stop=lambda: False, enough=lambda p: False):
+        c.listened.append((sorted(set(names.values())), seconds))
+        return dict(peaks or {})
+    c.listen = listen
+    c.confirm_after = 0
+    return c
+
+
+def test_rec_check_full_run():
+    """Check again: OBS started and asked (no encoder test, no restart), voice / mic from the level meters."""
+    s = _check_settings()
+    ad = _FakeAdapter()
+    c = _check_for(s, adapter=ad, procs=[("Discord.exe", "")], peaks={"discord": 0.2, "mic": 0.0})
+    assert c.start(manual=True)
+    pub = c.public()
+    st_ = {i["id"]: i["state"] for i in pub["items"]}
+    assert ad.calls == 1 and not pub["running"] and pub["at"], pub
+    assert c.closes == [1] and not c.obs_state["on"]                       # started by the check: closed again
+    assert st_ == {"obs": "ok", "encoder": "ok", "game": "wait", "voice": "ok", "mic": "warn", "disk": "ok",
+                   "apps": "ok"}, st_
+    assert c.listened == [(["discord", "mic"], c.listen_s)]                 # game sound is not listened before Apex
+    assert pub["red"] == 0
+    # OBS doesn't answer: red with a fix, the meters aren't asked
+    c2 = _check_for(s, adapter=_FakeAdapter("OBS didn't answer on port 4466: refused"), procs=[("Discord.exe", "")])
+    c2.start(manual=True)
+    obs_ = c2.public()["items"][0]
+    assert obs_["id"] == "obs" and obs_["state"] == "bad" and "Check again" in obs_["fix"] and c2.listened == []
+    assert c2.public()["red"] == 1
+
+
+def test_rec_check_leaves_obs_as_found():
+    """The automatic run (app start, Windows logon) never starts OBS; Check again starts it only to check and closes
+    it again when it wasn't running, never while Apex runs or the encoder test runs."""
+    s = _check_settings()
+
+    class _R:
+        apex, current = False, None
+        idx = {}
+    rec = _R()
+    ad = _FakeAdapter()
+    c = _check_for(s, rec=rec, adapter=ad, peaks={"discord": 0.1, "mic": 0.1})
+    c.start()                                                                    # automatic, OBS not running
+    st_ = {i["id"]: i for i in c.public()["items"]}
+    assert ad.calls == 0 and not c.obs_state["on"] and c.closes == [] and c.listened == []
+    assert st_["obs"]["state"] == "wait" and st_["obs"]["text"] == "Checked when Apex starts"
+    assert st_["voice"]["state"] == "wait" and st_["game"]["state"] == "wait"   # Discord not open yet: grey
+    from pcs_recorder import precheck as pc
+    c.last_start = pc_item = pc.item("obs", "ok", "Started fine")
+    c.start()
+    assert c.public()["items"][0] == pc_item and ad.calls == 0                  # the last real start's result
+    c.obs_state["on"] = True                                                     # OBS already running: asked, kept
+    c.start()
+    assert ad.calls == 0 and c.public()["items"][0]["text"] == "Running" and c.closes == [] and c.listened
+    c.start(manual=True)
+    assert ad.calls == 1 and c.closes == [] and c.obs_state["on"]               # was running: left running
+    c.obs_state["on"] = False
+    rec.apex = True                                                              # Apex runs (not recording yet)
+    c.start(manual=True)
+    assert ad.calls == 1 and not c.obs_state["on"] and c.closes == []
+    rec.apex = False
+    c.setting_up = lambda: True                                                  # encoder test running
+    c.start(manual=True)
+    assert ad.calls == 1 and c.public()["items"][0]["state"] == "wait"
+    c.setting_up = lambda: False
+    # Apex starts while Check again listens: OBS stays open for the recording
+    c.listen = lambda *a, **k: (setattr(rec, "apex", True), {})[1]
+    c.start(manual=True)
+    assert ad.calls == 2 and c.obs_state["on"] and c.closes == []
+
+
+def test_rec_check_at_apex_start():
+    """Apex starts: one message when something is red (once per Apex session), Apex's sound confirmed from the
+    meters in the first minutes; no sound = red, a message and a crash report carrying the check's summary."""
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        s.comms_consent = True
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI(False)
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r._final_file = lambda p, wait_s=0: p
+        c = _check_for(s, rec=r, ui=ui, procs=[("Medal.exe", ""), ("Discord.exe", "")],
+                       peaks={"game": 0.0, "discord": 0.1, "mic": 0.05})
+        r.check = c
+        r.tick()
+        apex["on"] = True; r.tick(); r.tick()
+        notes = [n for n in ui.notes if n[0] == "Recording check"]
+        assert len(notes) == 2, ui.notes                       # Medal (at start) + no Apex sound (first minutes)
+        assert "Medal" in notes[0][1] and "Fix:" in notes[0][1] and notes[0][2] is True
+        assert "No Apex sound" in notes[1][1]
+        st_ = {i["id"]: i["state"] for i in c.public()["items"]}
+        assert st_["game"] == "bad" and st_["voice"] == "ok" and st_["mic"] == "ok" and st_["obs"] == "ok", st_
+        assert sent[-1]["kind"] == "record_start" and "No Apex sound" in sent[-1]["error"]
+        assert "apps:bad(Medal)" in sent[-1]["context"]["check"] and "game:bad" in sent[-1]["context"]["check"]
+        apex["on"] = False; r.tick()
+        # next session, sound fine: one message again (Medal still runs), no new report
+        n_sent = len(sent)
+        c.listen = lambda *a, **k: {"game": 0.3, "discord": 0.1, "mic": 0.05}
+        apex["on"] = True; r.tick()
+        assert len([n for n in ui.notes if n[0] == "Recording check"]) == 3
+        assert {i["id"]: i["state"] for i in c.public()["items"]}["game"] == "ok" and len(sent) == n_sent
+        apex["on"] = False; r.tick()
+    finally:
+        _crash_teardown()
+
+
+def test_rec_check_in_failed_start_report():
+    """Recording doesn't start: the crash report carries the check (what was red), one message with the cause."""
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI(False)
+
+        def bad_start():
+            raise RuntimeError("OBS didn't answer on port 4466")
+        obs.start = bad_start
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r.check = _check_for(s, rec=r, ui=ui, procs=[("Outplayed.exe", "")])
+        apex["on"] = True; r.tick(); r.tick(); r.tick()          # the recorder tries again every tick
+        ctx = sent[0]["context"]["check"]
+        assert sent[0]["kind"] == "record_start" and "obs:bad(" in ctx and "apps:bad(Outplayed)" in ctx, ctx
+        msgs = [n for n in ui.notes if n[0] == "Recording check"]
+        assert len(msgs) == 1 and "Outplayed" in msgs[0][1], ui.notes
+    finally:
+        _crash_teardown()
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback
@@ -4043,6 +4844,537 @@ def run_all(tests):
     for name in failed:
         print("  failed:", name, flush=True)
     return 1 if failed else 0
+
+
+def test_scanner_speedups_give_the_same_numbers():
+    """The faster weapon match, debug overlay glyphs and teammate-card bar runs give exactly the old values
+    (checked here on random data; on real recordings: same scan.json / feed.json for 3 recordings)."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as H
+    import pcs_respawn as R
+    rng = np.random.default_rng(7)
+    # weapon match: numpy's irfft2 vs its two steps with only the needed rows (bit for bit)
+    FH, FW = H.Weapons.FH, H.Weapons.FW
+    for h, th, tw in ((44, 29, 80), (64, 13, 88), (36, 32, 40)):
+        c = np.zeros((FH, FW)); c[:h, :600] = rng.integers(0, 256, (h, 600))
+        t = np.zeros((FH, FW)); t[:th, :tw] = rng.normal(size=(th, tw))
+        G, F = np.fft.rfft2(c), np.conj(np.fft.rfft2(t))
+        old = np.fft.irfft2(G * F, s=(FH, FW))[:h - th + 1, :600 - tw + 1]
+        new = np.fft.irfft(np.fft.ifft(G * F, FH, 0)[:h - th + 1], FW, 1)[:, :600 - tw + 1]
+        assert np.array_equal(old, new), (h, th, tw)
+    # debug overlay line: every glyph at once vs one at a time
+    m = rng.random((70, 300)) > 0.6
+    for k, (y, x) in enumerate(((22, 3 + 8 * 8), (50, 3 + 8 * 20))):            # real glyphs in some cells
+        m[y:y + 9, x:x + 7] = list(H.DBG_T.values())[k] > 0
+    m[22:31, 3 + 8 * 10:3 + 8 * 11] = False                                      # an empty cell
+    stack = H._DBG_STACK
+    try:
+        new = [H._dbg_line(m, y) for y in (22, 50)]
+        H._DBG_STACK = None
+        old = [H._dbg_line(m, y) for y in (22, 50)]
+    finally:
+        H._DBG_STACK = stack
+    assert new == old and stack is not None, (new, old)
+    # teammate cards: white run lengths without the per-row loop
+    for _ in range(5):
+        a = rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8)
+        a[R.Y0 + 40:R.Y0 + 52, R.NAME_X0 + 5:R.NAME_X0 + 120] = 255                  # a health bar
+        white, _ = R.masks(a)
+        wl = R._left(white)
+        old = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
+                        if wl[y] < 999 else 0 for y in range(white.shape[0])])
+        after = ~white & (np.arange(white.shape[1])[None, :] >= wl[:, None])
+        new = np.where(wl < 999, np.where(after.any(1), after.argmax(1) - wl, white.shape[1] - wl), 0)
+        assert np.array_equal(old, new)
+        assert R.read_cards(a) is not None
+
+
+
+# ------------------------------------------------------------------ clips for Discord (pcs_recorder/clips.py)
+def test_clip_size_rules():
+    """Discord clips stay under 10 MB: bitrate from the length, picture smaller and 30 fps as the bitrate drops,
+    too long refused; H.264 on the card the recorder uses (NVENC / AMF / Quick Sync), else x264."""
+    from pcs_recorder import clips
+    assert clips.DISCORD_TARGET < clips.DISCORD_BYTES <= 10_000_000
+    k30 = clips.discord_video_kbps(30, 1)
+    assert 2000 < k30 < 2500 and (k30 + 96) * 30 * 1000 / 8 < clips.DISCORD_TARGET
+    assert clips.discord_video_kbps(60, 0) > clips.discord_video_kbps(60, 2)       # no sound = more for the picture
+    m = clips.discord_max_s(1)
+    assert clips.discord_video_kbps(m, 1) >= clips.MIN_VIDEO_KBPS > clips.discord_video_kbps(m + 5, 1)
+    assert clips.out_format(2560, 1440, 60, "discord", 8000) == (1920, 1080, 60)
+    assert clips.out_format(2560, 1440, 60, "discord", 2256) == (1280, 720, 30)
+    assert clips.out_format(2560, 1440, 60, "discord", 734) == (854, 480, 30)
+    assert clips.out_format(1280, 720, 60, "discord", 8000) == (1280, 720, 60)      # never larger than the recording
+    assert clips.out_format(1440, 1080, 60, "discord", 2256) == (960, 720, 30)      # 4:3 stays 4:3
+    assert clips.out_format(2560, 1440, 60, "full", None) == (2560, 1440, 60)
+    assert clips.full_kbps(2560, 1440, 60) == 20000 and 12000 < clips.full_kbps(1920, 1080, 60) < 14000
+    assert [clips.hw_encoder(e) for e in ("jim_av1_nvenc", "obs_nvenc_hevc_tex", "av1_texture_amf", "obs_qsv11_v2", "")] == \
+        ["h264_nvenc", "h264_nvenc", "h264_amf", "h264_qsv", "libx264"]
+    for enc in ("h264_nvenc", "h264_amf", "h264_qsv", "libx264"):
+        a = clips.encoder_args(enc, "discord", 2000)
+        assert a[a.index("-c:v") + 1] == enc and "-maxrate" in a and "3000k" in a
+        assert "-maxrate" in clips.encoder_args(enc, "full", 20000)                 # full quality has a ceiling too
+
+
+def test_clip_note_spans():
+    """Coach notes in clip time, as the review player shows them (t - 0.05 to t + dur); notes without text or
+    drawing are skipped; same notes side by side are one picture."""
+    from pcs_recorder import clips
+    a = {"t": 10, "dur": 5, "text": "Push", "drawings": []}
+    b = {"t": 12, "dur": 10, "text": "", "drawings": [{"kind": "pen", "color": "#fff", "pts": [[0, 0]]}]}
+    empty = {"t": 11, "dur": 5, "text": " ", "drawings": []}
+    far = {"t": 100, "dur": 5, "text": "later"}
+    sp = clips.note_spans([a, b, empty, far], 8, 20)
+    assert [(round(x, 2), round(y, 2), [n is a for n in on]) for x, y, on in sp] == \
+        [(1.95, 3.95, [True]), (3.95, 7.0, [True, False]), (7.0, 12.0, [False])], sp
+    assert clips.note_spans([a], 16, 30) == [] and clips.note_spans([], 0, 5) == []
+    many = [{"t": i, "dur": 0.5, "text": str(i)} for i in range(100)]
+    assert len(clips.note_spans(many, 0, 100)) == clips.MAX_OVERLAYS
+
+
+def test_clip_teammate_offsets():
+    """A teammate's track: their time = this recording's time + off, only inside the game part it belongs to."""
+    from pcs_recorder import clips
+    parts = [{"start": 50, "end": 1550, "off": 140}, {"start": 1550, "end": None, "off": 140}]
+    assert clips.team_inputs(parts, 100, 130) == [(240, 30, 0)]
+    assert clips.team_inputs(parts, 1540, 1560) == [(1680, 10, 0), (1690, 10, 10)]       # across two games
+    assert clips.team_inputs([{"start": 0, "end": None, "off": -20}], 10, 40) == [(0, 20, 10)]   # they started later
+    assert clips.team_inputs([{"start": 0, "end": 30, "off": 5}], 40, 60) == []
+
+
+def test_clip_ffmpeg_command():
+    """One ffmpeg run: video cut at the range, notes laid over for their time, chosen tracks mixed at their levels
+    with teammates' tracks delayed to their place; no tracks = no sound."""
+    from pcs_recorder import clips
+    src = {"codec": "av1", "w": 2560, "h": 1440, "fps": 60}
+    cmd = clips.build_cmd("rec.mp4", "out.part", 100, 130, w=1280, h=720, fps=30, src=src, own=[0, 2],
+                          team=[("zed.m4a", [{"start": 0, "end": None, "off": -110}])],
+                          overlays=[("n0.png", 2, 5)], enc="h264_amf", size="discord", vkbps=2000, hwdec=False)
+    s = " ".join(cmd)
+    assert "-hwaccel" not in cmd and cmd[cmd.index("-ss") + 1] == "100.000" and cmd[-1] == "out.part"
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=1280:720" in fc and "fps=30" in fc and "between(t,2.000,5.000)" in fc
+    assert "[0:a:0]" in fc and "[0:a:2]" in fc and "[0:a:1]" not in fc                 # track 2 (voice app) not chosen
+    assert "adelay=10000|10000" in fc and "amix=inputs=4:duration=first:normalize=0" in fc   # silence + 3 tracks
+    assert "-ss 0.000 -t 20.000 -i zed.m4a" in s and "-b:a 96k" in s and "-movflags +faststart" in s
+    quiet = clips.build_cmd("rec.mp4", "o", 0, 5, w=2560, h=1440, fps=60, src=src, own=[], team=[], overlays=[],
+                            enc="libx264", size="full", vkbps=20000, hwdec=True)
+    assert "-an" in quiet and "amix" not in " ".join(quiet)
+    fc = quiet[quiet.index("-filter_complex") + 1]
+    assert "scale" not in fc and "fps=" not in fc                               # full: the recording's size
+    if os.name == "nt":
+        i = quiet.index("-hwaccel")
+        assert quiet[i + 1:i + 4] == ["d3d11va", "-c:v", "av1"]
+
+
+def test_clip_note_picture():
+    """The coach's drawing and note text drawn at the clip's size: lines where they are, see-through elsewhere."""
+    from PIL import Image
+    from pcs_recorder import clips
+    out = TMP / "clipnote" / "n.png"
+    note = {"t": 0, "dur": 5, "text": "Rotate now, ring is closing", "drawings": [
+        {"kind": "arrow", "color": "#ff3b30", "pts": [[0.1, 0.5], [0.5, 0.5]]},
+        {"kind": "rect", "color": "#0a84ff", "pts": [[0.1, 0.7], [0.3, 0.9]]}]}
+    clips.render_notes([note], 640, 360, out)
+    im = Image.open(out).convert("RGBA")
+    assert im.size == (640, 360)
+    r, g, b, a = im.getpixel((192, 180))                  # on the arrow
+    assert a == 255 and r > 200 and g < 120, (r, g, b, a)
+    assert im.getpixel((5, 350))[3] == 0                  # nothing there
+    r, g, b, a = im.getpixel((int(0.1 * 640), 290))      # left side of the box
+    assert a == 255 and b > 200, (r, g, b, a)
+    top_right = [im.getpixel((x, y)) for x in range(400, 640) for y in range(0, 60)]
+    assert any(p[0] > 240 and p[1] > 200 and p[2] < 60 and p[3] == 255 for p in top_right)   # the yellow bar
+    clips.render_notes([{"text": "x" * 3000, "drawings": [{"kind": "bogus", "color": "nope", "pts": [[2, 2]]}]}],
+                       320, 180, out)                     # odd input doesn't break it
+
+
+def test_clip_clipboard_data():
+    """Copy file: the clipboard gets the file as Explorer copies it (CF_HDROP, wide names, ends with two NULs)."""
+    import struct
+    from pcs_recorder import clips
+    p = str(TMP / "Clips" / "a clip.mp4")
+    d = clips.hdrop([p])
+    assert struct.unpack("<IiiII", d[:20]) == (20, 0, 0, 0, 1)
+    assert d[20:].decode("utf-16-le") == os.path.abspath(p) + "\0\0"
+    if os.name == "nt" and os.environ.get("CI"):          # the real clipboard only on CI (not a player's clipboard)
+        import ctypes
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_bytes(b"x")
+        clips.copy_files_to_clipboard([p])
+        u32, sh = ctypes.windll.user32, ctypes.windll.shell32
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        sh.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        assert u32.OpenClipboard(None)
+        try:
+            h = u32.GetClipboardData(15)
+            buf = ctypes.create_unicode_buffer(520)
+            assert h and sh.DragQueryFileW(h, 0, buf, 520) and buf.value == os.path.abspath(p)
+        finally:
+            u32.CloseClipboard()
+
+
+def _clip_source(folder, secs=8):
+    import subprocess
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "Apex Legends_clip-test.mp4"
+    tones = []
+    for f in (300, 500, 700):
+        tones += ["-f", "lavfi", "-i", f"sine=f={f}:d={secs}"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=640x360:r=30:d={secs}"]
+                   + tones + ["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-c:a", "aac", str(v)], check=True)
+    mate = folder / "mate.m4a"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f=900:d={secs + 5}", "-c:a", "aac",
+                    str(mate)], check=True)
+    return v, mate
+
+
+def _clip_wait(c, s=120):
+    end = time.time() + s
+    while c.state()["running"] and time.time() < end:
+        time.sleep(0.05)
+    return c.state()
+
+
+def test_clip_made_with_ffmpeg():
+    """A real clip: saved in Clips next to the recording as H.264 + AAC MP4 (plays in Discord), the range's length,
+    one mixed sound track, coach note burned in; under 10 MB; no .part or temp files left; Show / Copy only on it."""
+    import json as _json
+    import shutil
+    import subprocess
+    from pcs_recorder import clips
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("  (skipped: no ffmpeg)")
+        return
+    v, mate = _clip_source(TMP / "cliprec")
+    c = clips.Clipper()
+    note = {"t": 3, "dur": 2, "text": "Here", "drawings": [{"kind": "circle", "color": "#ffd60a", "pts": [[.3, .3], [.7, .7]]}]}
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "discord", "own": [0, 2],
+             "team": [(str(mate), [{"start": 0, "end": None, "off": 2}], "Zed")], "notes": [note], "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and not st["error"], st
+    f = Path(st["file"])
+    assert f.parent == v.parent / "Clips" and f.name == "Apex Legends_clip-test clip 0m01s-0m06s.mp4"
+    assert f.stat().st_size < clips.DISCORD_BYTES and st["encoder"] == "libx264"
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                     "stream=codec_type,codec_name,pix_fmt,channels:format=duration", "-of", "json",
+                                     str(f)], capture_output=True, text=True).stdout)
+    kinds = [(x["codec_type"], x["codec_name"]) for x in pr["streams"]]
+    assert kinds == [("video", "h264"), ("audio", "aac")], kinds
+    assert pr["streams"][0]["pix_fmt"] == "yuv420p" and pr["streams"][1]["channels"] == 2
+    assert abs(float(pr["format"]["duration"]) - 5.0) < 0.15, pr["format"]
+    frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", "2", "-i", str(f), "-frames:v", "1", "-f", "rawvideo",
+                            "-pix_fmt", "rgb24", "-"], capture_output=True).stdout          # clip 2 s = recording 3.5 s
+
+    def px(x, y):
+        i = (y * 640 + x) * 3
+        return frame[i:i + 3]
+    assert any(p[0] > 200 and p[1] > 170 and p[2] < 90 for p in (px(x, 180) for x in range(185, 200))), "no circle"
+    assert not list(f.parent.glob("*.part")) and not list(Path(tempfile.gettempdir()).glob("pcs-clip-*"))
+    assert c.own_clip(str(f)) == str(f) and c.own_clip(str(v)) is None                 # Show / Copy: only its clips
+    # no sound chosen: no sound track; same name again gets (2)
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "full", "own": [], "team": [], "notes": [],
+             "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["name"].endswith(" (2).mp4"), st
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json",
+                                     st["file"]], capture_output=True, text=True).stdout)
+    assert [x["codec_type"] for x in pr["streams"]] == ["video"]
+
+
+def test_clip_stops_and_falls_back():
+    """Apex starting stops the clip (nothing left behind); a graphics card encoder that fails falls back to the CPU;
+    a Discord clip that came out too big is made again smaller."""
+    from pcs_recorder import clips
+    folder = TMP / "clipfake"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "rec.mp4"
+    v.write_bytes(b"video")
+    src = {"codec": "hevc", "w": 2560, "h": 1440, "fps": 60, "dur": 600}
+    busy = {"why": None}
+    runs = []
+    script = {}
+
+    def run(cmd, length):
+        runs.append(cmd)
+        enc = cmd[cmd.index("-c:v", cmd.index("-filter_complex")) + 1]
+        if enc == "h264_nvenc" and "-hwaccel" in cmd:
+            return 1, "decoder failed"
+        if script.get("apex"):
+            busy["why"] = "Apex is running"
+        Path(cmd[-1]).write_bytes(b"x" * script["sizes"].pop(0))
+        return 0, ""
+    c = clips.Clipper(lambda: busy["why"], run=run)
+    spec = {"video": str(v), "start": 10, "end": 40, "size": "discord", "src": src, "own": [0], "team": [], "notes": [],
+            "obs_encoder": "jim_nvenc"}
+    # card encoder with card decoding fails -> same encoder, CPU decoding; first file too big -> made again lower
+    script.update(sizes=[12_000_000, 9_000_000])
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and st["mb"] == 9.0 and not st["over"], st
+    rates = [int(r[r.index("-b:v") + 1].rstrip("k")) for r in runs]
+    if os.name == "nt":
+        assert len(runs) == 3 and "-hwaccel" in runs[0] and "-hwaccel" not in runs[1], runs
+    assert rates[2] < rates[1] * 0.8, rates
+    # Apex starts during the clip: stopped, no file, no .part
+    runs.clear()
+    script.update(sizes=[5_000_000], apex=True)
+    spec["end"] = 20
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
+    # Apex running: refused at once
+    try:
+        c.start(spec)
+        raise AssertionError("not refused")
+    except RuntimeError as e:
+        assert "Apex" in str(e)
+    busy["why"] = None
+    script["apex"] = False
+    # too long for 10 MB: said so, nothing made
+    spec.update(start=0, end=500)
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Failed" and "Too long for 10 MB" in st["error"], st
+
+# ---------------------------------------------------------------- comms transcripts (pcs_recorder/comms.py)
+
+def _comms_setup(name, mic=True, consent=True):
+    """A scanned recording with an events.json, settings with the given answers, and a Comms job on it."""
+    import json
+    from pcs_recorder import comms
+    d = TMP / name
+    d.mkdir(parents=True, exist_ok=True)
+    rec = d / "Apex Legends_2026.11.19-20.00.mp4"
+    rec.write_bytes(b"x" * 100)
+    rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"] if mic else ["game"]}))
+    (d / (rec.stem + ".scan")).mkdir(exist_ok=True)
+    s = settings.Settings()
+    s.player, s.comms_consent, s.mic_audio, s.transcript_consent, s.hub_url = "tester", True, True, consent, "http://hub"
+    idx = {"k1": retention.Entry(path=str(rec), started=time.time() - 600, status="uploaded")}
+    sent = []
+    job = comms.Comms(lambda: s, lambda: idx, lambda: None, lambda files: sent.append([Path(f).name for f in files]))
+    job.st = {"recs": {}}
+    return comms, job, s, idx, rec, sent
+
+
+FAKE_WORKER = r'''
+import json, sys, time
+a = sys.argv[1:]
+out = a[a.index("--out") + 1]
+if a[0].endswith("sleep.mp4"):
+    time.sleep(60)
+print(json.dumps({"done": 10, "total": 20}), flush=True)
+json.dump({"v": 1, "kind": "comms", "speaker": a[a.index("--speaker") + 1], "audioSeconds": 20, "seconds": 1,
+           "language": "fr", "segments": [{"start": 1.5, "end": 3.0, "text": "il est one shot", "speaker":
+           a[a.index("--speaker") + 1], "p": -0.2}]}, open(out, "w"))
+print(json.dumps({"finished": True}), flush=True)
+'''
+
+
+def _fake_worker(comms, sleep=False):
+    w = TMP / "fake_worker.py"
+    w.write_text(FAKE_WORKER)
+    comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
+    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None: TMP
+
+
+def test_comms_only_with_the_players_yes():
+    """No transcript without the yes (or without the team's comms consent / the mic), and only recordings with a mic
+    track; the transcript never goes to Drive with the results."""
+    comms, job, s, idx, rec, _ = _comms_setup("comms-consent", consent=False)
+    assert not comms.eligible(s) and job.tick() is False and not job.running
+    s.transcript_consent = True
+    assert comms.eligible(s)
+    s.comms_consent = False
+    assert not comms.eligible(s)
+    s.comms_consent, s.mic_audio = True, False
+    assert not comms.eligible(s)
+    s.mic_audio = True
+    assert job.todo() == [("k1", str(rec))]
+    assert comms.mic_stream(rec) == 2
+    idx["k1"].status = "recorded"                      # not scanned yet: waits
+    assert job.todo() == []
+    idx["k1"].status = "scanned"
+    idx["k1"].started = time.time() - 5 * 86400        # too old
+    assert job.todo() == []
+    # the transcript and its kept parts stay out of the scan's results (Drive, re-sends)
+    from pcs_recorder.core import result_files
+    out = rec.with_suffix(".scan")
+    (out / (rec.stem + ".scan.json")).write_text("{}")
+    (out / (rec.stem + ".comms.json")).write_text("{}")
+    (out / (rec.stem + ".comms.partial.json")).write_text("{}")
+    assert [p.name for p in result_files(out)] == [rec.stem + ".scan.json"]
+
+
+def test_comms_transcribes_and_sends_to_hub():
+    comms, job, s, idx, rec, sent = _comms_setup("comms-run")
+    _fake_worker(comms)
+    out = job.transcribe(str(rec))
+    assert out == comms.comms_path(rec) and out.is_file()
+    d = comms.transcript_of(rec)
+    assert d["speaker"] == "tester" and d["segments"][0]["text"] == "il est one shot" and d["segments"][0]["start"] == 1.5
+    r = job.st["recs"][rec.stem]
+    assert r["status"] == "done" and r["segments"] == 1 and r["sent"]
+    assert sent == [[rec.stem + ".comms.json"]]
+    assert job.todo() == []                             # done once
+    # no mic track: nothing to transcribe, never asked again
+    comms2, job2, *_ , rec2, sent2 = _comms_setup("comms-nomic", mic=False)
+    assert job2.transcribe(str(rec2)) is None and job2.st["recs"][rec2.stem]["status"] == "no_mic" and job2.todo() == []
+    # said no after it was made: not sent
+    comms3, job3, s3, idx3, rec3, sent3 = _comms_setup("comms-no-after")
+    _fake_worker(comms3)
+    s3.hub_url = ""
+    job3.transcribe(str(rec3))
+    assert sent3 == [] and job3.unsent() == []
+    s3.hub_url, s3.transcript_consent = "http://hub", False
+    assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
+
+
+def test_comms_not_sent_to_a_hub_without_comms():
+    """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
+    can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-old-hub")
+    _fake_worker(comms)
+    ok = [False]
+    job.hub_ok = lambda: ok[0]
+    job.transcribe(str(rec))
+    assert sent == [] and job.st["recs"][rec.stem]["sendNote"] == comms.HUB_TOO_OLD
+    assert job.unsent() == [comms.comms_path(rec)]
+    ok[0] = True
+    assert job._send(comms.comms_path(rec)) is True and sent == [[rec.stem + ".comms.json"]]
+
+
+def test_hub_has_feature():
+    from pcs_recorder import hub
+    calls = []
+
+    class R:
+        def __init__(self, ok, body): self.ok, self._b = ok, body
+        def json(self): return self._b
+    answers = {"http://new": R(True, {"features": ["comms"]}), "http://old": R(True, {"name": "x"}),
+               "http://down": None}
+
+    def fake(url, method, path, **kw):
+        calls.append(url)
+        if answers[url] is None:
+            raise hub.HubError("no answer", "network")
+        return answers[url]
+    real, hub.request = hub.request, fake
+    try:
+        hub._features.clear()
+        assert hub.has_feature("http://new", "comms") and hub.has_feature("http://new", "comms")
+        assert calls.count("http://new") == 1                      # cached
+        assert not hub.has_feature("http://old", "comms") and not hub.has_feature("http://down", "comms")
+        assert not hub.has_feature("", "comms")
+    finally:
+        hub.request = real
+        hub._features.clear()
+
+
+def test_comms_stops_when_apex_starts():
+    """Apex starting stops the transcriber within seconds; the stop is not counted as a failed try."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-apex")
+    slow = rec.with_name("sleep.mp4")
+    rec.rename(slow)
+    rec.with_suffix(".events.json").rename(slow.with_suffix(".events.json"))
+    _fake_worker(comms, sleep=True)
+    comms.BUSY_EVERY_S = 0.2
+    t0 = time.time()
+    job.busy = lambda: "Apex is running" if time.time() - t0 > 1 else None
+    try:
+        job.transcribe(str(slow))
+        raise AssertionError("not stopped")
+    except comms.Busy:
+        pass
+    finally:
+        comms.BUSY_EVERY_S = 3
+    assert time.time() - t0 < 20 and job.proc is None
+    assert job.st["recs"]["sleep"]["tries"] == 0 and not comms.comms_path(slow).exists()
+
+
+def test_comms_downloads_are_checked():
+    """Model and component: https only, size and SHA-256 must match the pinned values, zip paths stay inside."""
+    import hashlib
+    import io
+    import zipfile
+    import requests
+    from pcs_recorder import comms
+    dest = TMP / "dl" / "model.bin"
+    try:
+        comms.fetch("http://huggingface.co/x", dest, "0" * 64, 1)
+        raise AssertionError("http accepted")
+    except comms.Unavailable:
+        pass
+    try:
+        comms.fetch("https://example.com/x", dest, "0" * 64, 1)
+        raise AssertionError("other host accepted")
+    except comms.Unavailable:
+        pass
+    body = b"model bytes"
+
+    class R:
+        url, history = "https://cdn.example/x", []
+        def raise_for_status(self): pass
+        def iter_content(self, n): yield body
+    orig = requests.Session.get
+    requests.Session.get = lambda self, *a, **k: R()
+    try:
+        try:
+            comms.fetch("https://huggingface.co/x", dest, "0" * 64, len(body))
+            raise AssertionError("wrong SHA-256 accepted")
+        except comms.Unavailable:
+            pass
+        assert not dest.exists() and not dest.with_name("model.bin.part").exists()
+        comms.fetch("https://huggingface.co/x", dest, hashlib.sha256(body).hexdigest(), len(body))
+        assert dest.read_bytes() == body
+    finally:
+        requests.Session.get = orig
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.txt", "x")
+    try:
+        comms.safe_extract(zipfile.ZipFile(buf), TMP / "zx")
+        raise AssertionError("path outside accepted")
+    except comms.Unavailable:
+        pass
+    assert not (TMP / "evil.txt").exists()
+    # nothing published yet: says so, downloads nothing
+    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+        try:
+            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            raise AssertionError("no component, yet it ran")
+        except comms.Unavailable as e:
+            assert "isn't published" in str(e)
+    # the pinned model is the turbo model's five files
+    assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
+    assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_transcribe_worker_parts_and_clean_text():
+    """The worker cuts long tracks at a quiet moment, fixes Apex words and drops Whisper's filler lines."""
+    import numpy as np
+    import pcs_transcribe as T
+    rate = T.RATE
+    pcm = (np.random.default_rng(1).normal(0, 3000, rate * 1500)).astype(np.int16)
+    pcm[rate * 590:rate * 591] = 0                     # a quiet second inside the last 30 s of part 1
+    ps = T.parts(pcm)
+    assert ps[0][0] == 0 and ps[-1][1] == len(pcm) and all(a[1] == b[0] for a, b in zip(ps, ps[1:]))
+    assert rate * 590 <= ps[0][1] <= rate * 591, ps[0][1] / rate
+    assert len(T.parts(pcm[:rate * 200])) == 1
+    assert T.fix_text("  le  Watson est a Northpad ") == "le Wattson est a North Pad"
+    assert not T.keep_segment("Sous-titrage ST' 501", -0.2, 0.1, [])
+    assert not T.keep_segment("Merci d'avoir regardé cette vidéo", -0.2, 0.1, [])
+    assert not T.keep_segment("euh", -1.5, 0.9, [])
+    assert not T.keep_segment("full", -0.2, 0.1, ["full", "full"])
+    assert T.keep_segment("il est one shot", -0.3, 0.1, ["full"])
+    from pcs_recorder import comms
+    assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
+    assert not comms.is_comms_file("a.scan.json")
 
 
 if __name__ == "__main__":

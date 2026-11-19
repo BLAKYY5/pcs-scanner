@@ -1,4 +1,4 @@
-"""PCS Scanner shared logic (no window): paths, settings, Google Drive, updates, scanning.
+"""PCS Scanner shared logic (no window): paths, settings, YouTube sign-in, updates, scanning.
 Used by the app window, the tray recorder and the headless --scan mode."""
 import os, sys, json, time, subprocess, urllib.request, urllib.error, logging
 
@@ -90,11 +90,8 @@ def setup_logging():
     logging.getLogger('obsws_python').setLevel(logging.WARNING)
 setup_logging()
 
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
-TOKEN_F = os.path.join(DATA, 'google_token.json')
-FOLDER = 'PCS Scans'
 
-# ---------------- sign-in tokens (Google Drive, YouTube) ----------------
+# ---------------- sign-in tokens (YouTube) ----------------
 # Kept encrypted for this Windows user (DPAPI, like the hub key): a copy of the data folder (sent for help, a
 # backup) doesn't carry a working sign-in. A file in clear from an older version is encrypted the first time it is
 # read. Same file names as before, so "signed in / expired / none" checks are unchanged.
@@ -137,24 +134,6 @@ def _saved_creds(path, scopes):
     try: return Credentials.from_authorized_user_info(info, scopes)
     except Exception: return None
 
-# ---------------- Google Drive ----------------
-def drive_service(interactive=True):
-    from google.auth.transport.requests import Request
-    from google_auth_oauthlib.flow import InstalledAppFlow
-    from googleapiclient.discovery import build
-    creds = _saved_creds(TOKEN_F, SCOPES)
-    if creds and creds.expired and creds.refresh_token:
-        try: creds.refresh(Request())
-        except Exception: creds = None
-    if not creds or not creds.valid:
-        if not interactive: return None
-        client = os.path.join(HERE, 'client.json')
-        if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask your coach for a new build.')
-        creds = InstalledAppFlow.from_client_secrets_file(client, SCOPES).run_local_server(port=0, open_browser=True,
-            success_message='PCS Scanner is signed in. You can close this tab.')
-        write_token(TOKEN_F, creds.to_json())
-    return build('drive', 'v3', credentials=creds, cache_discovery=False)
-
 YT_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
 YT_TOKEN_F = os.path.join(DATA, 'youtube_token.json')
 
@@ -175,56 +154,6 @@ def youtube_service(interactive=True):
             success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
         write_token(YT_TOKEN_F, creds.to_json())
     return build('youtube', 'v3', credentials=creds, cache_discovery=False)
-
-def scans_folder(svc):
-    q = f"name = '{FOLDER}' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    r = svc.files().list(q=q, fields='files(id,name)', spaces='drive').execute().get('files', [])
-    if r:
-        try: share_folder(svc, r[0]['id'])      # coach's address added or changed in Settings
-        except Exception: pass
-        return r[0]['id']
-    fid = svc.files().create(body={'name': FOLDER, 'mimeType': 'application/vnd.google-apps.folder'}, fields='id').execute()['id']
-    share_folder(svc, fid)
-    return fid
-
-def coach_email():
-    """The coach's Google address the player typed in Settings (never built into the app), '' if none."""
-    e = str(SETTINGS.get('coach_email') or '').strip()
-    return e if valid_email(e) else ''
-
-def valid_email(e):
-    return bool(_re.fullmatch(r'[^@\s]+@[^@\s]+\.[^@\s]+', str(e or '').strip()))
-
-def share_folder(svc, fid):
-    """Share the scans folder (read only) with the coach's address from Settings, once per address."""
-    who = coach_email()
-    if not who or SETTINGS.get('shared_with') == who.lower():
-        return
-    svc.permissions().create(fileId=fid, sendNotificationEmail=False,
-                             body={'type': 'user', 'role': 'reader', 'emailAddress': who}).execute()
-    SETTINGS['shared_with'] = who.lower()
-    save_settings()
-
-def upload(svc, folder, path, log):
-    from googleapiclient.http import MediaFileUpload
-    name = (SETTINGS.get('player') or 'player') + '__' + os.path.basename(path)
-    q = f"name = '{name}' and '{folder}' in parents and trashed = false"
-    old = svc.files().list(q=q, fields='files(id)').execute().get('files', [])
-    mime = 'audio/mp4' if path.lower().endswith('.m4a') else 'text/plain' if path.lower().endswith('.log') else 'application/json'
-    media = MediaFileUpload(path, mimetype=mime, resumable=True, chunksize=8 * 1024 * 1024)
-    meta = {'appProperties': {'player': SETTINGS.get('player', ''), 'role': SETTINGS.get('role', ''), 'app': BUILD.get('version', '')}}
-    if old: svc.files().update(fileId=old[0]['id'], media_body=media, body=meta).execute()
-    else: svc.files().create(body={'name': name, 'parents': [folder], **meta}, media_body=media, fields='id').execute()
-    log(f'  uploaded {name}')
-
-def drive_upload_quiet(paths):
-    """Upload without any sign-in prompt (used by the recorder). False if the player isn't signed in."""
-    svc = drive_service(interactive=False)
-    if svc is None: return False
-    folder = scans_folder(svc)
-    for p in paths:
-        if p.endswith('.json'): upload(svc, folder, p, logging.info)
-    return True
 
 # ---------------- team file: weapon icons for the kill feed ----------------
 # The scanner names kill-feed weapons from a small private file the coach builds from the game's own icons. It is
@@ -425,14 +354,16 @@ def spawn_detached(cmd):
 def relaunch_args(cur, ok, show):
     """How the finisher starts the app again. Updated: in the tray (--background) with --updated (the new version
     says so in a corner message and never closes itself), or with its window when the player pressed Update in the
-    open window. Copy failed: the old version, with its window, as before (it doesn't know --updated)."""
+    open window. Copy failed: the old version, with its window (it wasn't updated: no "updated" message)."""
     if not ok or show: return [cur]
     return [cur, '--background', '--updated']
 
 def finish_update(cur, old_pid, show=False):
     """Runs in the new exe: wait for the old app to close, copy over it, start it. Never leaves the player
-    without an app: if the copy fails, the old version is started again. Started by an older version, there is
-    no --show: the new version starts in the tray (the corner message tells the player)."""
+    without an app: if the copy fails, the old version is started again. Without --show (Update pressed in the corner
+    message or the tray) the new version starts in the tray (the corner message tells the player). Installed versions
+    (1.10.12+) start every new release with this command line: keep `--finish-update <old exe> <old pid> [--show]`
+    and one .exe file (PCS-Scanner.exe) per release, which they take as the update."""
     import shutil
     ulog(f'finisher started (waiting for {old_pid})')
     try:

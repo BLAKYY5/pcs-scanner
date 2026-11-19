@@ -119,6 +119,38 @@ def encoder_candidates(vendor: str, names: str = "") -> list[str]:
     return order
 
 
+HYBRID_MP4_SINCE = (30, 2)     # OBS 30.2 added "hybrid MP4": an mp4 that stays readable if OBS stops abruptly
+
+
+def exe_version(path: Path = None) -> tuple[int, ...]:
+    """OBS's version from obs64.exe's file information (before OBS runs), e.g. (33, 0, 1); () if unknown."""
+    path = path or OBS_EXE
+    try:
+        import ctypes
+        v = ctypes.windll.version
+        size = v.GetFileVersionInfoSizeW(str(path), None)
+        if not size:
+            return ()
+        buf = ctypes.create_string_buffer(size)
+        if not v.GetFileVersionInfoW(str(path), 0, size, buf):
+            return ()
+        p, n = ctypes.c_void_p(), ctypes.c_uint()
+        if not v.VerQueryValueW(buf, "\\", ctypes.byref(p), ctypes.byref(n)) or n.value < 52:
+            return ()
+        ms, ls = ctypes.cast(p, ctypes.POINTER(ctypes.c_uint32))[2:4]        # VS_FIXEDFILEINFO dwFileVersionMS / LS
+        return (ms >> 16, ms & 0xFFFF, ls >> 16)
+    except Exception:
+        return ()
+
+
+def rec_format(version: tuple[int, ...] | None = None) -> str:
+    """What OBS records into. Hybrid MP4 (OBS 30.2+): the file is an .mp4 from the start, so there is no copy to .mp4
+    after the session (the remux read and wrote the whole recording again, minutes for a long session on a hard
+    disk) and nothing to wait for before the scan. Older OBS: .mkv, remuxed to .mp4 as before."""
+    version = exe_version() if version is None else version
+    return "hybrid_mp4" if version and tuple(version[:2]) >= HYBRID_MP4_SINCE else "mkv"
+
+
 def rec_tracks(s: Settings) -> int:
     """OBS's track bitmask: one track per recorded source (track 1 = first of s.tracks())."""
     return (1 << max(1, len(s.tracks()))) - 1
@@ -164,7 +196,7 @@ def write_config(s: Settings, encoder: str, width: int, height: int) -> None:
     (prof / "basic.ini").write_text("\n".join([
         "[General]", "Name=PCS", "",
         "[Output]", "Mode=Advanced", f"FilenameFormatting={FILENAME}", "",
-        "[AdvOut]", "RecType=Standard", f"RecFilePath={folder}", "RecFormat2=mkv",
+        "[AdvOut]", "RecType=Standard", f"RecFilePath={folder}", f"RecFormat2={rec_format()}",
         f"RecEncoder={encoder}", f"RecTracks={rec_tracks(s)}",
         *[f"Track{i}Name={TRACK_NAMES[t]}" for i, t in enumerate(s.tracks(), 1)],
         *[f"Track{i}Bitrate=160" for i in range(1, 4)], "",
@@ -353,7 +385,7 @@ class OBS:
         c.set_record_directory(str(s.folder_path))
         c.set_profile_parameter("Output", "Mode", "Advanced")
         c.set_profile_parameter("Output", "FilenameFormatting", FILENAME)
-        c.set_profile_parameter("AdvOut", "RecFormat2", "mkv")
+        c.set_profile_parameter("AdvOut", "RecFormat2", rec_format(self.version()))
         c.set_profile_parameter("Video", "AutoRemux", "true")
         if encoder:
             c.set_profile_parameter("AdvOut", "RecEncoder", encoder)
@@ -407,6 +439,13 @@ class OBS:
                     pass
         c.set_profile_parameter("AdvOut", "RecTracks", str(rec_tracks(s)))
         self.tracks = tracks
+
+    def version(self) -> tuple[int, ...]:
+        """The running OBS's version (e.g. (33, 0, 1)); () if it can't be read."""
+        try:
+            return tuple(int(x) for x in re.findall(r"\d+", self.c.get_version().obs_version)[:3])
+        except Exception:
+            return ()
 
     def mute(self, track: str, muted: bool) -> bool:
         if track not in getattr(self, "tracks", []):
