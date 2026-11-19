@@ -1390,11 +1390,12 @@ class Backend:
     def comms(self):
         """pcs_recorder.comms.Comms: the player's own mic track as text after a session, when they said yes."""
         if getattr(self, "_comms", None) is None:
-            from pcs_recorder import comms
+            from pcs_recorder import comms, hub
             a = self.auto
             send = (lambda files: a.rec.hub.upload_hub(files)) if a else None
             self._comms = comms.Comms(lambda: self.auto.s, lambda: self.auto.rec.idx if self.auto else {},
-                                      self._backup_busy, send, version=str(core.BUILD.get("version") or ""))
+                                      self._backup_busy, send, version=str(core.BUILD.get("version") or ""),
+                                      hub_ok=lambda: hub.has_feature(self.auto.s.hub_url, "comms"))
         return self._comms
 
     def comms_tick(self) -> None:

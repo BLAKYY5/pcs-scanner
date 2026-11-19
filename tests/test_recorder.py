@@ -4741,6 +4741,47 @@ def test_comms_transcribes_and_sends_to_hub():
     assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
 
 
+def test_comms_not_sent_to_a_hub_without_comms():
+    """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
+    can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-old-hub")
+    _fake_worker(comms)
+    ok = [False]
+    job.hub_ok = lambda: ok[0]
+    job.transcribe(str(rec))
+    assert sent == [] and job.st["recs"][rec.stem]["sendNote"] == comms.HUB_TOO_OLD
+    assert job.unsent() == [comms.comms_path(rec)]
+    ok[0] = True
+    assert job._send(comms.comms_path(rec)) is True and sent == [[rec.stem + ".comms.json"]]
+
+
+def test_hub_has_feature():
+    from pcs_recorder import hub
+    calls = []
+
+    class R:
+        def __init__(self, ok, body): self.ok, self._b = ok, body
+        def json(self): return self._b
+    answers = {"http://new": R(True, {"features": ["comms"]}), "http://old": R(True, {"name": "x"}),
+               "http://down": None}
+
+    def fake(url, method, path, **kw):
+        calls.append(url)
+        if answers[url] is None:
+            raise hub.HubError("no answer", "network")
+        return answers[url]
+    real, hub.request = hub.request, fake
+    try:
+        hub._features.clear()
+        assert hub.has_feature("http://new", "comms") and hub.has_feature("http://new", "comms")
+        assert calls.count("http://new") == 1                      # cached
+        assert not hub.has_feature("http://old", "comms") and not hub.has_feature("http://down", "comms")
+        assert not hub.has_feature("", "comms")
+    finally:
+        hub.request = real
+        hub._features.clear()
+
+
 def test_comms_stops_when_apex_starts():
     """Apex starting stops the transcriber within seconds; the stop is not counted as a failed try."""
     comms, job, s, idx, rec, sent = _comms_setup("comms-apex")

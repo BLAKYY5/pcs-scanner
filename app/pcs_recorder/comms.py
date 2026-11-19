@@ -280,12 +280,18 @@ def _ffmpeg() -> str:
 
 # ---------------------------------------------------------------- the job
 
+HUB_TOO_OLD = "Not sent: your team hub needs an update before it can take transcripts"
+
+
 class Comms:
     """`settings()` gives the recorder settings; `recordings()` the app's own recordings as {key: Entry}; `busy()` a
     reason not to run now, or None; `send(files)` sends files to the team hub (None: no hub)."""
 
-    def __init__(self, settings, recordings, busy, send=None, now=time.time, version=""):
+    def __init__(self, settings, recordings, busy, send=None, now=time.time, version="", hub_ok=None):
         self.settings, self.recordings, self.busy, self.send, self.now = settings, recordings, busy, send, now
+        # hub_ok(): the team hub keeps transcripts with their rules (its /api/me lists "comms"). An older hub would
+        # store the file as a plain scan file any teammate can download, so nothing is sent to it (None = no check).
+        self.hub_ok = hub_ok
         self.version = version
         self.lock = threading.Lock()
         self.running = False
@@ -478,6 +484,10 @@ class Comms:
             return False
         stem = f.name[:-len(SUFFIX)]
         rec = self.st["recs"].setdefault(stem, {"tries": 0})
+        if self.hub_ok is not None and not self.hub_ok():
+            rec["sendNote"] = HUB_TOO_OLD
+            self._save()
+            return False
         try:
             self.send([f])
         except Exception as e:
