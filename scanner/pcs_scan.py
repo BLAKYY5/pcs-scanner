@@ -36,6 +36,7 @@ MAPS = json.load(open(os.path.join(HERE, 'pcs_maps.json')))
 W, H = 2560, 1440  # every frame is scaled to this
 USE_HW = True
 ICONS_EVERY = 2.0  # s between two care package / stronghold reads of the full map (about 0.1 s a read)
+EMBLEM_EVERY = 3.0  # s between two reads of the playlist emblem (top right; about 3 ms a read)
 RING_EVERY = 3.0   # s between two ring-circle reads of the full map (one read takes about 2 s; a 10 s map open gives 4)
 LAYOUT = None   # None = detect per recording; False = 16:9; True = 4:3 stretched to 16:9 (forced with --layout)
 
@@ -422,13 +423,13 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); rpfeed = pcs_ranked.Tracker(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0
+    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
         tp = time.time(); perf['decode'] = perf.get('decode', 0) + tp - tw
         cands = [mode] if mode is not None else ([True, False] if votes[True] > votes[False] else [False, True])
-        d = None; hud = None; top = []
+        d = None; hud = None; top = []; bn = None
         def view_top_once():    # 4:3 stretched: the remapped top, built once per keyframe
             if not top: top.append(view_top(img))
             return top[0]
@@ -497,6 +498,11 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     except Exception: mm = None
                     if mm is not None: mm_at = t; perf.setdefault('_minimap', []).append((round(t, 2), mm))
         if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
+            if (not d or bn) and t - emb_at >= EMBLEM_EVERY:     # playlist emblem, top right (pubs, Wildcard)
+                emb_at = t
+                try: em = HUD.ModeEmblem.read(img)
+                except Exception: em = None
+                if em: perf.setdefault('_emblem', []).append((round(t, 2),) + em)
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
             if cards: perf.setdefault('_cards', []).append((round(t, 2), cards, bool(hud[2]['spec']) if hud and hud[2] else None))
@@ -617,11 +623,11 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
-        usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); pf.pop('_usageMaskAt', None)
+        usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -639,6 +645,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
+    perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -658,7 +665,43 @@ def split_restarts(games, samples):
             out.append(part)
     return out
 
-def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=None):
+EMBLEM_BEFORE = 150     # s: the "waiting for players" screen (emblem 134 px lower) comes up to this long before a game's start
+
+def mode_seen(g, R, emblem, starts, gi):
+    """What the screen tells about a game's mode, and the mode it gives ('ranked', 'scrim', 'wildcard', 'pubs' or None).
+    Signals: the ranked RP panel (share of HUD reads, R), the scrim drop screen, rank badges on the legend select
+    screen, the loading banner's mode word, the playlist emblem at the top right (pubs, Wildcard, or another
+    playlist's). A scrim needs the drop screen, as before. When two signals name different modes the game stays
+    unlabelled (mode None, conflict true): better no label than a wrong one."""
+    lo = g['tStart'] - EMBLEM_BEFORE
+    hi = starts[gi + 1] - EMBLEM_BEFORE if gi + 1 < len(starts) else float('inf')
+    ekey, emode, counts = HUD.emblem_vote(emblem or [], lo, hi)
+    out = {'mode': None, 'from': [], 'conflict': False, 'emblem': ekey, 'emblemReads': counts}
+    badge = bool(R) and sum(R) / len(R) >= 0.2
+    sel = bool((g.get('select') or {}).get('ranked'))
+    word = (g.get('banner') or {}).get('mode')
+    word = word if word in ('ranked', 'wildcard', 'pubs') else None
+    other = 'other' if ekey and not emode else None      # an emblem of a playlist we can't name: not pubs, not Wildcard
+    seen = {'badge': 'ranked' if badge else None, 'drop': 'scrim' if g.get('drop') else None,
+            'select': 'ranked' if sel else None, 'banner': word, 'emblem': emode or other}
+    named = {k: v for k, v in seen.items() if v}
+    if 'ranked' in named.values() and named.get('emblem') == 'other':
+        named.pop('emblem')         # rank badges are round emblems too: an unnamed emblem never outvotes ranked signs
+    if badge:                       # the RP panel: ranked, as before, unless the banner or emblem names another mode
+        if any(v in ('wildcard', 'pubs') for v in named.values()):
+            out['conflict'] = True; out['from'] = sorted(named); return out
+        out['mode'] = 'ranked'; out['from'] = sorted(k for k, v in named.items() if v == 'ranked'); return out
+    if seen['drop']:                # scrim proof: the drop screen, no RP panel (rule unchanged)
+        out['mode'] = 'scrim'; out['from'] = ['drop']; return out
+    names = set(named.values())
+    if len(names) > 1:
+        out['conflict'] = True; out['from'] = sorted(named); return out
+    if names and 'other' not in names:      # another playlist's emblem: no label
+        out['mode'] = names.pop()
+    out['from'] = sorted(named)
+    return out
+
+def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=None, emblem=None):
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
         lo = g['tStart'] - (300 if g['drop'] is None and not g.get('select') else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
@@ -679,9 +722,8 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
         g['rankedShare'] = round(sum(R) / len(R), 2) if R else None
         # scrim only with evidence: the pre-game drop screen was read and no ranked badge. Without the drop
         # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
-        g['mode'] = mode or ('ranked' if R and sum(R) / len(R) >= 0.2 else ('scrim' if g['drop'] else
-                             ('ranked' if (g.get('select') or {}).get('ranked') else       # rank badges on the legend select screen
-                              ((g.get('banner') or {}).get('mode') if (g.get('banner') or {}).get('mode') in ('wildcard', 'pubs') else 'unknown'))))
+        g['modeSeen'] = seen = mode_seen(g, R, emblem, starts, gi)
+        g['mode'] = mode or seen['mode'] or 'unknown'
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
@@ -761,7 +803,8 @@ def main():
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
         if kind == 'video': games = split_restarts(games, samples)
-        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []))
+        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []),
+                 perf.pop('_emblem', []))
         try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_mapicons.attach(games, perf.pop('_icons', []))         # care packages (after the ring ends), strongholds
