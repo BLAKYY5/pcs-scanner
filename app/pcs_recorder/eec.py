@@ -25,6 +25,8 @@ from __future__ import annotations
 import json
 import re
 import sys
+import threading
+import time
 import unicodedata
 from pathlib import Path
 
@@ -221,6 +223,8 @@ def hub_candidates(hub_url: str, team: str, start: float, end: float) -> list[di
 
 TIME_FIT_S = 15 * 60          # a scanned game and an EEC game are the same game: same map, started this close
 _POIS: dict | None = None
+_ALIASES: dict | None = None
+_NUM = re.compile(r"\s*\(\d+\)\s*$")          # EEC's pick number: "MIRAGE A TROIS (6)"
 
 
 def norm(s) -> str:
@@ -229,21 +233,108 @@ def norm(s) -> str:
     return re.sub(r"[^a-z0-9]", "", s.lower())
 
 
+def simple(s) -> str:
+    """norm without a leading 'The' and a plural s: 'The Mill' and 'Mills' -> 'mill'."""
+    n = norm(re.sub(r"^\s*the\s+", "", str(s or ""), flags=re.I))
+    return n[:-1] if n.endswith("s") and len(n) > 4 else n
+
+
+def _load() -> None:
+    global _POIS, _ALIASES
+    _POIS, _ALIASES = {}, {}
+    here = Path(__file__).resolve()
+    for f in (Path(getattr(sys, "_MEIPASS", "") or here.parent) / "pcs_maps.json",
+              here.parents[2] / "scanner" / "pcs_maps.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+            _POIS = {m: {p["id"]: p.get("name") or p["id"] for p in v.get("pois", [])} for m, v in d.items()}
+            _ALIASES = {m: {p["id"]: [a for a in p.get("aliases") or [] if isinstance(a, str)] for p in v.get("pois", [])}
+                        for m, v in d.items()}
+            return
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            continue
+
+
 def pois() -> dict:
-    """{map: {poi id: name}} from the scanner's pcs_maps.json (next to the exe, or scanner/ from source)."""
-    global _POIS
+    """{map: {poi id: name}} from the scanner's pcs_maps.json (next to the exe, or scanner/ from source). The names are
+    the game's own (its minimap labels, Season 31) where the game names the place."""
     if _POIS is None:
-        _POIS = {}
-        here = Path(__file__).resolve()
-        for f in (Path(getattr(sys, "_MEIPASS", "") or here.parent) / "pcs_maps.json",
-                  here.parents[2] / "scanner" / "pcs_maps.json"):
-            try:
-                d = json.loads(f.read_text(encoding="utf-8"))
-                _POIS = {m: {p["id"]: p.get("name") or p["id"] for p in v.get("pois", [])} for m, v in d.items()}
-                break
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                continue
+        _load()
     return _POIS
+
+
+def aliases() -> dict:
+    """{map: {poi id: [other names]}}: our earlier names, the game's full zone name, the names EEC and ALGS use
+    ('Skyhook West' for Trials, 'Canal' for Canal Plaza). Old scans keep POI ids, so a rename never splits history."""
+    if _ALIASES is None:
+        _load()
+    return _ALIASES or {}
+
+
+def resolve(mp: str | None, text: str | None) -> str | None:
+    """The POI id a name stands for on this map, in any spelling we know: the id, our name, one of its aliases, EEC's
+    'MIRAGE A TROIS (6)'. Exact (accents, case, signs ignored), then without 'The' / plural s; a name two POIs share
+    resolves to none."""
+    t = _NUM.sub("", str(text or "")).strip()
+    names = pois().get(mp or "", {})
+    if not t or not names:
+        return None
+    if t in names:
+        return t
+    al = aliases().get(mp or "", {})
+    for f in (norm, simple):
+        want = f(t)
+        if not want:
+            return None
+        hits = {i for i, n in names.items() if f(n) == want}
+        if not hits:
+            hits = {i for i, a in al.items() if want in {f(x) for x in a}}
+        if len(hits) == 1:
+            return hits.pop()
+        if hits:
+            return None
+    return None
+
+
+HUB_NAMES_EVERY = 6 * 3600
+_HUB_NAMES = {"url": "", "at": 0.0, "lang": "en", "keys": {}, "busy": False}
+
+
+def shown_names(keys: dict | None = None) -> dict:
+    """{poi id: name to show} for the app: our (game) name, or the player's language from the team hub's names table
+    (`GET /api/names` `keys`: {"pois:<id>": [en, name]}) while its English name is still ours (a table made for an
+    older name is not used). French / Korean text comes only from the hub, never from this public repo."""
+    out = {}
+    for _m, ps in pois().items():
+        for pid, name in ps.items():
+            k = (keys or {}).get("pois:" + pid)
+            out[pid] = k[1] if isinstance(k, list) and len(k) == 2 and k[0] == name and isinstance(k[1], str) and k[1] \
+                else name
+    return out
+
+
+def app_poi_names(hub_url: str, fetch=None) -> dict:
+    """{"names": {poi id: name}, "lang"}. The hub's table is asked at most every 6 h, in the background (the page
+    never waits on the hub); no hub = English names."""
+    h = _HUB_NAMES
+    if hub_url != h["url"]:
+        h.update(url=hub_url, at=0.0, lang="en", keys={})
+    if hub_url and not h["busy"] and time.time() - h["at"] > HUB_NAMES_EVERY:
+        h["busy"] = True
+
+        def run():
+            try:
+                from . import hub as _hub
+                d = (fetch or _hub.get_json)(hub_url, "/api/names")
+                if isinstance(d, dict) and h["url"] == hub_url:
+                    h.update(keys=d.get("keys") if isinstance(d.get("keys"), dict) else {},
+                             lang=d.get("lang") if d.get("lang") in ("en", "fr", "ko") else "en")
+            except Exception:                              # old hub (404), no network: English names, ask again later
+                pass
+            finally:
+                h["at"], h["busy"] = time.time(), False
+        threading.Thread(target=run, daemon=True, name="poi-names").start()
+    return {"names": shown_names(h["keys"]), "lang": h["lang"]}
 
 
 def poi_label(mp: str | None, poi_id: str | None) -> str:
@@ -267,17 +358,23 @@ def our_spot(g: dict) -> tuple[str | None, str]:
 
 
 def compare_drop(mp: str | None, eec_drop: str, poi_id: str | None) -> tuple[str | None, str]:
-    """('same' | 'near' | 'different' | None, why). None = can't be compared. 'near' = one name holds the other
-    (EEC 'Canal' and our 'Canal Plaza')."""
+    """('same' | 'near' | 'different' | None, why). None = can't be compared. The EEC name is looked up with our
+    names and aliases first (`resolve`: EEC 'Canal' = our Canal Plaza, 'Skyhook West' = Trials); a name we don't know
+    falls back to the old rule, 'near' = one name holds the other."""
     if not eec_drop:
         return None, "no EEC drop for this game"
     if not poi_id:
         return None, "the scan has no landing place"
-    a = norm(eec_drop)
+    ours = poi_label(mp, poi_id)
+    rid = resolve(mp, eec_drop)
+    if rid:
+        if rid == poi_id:
+            return "same", f"EEC drop {eec_drop} = our landing"
+        return "different", f"EEC drop {eec_drop}, our scan says {ours}"
+    a = norm(_NUM.sub("", eec_drop))
     names = [norm(n) for n in pois().get(mp or "", {}).values()]
     if names and not any(a == n or a in n or n in a for n in names):
         return None, f"EEC drop {eec_drop} isn't in our map table"
-    ours = poi_label(mp, poi_id)
     b = norm(ours)
     if a == b:
         return "same", f"EEC drop {eec_drop} = our landing"

@@ -401,6 +401,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
   just before and after it is a calibration pair; the arrow blob is sometimes wrong (reject outliers). BM and KC
   have POI centres only: a landing more than `POI_NEAR` (12 %) from every centre gets no name (Broken Moon's middle
   has POIs since PR #41: Quarantine Zone and others).
+- **POI names** (20 Nov 2026, coach's greenlight of game-file idea 3): `pcs_maps.json` names and centres follow the
+  game's own minimap labels (Season 31 level scripts; derived names and numbers only, never EA's files): a POI the game
+  labels carries the label's text (or the zone's full name when ours already was that), its centre is the label spot
+  (WE, ED, SP, BM, KC; Olympus centres kept: our OL picture is not framed like the game minimap). `aliases` = our
+  earlier names, the game's other form and EEC / ALGS names ('Skyhook West' = Trials, 'Canal' = Canal Plaza). POIs the
+  game doesn't label (Bean, Jurassic, Trident, Canal Plaza...) keep their names. Scans store POI ids, which never
+  change, so old scans show the new names and nothing splits. `eec.resolve` finds a POI from any name (EEC's
+  'MIRAGE A TROIS (6)', an alias; a name two POIs share = none) and `compare_drop` compares ids. The page asks
+  `/api/pois` for names: the game's English names, or the player's language (FR / KO) from the team hub's names
+  table (`GET /api/names`, asked in the background at most every 6 h) while its English name is ours; French and
+  Korean text is never in this repo. Builder (private): `pcs-handoff\tools\poi\game_pois.py`.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,
