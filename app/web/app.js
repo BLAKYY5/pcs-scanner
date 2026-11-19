@@ -246,7 +246,7 @@ function setupHTML() {
         <div class="choices">
           ${choiceHTML('autorecord', 'Record Apex by itself', 'On: every Apex session is recorded and scanned. Off: nothing is recorded.', st.rec, 'On', 'Off', recPill)}
           ${choiceHTML('share', 'Share mic tracks with my team', 'Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.', st.share, 'Yes', 'No')}
-          ${choiceHTML('transcripts', 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.', st.transcripts, 'Yes', 'No')}
+          ${choiceHTML('transcripts', 'Comms transcripts', TRANSCRIPT_HINT, st.transcripts, 'Yes', 'No')}
         </div></li>
       ${li(st.hub, false, 3, 'Join the team hub', st.hub && S.iconsFromHub ? 'Weapon icons come from the hub: no team link needed.' : 'Paste the link your coach sent you.',
         st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
@@ -381,6 +381,16 @@ function renderHome(prev, force) {
     S = await api('/api/settings', {player: v}); toast('Saved.'); renderHome(null, true);
   };
   if (!LIB.length && !renderHome.loaded) { renderHome.loaded = true; loadLibrary(); }
+}
+// comms transcripts (pcs_recorder/comms.py): what the yes means, and where it stands on this PC
+const TRANSCRIPT_HINT = 'After a session, what you say on your own mic is turned into text on this PC and sent to the team hub. The coach sees it; teammates too if you share your mic track. Only your mic, never anyone else\'s voice.';
+function transcriptState() {
+  const t = S && S.transcripts;
+  if (!t || !t.on) return '';
+  if (t.running) return t.current ? ` Now: ${t.percent != null ? t.percent + ' % of ' : ''}the last session.` : ' Getting ready (first time: a 1.6 GB download).';
+  if (t.note) return ` Not running: ${t.note}.`;
+  if (!t.available) return ' Not available yet in this version.';
+  return t.done ? ` ${t.done} recording${t.done === 1 ? '' : 's'} turned into text.` : '';
 }
 function switchHTML(id, on, label, hint) {
   return `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="track"></span><span><b>${esc(label)}</b><small>${esc(hint)}</small></span></label>`;
@@ -751,6 +761,7 @@ async function renderReview(id) {
             <div class="lane sound" id="laneS"><span class="lane-label">Sound · <span id="soundState">analysing…</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
             <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
+            ${commsOf(d).length ? '<div class="lane" id="laneC"><span class="lane-label">Your comms (text)</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
             <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>We knocked / killed</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>We went down</span><span><i class="respawn"></i>Respawned</span><span><i style="background:rgba(95,208,143,.45)"></i>Fight won</span><span><i style="background:rgba(138,135,127,.5)"></i>Fight lost</span><span><i style="background:rgba(224,98,58,.45)"></i>Outside the ring</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
@@ -762,7 +773,7 @@ async function renderReview(id) {
         </div>
       </div>
       <aside class="card side">
-        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button><button data-t="notes" id="tabNotes" hidden>Coach notes</button></div>
+        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button><button data-t="notes" id="tabNotes" hidden>Coach notes</button>${commsOf(d).length ? `<button data-t="comms">Comms (${commsOf(d).length})</button>` : ''}</div>
         <div class="scroll" id="rvBody"></div>
       </aside>
     </div>`;
@@ -865,6 +876,9 @@ function drawTimeline() {
     // own knocks: a grey tick with a square head (grey = we went down, as on the feed ticks)
     RV.ev.filter(e => e.k === 'knock').map(e =>
     `<div class="tick knock" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('');
+  const lc = $('#laneC');
+  if (lc) lc.innerHTML = '<span class="lane-label">Your comms (text)</span>' + commsOf(RV.d).map(c =>
+    `<div class="tick comms" data-t="${c.start}" style="left:${pct(c.start)};width:${pct(Math.max(0.6, c.end - c.start))}" title="${fmtT(c.start)} · ${esc(c.text)}"></div>`).join('');
   const ln = $('#laneN'), notes = (RV.notes && RV.notes.notes) || [];
   if (ln) {
     ln.hidden = !notes.length;
@@ -872,10 +886,26 @@ function drawTimeline() {
       `<button class="mk note" data-t="${n.t}" style="left:${pct(n.t)}" title="${fmtT(n.t)} · ${esc(noteTitle(n))}">C</button>`).join('');
   }
 }
+/* The player's own comms transcript (made on this PC after the session, only with their yes; pcs_recorder/comms.py):
+   one line per thing said on the mic, in recording time. Click a line = seek; the box filters the lines. */
+function commsOf(d) { return (d && d.comms && d.comms.segments) || []; }
+function drawComms(body) {
+  const all = commsOf(RV.d), words = (RV.commsQ || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = words.length ? all.filter(c => words.every(w => c.text.toLowerCase().includes(w))) : all;
+  body.innerHTML = `<div class="commsbar"><input id="commsQ" type="search" placeholder="Find in your comms" value="${esc(RV.commsQ || '')}"></div>` +
+    (rows.length ? '<div class="comms">' + rows.map(c => `<div class="ev cline" data-t="${c.start}"><time>${fmtT(c.start)}</time><i style="background:#6aa0ff"></i><span>${esc(c.text)}</span></div>`).join('') + '</div>'
+      : `<div class="empty">${all.length ? 'No line has these words.' : 'No comms text for this recording.'}</div>`) +
+    '<div class="faint commsnote">Made on this PC from your own mic track. Words can be wrong.</div>';
+  const inp = $('#commsQ', body);
+  inp.oninput = () => { RV.commsQ = inp.value; const at = inp.selectionStart; drawComms(body); const n = $('#commsQ', body); n.focus(); n.setSelectionRange(at, at); };
+  $$('[data-t]', body).forEach(el => el.onclick = () => seek(+el.dataset.t));
+  onTime(true);
+}
 function drawSide() {
   const body = $('#rvBody'); if (!body) return;
   const d = RV.d;
   if (RV.tab === 'notes') { drawNotes(body); onTime(true); return; }
+  if (RV.tab === 'comms') { drawComms(body); return; }
   if (!d.scan) { body.innerHTML = '<div class="empty"><strong>Not scanned yet</strong>Scan this recording to see its drop, landing, rings and kill feed.</div>'; return; }
   if (RV.tab === 'events') {
     let html = '', g = -1;
@@ -1462,7 +1492,7 @@ function renderSettings() {
         <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
         <div class="field">${switchHTML('f-share_tracks', s.share_tracks, 'Share mic tracks with my team', 'Your mic track goes to your teammates, theirs come to you by themselves while Apex is closed' + (S.teamTracks && S.teamTracks.tracks ? ` (${S.teamTracks.tracks} here)` : ''))}</div>
       </div>
-      ${switchHTML('f-transcript_consent', s.transcript_consent, 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.')}
+      ${switchHTML('f-transcript_consent', s.transcript_consent, 'Comms transcripts', TRANSCRIPT_HINT + transcriptState())}
       <h3>Hotkeys while recording</h3>
       <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).
         Controller players can use a single key like F5 or a numpad key. While recording, a key used for a hotkey doesn't reach the game, so keyboard players should pick keys they don't play with.</p>

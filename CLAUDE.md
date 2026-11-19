@@ -42,7 +42,8 @@ app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types),
                         hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
-                        hubbackup, stitch (team hub features, see below)
+                        hubbackup, stitch, comms (team hub features, see below)
+app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
 app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
                         review-extras.js (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
@@ -160,7 +161,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
   start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
   mic recorded, "Send my mic track" on, `share_tracks`), comms transcripts Yes / No (`transcript_consent`, default
-  off; only the answer is kept, nothing is built yet). Shown until name + (hub or Google) + both questions answered
+  off; see "Comms transcripts"). Shown until name + (hub or Google) + both questions answered
   (`share_asked`, `transcript_asked`; changing either switch in Settings counts too), or hidden.
 - **Teammates' mic tracks** (`pcs_recorder/teamtracks.py`, hub `/api/team-tracks`, `PUT /api/me/sharing`): with
   `share_tracks` (plus comms consent, mic on, "Send my mic track" on) the answer goes to the hub and the teammates'
@@ -171,6 +172,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   The review player plays them in the mixer ("<name> mic"), each game of the recording with its own offset
   (their jump − own jump), only inside that game. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
+- **Comms transcripts** (`pcs_recorder/comms.py`, worker `app/pcs_transcribe.py`, hub `hub/comms.py`; 19 Nov 2026):
+  with `transcript_consent` (+ `comms_consent`, mic on) the player's **own mic track** (events.json `tracks` index of
+  "mic") is turned into text after the recording was scanned: never the voice-app track (everyone's voices), never the
+  game sound, nobody else's track. Whisper large-v3-turbo on the CPU (int8, faster-whisper), one recording at a time,
+  below normal, half the logical cores; never while Apex runs, records, scans or records review talk (`_backup_busy`):
+  Apex starting stops it (`stop_tree`), finished 10-min parts stay in `<rec>.comms.partial.json` and the next run goes on
+  from there; a stop is not a failed try (3 tries, last 3 days of recordings). Output `<rec>.scan/<rec>.comms.json`
+  (segments start / end in recording seconds, text, speaker = player name), left out of `result_files` (never Drive),
+  sent to the hub on its own (`upload_hub`) only while the yes holds; state in `transcripts.json`. The worker cuts parts
+  at the quietest half second, gives a short Apex word list + the scan's map POIs as prompt, fixes a few spellings
+  (Watson -> Wattson) and drops Whisper's subtitle-credit lines on silence. **Not in the exe**: faster-whisper +
+  CTranslate2 + onnxruntime are ~200 MB that every start would unpack, so they are the optional "Transcripts"
+  component (`build.yml` builds `PCS-Transcripts.zip`, a run artifact, `pcs-transcribe.exe --selftest` checked); the app
+  downloads it once only when `comms.COMPONENT` pins a published zip (url + SHA-256 + size; None so far: Settings says
+  "Not available yet"). Publish it as a release that is never "latest" (the updater reads the latest release). The
+  model (1.6 GB, 5 files) comes from a pinned Hugging Face commit with each file's SHA-256 (`MODEL_FILES`), https only,
+  into `transcripts/` in the data folder, after the yes only. Developers: `PCS_TRANSCRIBE_PY` (a Python with
+  faster-whisper; runs the worker from source) and `PCS_WHISPER_MODEL` (a model folder). Review player: a "Your comms
+  (text)" lane under the timeline and a Comms tab with a word filter (click = seek). Hook for the hub's scan worker:
+  `Comms.where()` and the worker's `--stream 0` on a `.mic.m4a`. Measured 19 Nov 2026 (5700X3D): see the PR.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
   (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
   all day, 0.2 % for the whole app after). Hotkey thread: 20 looks a

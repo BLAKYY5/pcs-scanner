@@ -91,10 +91,13 @@ def stop_tree(proc, wait_s: float = 10) -> None:
 
 
 def result_files(out: Path) -> list[Path]:
-    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks."""
+    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks and the
+    comms transcript (`comms.py`: sent to the hub on its own, only while the player says yes, never to Drive)."""
     if not out.exists():
         return []
-    return sorted(p for p in out.rglob("*") if p.is_file() and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
+    from .comms import is_comms_file
+    return sorted(p for p in out.rglob("*") if p.is_file() and not is_comms_file(p.name)
+                  and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
 
 
 class NeedsSignIn(ConnectionError):

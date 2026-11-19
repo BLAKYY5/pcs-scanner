@@ -36,6 +36,7 @@ def selftest(out):
         import pcs_recorder.serverscan   # noqa: F401
         import pcs_recorder.stitch   # noqa: F401
         import pcs_recorder.precheck   # noqa: F401
+        import pcs_recorder.comms, pcs_transcribe   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
@@ -482,6 +483,8 @@ def main():
             except Exception: logging.exception('hub backup copy')
             try: b.team_tracks_tick()                      # teammates' mic tracks, when the player agreed
             except Exception: logging.exception('team tracks')
+            try: b.comms_tick()                            # own mic track to text, when the player said yes
+            except Exception: logging.exception('transcripts')
             try: b.minimaps_tick()                         # map pictures for the minimap position track
             except Exception: logging.exception('minimap pictures')
             # tell the player once per new version with a corner message (not during a game: it waits)

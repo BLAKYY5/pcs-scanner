@@ -658,6 +658,11 @@ class Backend:
             it["teamAudio"] = self.teamtracks.for_recording(it["path"]) if self.auto else []
         except Exception:
             it["teamAudio"] = []
+        try:                                               # the player's own comms transcript (comms.py), when made
+            from pcs_recorder import comms
+            it["comms"] = comms.transcript_of(it["path"])
+        except Exception:
+            it["comms"] = None
         return it
 
     # ------------------------------------------------------------- sound analysis for the review
@@ -892,6 +897,7 @@ class Backend:
                 "hub": self.hub_state(),
                 "hubBackup": self.hubbackup.public() if a and a.s.hub_url else None,   # coach's hub key only
                 "teamTracks": self.teamtracks.public() if a else None,
+                "transcripts": self.comms.public() if a else None,
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
@@ -1342,7 +1348,8 @@ class Backend:
         """Home → Get set up → Your choices. Each one is applied at once and can be changed later in Settings.
         share: yes = the team agreed that comms are recorded, the mic is recorded and sent ("Send my mic track" on),
         shared with the team, and the teammates' tracks come by themselves; no = nothing changes but the answer.
-        transcripts: only the answer is kept (the feature isn't built yet). autorecord: on / off."""
+        transcripts: yes = the own mic track is turned into text after sessions (pcs_recorder.comms; also needs the
+        comms consent and the mic on). autorecord: on / off."""
         a = self.auto
         if not a:
             raise RuntimeError("Auto-record isn't available in this build")
@@ -1378,6 +1385,22 @@ class Backend:
     def team_tracks_tick(self) -> None:
         if self.auto and self.auto.s.hub_url:
             self.teamtracks.tick()
+
+    @property
+    def comms(self):
+        """pcs_recorder.comms.Comms: the player's own mic track as text after a session, when they said yes."""
+        if getattr(self, "_comms", None) is None:
+            from pcs_recorder import comms
+            a = self.auto
+            send = (lambda files: a.rec.hub.upload_hub(files)) if a else None
+            self._comms = comms.Comms(lambda: self.auto.s, lambda: self.auto.rec.idx if self.auto else {},
+                                      self._backup_busy, send, version=str(core.BUILD.get("version") or ""))
+        return self._comms
+
+    def comms_tick(self) -> None:
+        if self.auto:
+            self.comms.cleanup()
+            self.comms.tick()
 
     def minimaps_tick(self) -> int:
         """The hub's map pictures in the data folder, so scans can read the player's position from the HUD minimap
