@@ -349,6 +349,48 @@ def test_bitrate_setting_per_encoder():
     assert "bitrateTip(r)" in js and "AV1 10, HEVC / H.264 12" in js and "12 is recommended." not in js
 
 
+NUMBER_FIELDS = ("keep_days", "max_gb", "bitrate_mbps", "scan_delay_s", "yt_gap_min", "night_from", "night_to",
+                 "night_idle_min", "yt_wait_eec_h", "nogame_keep_h", "min_record_min", "hl_chain_s", "hl_multi_min",
+                 "hl_double_s")
+
+
+def test_empty_number_box_keeps_the_setting():
+    """Review 20 Nov 2026 (L2): an empty number box in Settings arrived as null, was set on the live settings, and
+    every later save failed until a restart. Now an empty or odd number keeps the old value, and a value that is
+    already broken goes back to its default at the next save."""
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    a.s = st.Settings(folder=str(TMP / "recs")).clamp()
+    b = pcs_server.Backend(a)
+    b.set_start_with_windows = lambda on: None
+    st_save = st.save
+    st.save = lambda s: s.clamp()                   # no recorder.json written by this test
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        assert all(f in pcs_server.REC_FIELDS for f in NUMBER_FIELDS)
+        call(srv, "/api/settings", {"keep_days": 9, "hl_chain_s": 12, "night_to": 6})
+        before = {k: getattr(a.s, k) for k in NUMBER_FIELDS}
+        assert before["keep_days"] == 9 and before["hl_chain_s"] == 12
+        for bad in (None, "", "abc", True, [], {}):
+            code, state, _ = call(srv, "/api/settings", {k: bad for k in NUMBER_FIELDS})
+            assert code == 200, (bad, code, state)
+            assert {k: getattr(a.s, k) for k in NUMBER_FIELDS} == before, bad
+        code, state, _ = call(srv, "/api/settings", {"keep_days": "5", "hl_multi_min": None})   # later saves work
+        assert code == 200 and a.s.keep_days == 5 and a.s.hl_multi_min == before["hl_multi_min"]
+        assert state["recorder"]["settings"]["keep_days"] == 5
+        a.s.keep_days, a.s.hl_double_s = None, None     # left broken by an older version: repaired by the next save
+        code, state, _ = call(srv, "/api/settings", {"max_gb": 150})
+        assert code == 200 and a.s.max_gb == 150 and a.s.keep_days == st.Settings().keep_days
+        assert a.s.hl_double_s == st.Settings().hl_double_s
+    finally:
+        srv.stop()
+        st.save = st_save
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "if (Number.isFinite(n)) body[k] = n;" in js and "if (Number.isFinite(n)) body.hub_backup_keep = n;" in js
+    assert "body[k] = parseInt(el.value, 10)" not in js
+
+
 def test_voice_app_setting():
     """Settings → Voice app: saved through the API; "other" needs a program name, never a path."""
     from pcs_recorder import settings as st

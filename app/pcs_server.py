@@ -1372,8 +1372,13 @@ class Backend:
             yt_before = getattr(a.s, "yt_enabled", False)
             hub_before = a.s.hub_url
             share_before = (a.s.share_tracks, a.s.transcript_consent)
+            from pcs_recorder import settings as st
             for k in REC_FIELDS:
                 if k in body:
+                    if isinstance(getattr(a.s, k, None), int) and not isinstance(getattr(a.s, k, None), bool):
+                        if st.as_int(body[k]) is None:       # an empty or odd number box: the setting stays
+                            continue                         # (it saved null and broke every later save: review L2)
+                        body[k] = st.as_int(body[k])
                     if k == "bitrate_mbps" and hasattr(a.s, "set_bitrate"):
                         a.s.set_bitrate(body[k])           # the encoder's default unless the player picks another
                     else:
@@ -1386,7 +1391,6 @@ class Backend:
                     a.s.transcripts_withdraw = True          # the hub deletes his transcripts once told (decision 21)
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
-            from pcs_recorder import settings as st
             st.save(a.s)
             from pcs_recorder import games
             games.configure(a.s)                             # Settings → Games: at once, not at the next tick

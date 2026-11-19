@@ -536,6 +536,7 @@ class Clipper:
     def _run(self, spec: dict) -> None:
         tmp = Path(tempfile.mkdtemp(prefix="pcs-clip-"))
         part = None
+        result = dict(step="Failed", error="")
         try:
             video, start, end, size = spec["video"], float(spec["start"]), float(spec["end"]), spec["size"]
             src = spec.get("src") or probe(video)
@@ -606,17 +607,20 @@ class Clipper:
                 self.made.add(os.path.normcase(os.path.abspath(str(final))))
             mb = round(final.stat().st_size / 1e6, 1)
             log.info("clip made: %s (%.1f MB, %s)", final.name, mb, tries[0][0])
-            self._set(running=False, step="Done", pct=100, file=str(final), name=final.name, mb=mb)
+            result = dict(step="Done", pct=100, file=str(final), name=final.name, mb=mb)
         except Stopped as e:
-            self._set(running=False, step="Stopped", error=str(e))
+            result = dict(step="Stopped", error=str(e))
         except Exception as e:
             log.warning("clip failed: %s", e)
-            self._set(running=False, step="Failed", error=str(e))
+            result = dict(step="Failed", error=str(e))
         finally:
             self.proc = None
             if part is not None:
                 part.unlink(missing_ok=True)
             shutil.rmtree(tmp, ignore_errors=True)
+            # Not running only once the .part is gone (review 20 Nov 2026, L1): a new clip of the same range gets the
+            # same .part name, and this clean-up must never remove it.
+            self._set(running=False, **result)
 
     def own_clip(self, path: str) -> str | None:
         """A clip this app made (Show in folder / Copy act on nothing else), still on disk."""

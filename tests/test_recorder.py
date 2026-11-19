@@ -1101,6 +1101,40 @@ def test_settings_limits():
     assert (s.keep_days, s.max_gb, s.capture) == (1, settings.MIN_MAX_GB, "window")
 
 
+def test_settings_file_with_null_numbers_repaired():
+    """Review 20 Nov 2026 (L2): an empty number box once saved null in recorder.json (and the 3 highlight rules of #97
+    the same). Loading such a file gives the defaults and writes them back; other numbers and settings stay."""
+    import json
+    nums = ("keep_days", "max_gb", "bitrate_mbps", "scan_delay_s", "yt_gap_min", "night_from", "night_to",
+            "night_idle_min", "yt_wait_eec_h", "nogame_keep_h", "min_record_min", "hl_chain_s", "hl_multi_min",
+            "hl_double_s")
+    d = settings.Settings()
+    saved_file = settings.SETTINGS_FILE
+    try:
+        settings.SETTINGS_FILE = TMP / "nulls" / "recorder.json"
+        settings.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        for bad in (None, "", "x", True):
+            raw = {k: bad for k in nums}
+            raw.update(player="Tester", yt_team="ABC", obs_port=None)
+            settings.SETTINGS_FILE.write_text(json.dumps(raw), encoding="utf-8")
+            s = settings.load()
+            for k in nums + ("obs_port",):
+                want = d.bitrate_mbps if k == "bitrate_mbps" else getattr(d, k)
+                assert getattr(s, k) == want, (bad, k, getattr(s, k))
+            on_disk = json.loads(settings.SETTINGS_FILE.read_text(encoding="utf-8"))
+            assert all(isinstance(on_disk[k], int) and not isinstance(on_disk[k], bool) for k in nums), on_disk
+            assert on_disk["player"] == "Tester" and on_disk["yt_team"] == "ABC"
+            assert settings.saved_highlight_rules() == d.highlight_rules()
+            settings.save(s)                                 # later saves work
+        settings.SETTINGS_FILE.write_text(json.dumps({"keep_days": 30, "hl_chain_s": None, "hl_multi_min": 4}),
+                                          encoding="utf-8")
+        assert settings.saved_highlight_rules() == f"{d.hl_chain_s},4,{d.hl_double_s}"   # one null: the others kept
+        s = settings.load()
+        assert (s.keep_days, s.hl_chain_s, s.hl_multi_min) == (30, d.hl_chain_s, 4)
+    finally:
+        settings.SETTINGS_FILE = saved_file
+
+
 def test_quality_setting():
     import json
     from pcs_recorder import obs as obsmod
@@ -5538,10 +5572,7 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
-    # the clip's thread removes the .part just after it says "Stopped" (clips.Clipper._run's finally): wait for it
-    end = time.time() + 10
-    while list((folder / "Clips").glob("*.part")) and time.time() < end:
-        time.sleep(0.05)
+    # the .part is removed before the state says "Stopped" (review 20 Nov 2026, L1): no wait needed
     assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
     # Apex running: refused at once
     try:
@@ -5556,6 +5587,45 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Failed" and "Too long for 10 MB" in st["error"], st
+
+def test_clip_part_removed_before_not_running():
+    """Review 20 Nov 2026 (L1): a clip says Stopped / Failed (and the page may start the same range again, same .part
+    name) only once its .part is gone, so the old clip's clean-up can never remove the new clip's .part."""
+    from pcs_recorder import clips
+    folder = TMP / "clippart"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "rec.mp4"
+    v.write_bytes(b"video")
+    src = {"codec": "h264", "w": 1920, "h": 1080, "fps": 60, "dur": 600}
+    busy = {"why": None}
+    mode = {}
+    seen = []
+
+    class Watched(clips.Clipper):
+        def _set(self, **kw):
+            if kw.get("running") is False:           # what the page sees: a part still there would be a bug
+                seen.append((kw.get("step"), sorted(p.name for p in (folder / "Clips").glob("*.part"))))
+            super()._set(**kw)
+
+    def run(cmd, length):
+        Path(cmd[-1]).write_bytes(b"x" * 1000)
+        if mode["how"] == "stop":
+            busy["why"] = "Apex is running"
+            return 0, ""
+        return 1, "encoder failed"
+    c = Watched(lambda: busy["why"], run=run)
+    spec = {"video": str(v), "start": 10, "end": 40, "size": "full", "src": src, "own": [0], "team": [], "notes": [],
+            "obs_encoder": "obs_x264"}
+    for how, step in (("stop", "Stopped"), ("fail", "Failed")):
+        busy["why"] = None
+        mode["how"] = how
+        seen.clear()
+        c.start(spec)
+        st = _clip_wait(c)
+        assert st["step"] == step and not st["running"], st
+        assert seen == [(step, [])], seen
+        assert not list((folder / "Clips").glob("*.part"))
+
 
 # ---------------------------------------------------------------- comms transcripts (pcs_recorder/comms.py)
 
