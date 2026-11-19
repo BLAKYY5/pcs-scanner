@@ -3922,6 +3922,108 @@ def test_apex_crash_events_read():
     assert stitch.ended_in_game(str(TMP / "nothing.mp4"), None) is None
 
 
+def test_ranked_rp_and_badges():
+    """Ranked: the green '+N RP' at the end of our kill lines (and Team Eliminated / Previous Kill Points lines), the
+    victim's rank badge, and the game's RP counter under the rank emblem. Digits are drawn from the table's own shapes."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_ranked as R
+    from PIL import Image
+    assert R.FEED_D and set(R.FEED_D.labs) == set("0123456789") and set(R.BADGES) == {"diamond", "platinum", "gold"}
+
+    def shape(table, ch, w, h):                       # a table shape back to a w x h picture (0..1)
+        g = R.FEED_D.M if table is None else table.M
+        row = next(r for r in (R._T["feedDigits"] if table is None else table.rows) if r[0] == ch)
+        a = np.array([int(c, 16) / 15.0 for c in row[1]], np.float32).reshape(18, 12)
+        return np.asarray(Image.fromarray((a * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)) / 255.0
+
+    def paint(img, y, x, ink, colour):
+        h, w = ink.shape; reg = img[y:y + h, x:x + w].astype(np.float32)
+        img[y:y + h, x:x + w] = (reg * (1 - ink[..., None]) + np.array(colour, np.float32) * ink[..., None]).astype(np.uint8)
+
+    GREEN = (70, 245, 80)
+    def feed_line(img, y, value, x_end=2384, badge=None, killer=None, words=None):
+        """One feed line whose text rows start at frame row y; '+N RP' ends at x_end."""
+        x = x_end - 14; img[y:y + 20, x:x + 14] = GREEN                        # P
+        x -= 17; img[y:y + 20, x:x + 14] = GREEN                               # R (gap 3)
+        x -= 10
+        for ch in reversed(str(value)):
+            r = next(r for r in R._T["feedDigits"] if r[0] == ch); w = int(round((r[2] + r[3]) / 2)); x -= w
+            paint(img, y, x, shape(None, ch, w, 20), GREEN); x -= 2
+        x -= 12; img[y + 9:y + 11, x:x + 10] = GREEN; img[y + 5:y + 15, x + 4:x + 6] = GREEN      # +
+        if words:                                                              # white words left of it
+            img[y + 2:y + 18, x - 6 - words:x - 6] = 235; img[y + 2:y + 18, x - 6 - words + 3:x - 6:7] = 40
+        if badge:
+            T = R.BADGES[badge]; v = (T - T.min()) / (T.max() - T.min())
+            tint = {"diamond": (0.45, 0.7, 1.0), "platinum": (0.3, 1.0, 0.85), "gold": (1.0, 0.75, 0.3)}[badge]
+            bx = x - 150; by = y - 4
+            img[by:by + 28, bx:bx + 28] = (40 + 200 * v[..., None] * np.array(tint)).astype(np.uint8)
+            img[y + 2:y + 18, bx + 34:bx + 100] = 235; img[y + 2:y + 18, bx + 37:bx + 100:6] = 40           # victim's name, white
+            if killer: img[y + 2:y + 18, bx - 300:bx - 200] = killer; img[y + 2:y + 18, bx - 297:bx - 200:6] = 30
+        return img
+
+    def blank(): return np.full((1440, 2560, 3), 35, np.uint8)
+    for v in (5, 7, 9, 12, 16, 25, 31, 3, 20):
+        img = feed_line(blank(), 330, v)
+        assert R.feed_rp(img[320:361, 1820:2470]) == v, (v, R.feed_rp(img[320:361, 1820:2470]))
+    assert R.feed_rp(blank()[320:361, 1820:2470]) is None
+    img = feed_line(blank(), 330, 7, badge="diamond", killer=(240, 160, 40))
+    band = img[320:361, 1820:2470]
+    assert R.victim_rank(band) == "diamond", R.victim_rank(band)
+    assert R.killer_color(band, R.victim_badge(band)[0]) == "orange"
+    assert R.victim_rank(feed_line(blank(), 330, 7, badge="platinum")[320:361, 1820:2470]) == "platinum"
+    assert R.victim_rank(feed_line(blank(), 330, 7, badge="gold")[320:361, 1820:2470]) == "gold"
+    no_name = feed_line(blank(), 330, 7, badge="diamond"); no_name[332:348, 2084 + 34 - 150:2084 + 100 - 150] = 35
+    # (the victim's badge must be followed by a white name; a badge followed by nothing is not the victim's)
+
+    # The tracker: a kill line read on 4 keyframes (moving down one place, its value going +8 -> +10 after a bonus),
+    # a Team Eliminated line read twice, a line seen once (never counted), a line whose two reads differ (never counted).
+    tr = R.Tracker()
+    frames = [
+        (100, [(288, 8, "diamond", None), (330, 5, None, 193)]),
+        (101, [(330, 8, "diamond", None), (373, 5, None, 193)]),
+        (102, [(330, 10, "diamond", None), (373, 5, None, 193), (288, 6, None, 383)]),
+        (103, [(373, 10, "diamond", None)]),
+        (110, [(288, 9, None, 383)]),
+    ]
+    for t, lines in frames:
+        img = blank()
+        for y, v, b, words in lines: feed_line(img, y, v, badge=b, killer=(60, 200, 210) if b else None, words=words)
+        tr.read(img, t)
+    out = tr.finish()
+    assert [(e["t"], e["rp"], e["kind"]) for e in out] == [(100, 10, "kill"), (100, 5, "team")], out
+    assert out[0]["victimRank"] == "diamond" and out[0]["color"] == "teal" and out[0]["reads"] == 2
+    assert 150 <= out[0]["hue"] < 195, out[0]
+    f = R.game_feed(out, 0, 200)
+    assert f == {"kills": [{"t": 100, "rp": 10, "victimRank": "diamond", "color": "teal", "hue": out[0]["hue"]}], "killRp": 10, "lines": 2, "unknownLines": 0}, f
+    assert R.game_feed(out, 200, 300) is None
+
+    # RP counter: red '-48 RP' at the start, white '+237 RP' later; the box's side lines are not digits.
+    def panel(value):
+        img = blank(); red = value < 0; col = (225, 60, 70) if red else (240, 240, 240)
+        img[135:172, 2402:2405] = col; img[135:172, 2520:2523] = col                       # the box's sides
+        x = 2420; t = R.PANEL_D["red" if red else "white"]
+        if red: img[154:157, x:x + 9] = col
+        else: img[149:160, x + 4:x + 6] = col; img[153:156, x:x + 10] = col
+        x += 13
+        for ch in str(abs(value)):
+            wr = next(r for r in R._T["panelWidths"] if r[0] == ch); w = int(round((wr[1] + wr[2]) / 2))
+            paint(img, 146, x, shape(t, ch, w, 18), col); x += w + 2
+        x += 7; img[146:164, x:x + 12] = col; x += 15; img[146:164, x:x + 12] = col
+        return img
+    for v in (-48, -35, -2, 8, 52, 237, 94, 110, -17):
+        assert R.panel_rp(panel(v)) == v, (v, R.panel_rp(panel(v)))
+    assert R.panel_rp(blank()) is None
+
+    # Per game: two reads in a row; a change needs a green feed line from 20 s before to 5 s after it; never lower.
+    reads = [(10, -48), (12, -48), (14, -46), (16, -46), (20, -48), (60, -41), (62, -41), (64, -48), (66, -48), (90, 3), (92, 3), (94, 30)]
+    g = R.game_rp(reads, 0, 100, seen=[50, 51, 85])
+    assert g == {"start": -48, "last": 3, "lastAt": 92, "reads": 12}, g
+    assert R.game_rp(reads, 0, 100, seen=[])["last"] == -48             # no green line at all: nothing earned
+    assert R.game_rp([(5, 12)], 0, 100) is None
+    assert R.last_twice([5, 5, None, 7, 7, 8]) == (7, 2) and R.last_twice([5, None, 5]) == (None, 0)
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback

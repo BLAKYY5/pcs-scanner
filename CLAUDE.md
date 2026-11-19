@@ -366,6 +366,27 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   totals right in 15 of 15 games (5 rest on a single read). A misread units or tens digit that comes out higher
   would still pass the single-read rule: it relies on the digit test (no misread seen in ~9,000 reads).
   The previous "damage misreads" at game endings (355/375, 262/297, 1123/1151) were real: the number grew 1 s later.
+- **Ranked RP and rank badges** (`pcs_ranked.py`, table `pcs_ranked.json`, 16:9 only). What Ranked shows (checked on
+  the 17 / 18 Nov Ranked recordings): our kills that give RP are kill lines `[killer badge] killer [weapon | Bleed Out |
+  ability] [victim badge] victim +N RP` with `+N RP` in green at the feed's right edge; two other green lines are
+  "Team Eliminated +N RP" (placement) and "All Previous Kill Points Increased +N RP" (and the kill lines' own numbers
+  grow on screen when that shows: +8 -> +10). The feed badge shows the tier only, never the division. Under the player's
+  rank emblem (top right) a counter shows the game's RP so far: "-48 RP" red (entry cost) rising to "+328 RP" white; it
+  does not include what the match summary adds after the game (a won game: +328 in game, +392 on the summary).
+  `Tracker` follows the green lines across keyframes (same number start, at most three places up or down, words that
+  look alike, one to one; pieces of one line joined at the end, also a kill line whose number grew), reads the number
+  (digit shapes from our recordings, as OwnStats) and the victim badge (28 x 28 shapes of the tiers seen so far:
+  diamond, platinum, gold; rightmost badge followed by a white name, colour must agree); a value counts when read on
+  two keyframes in a row. Lines go to `feed.json` `rpLines` [{t, y, rp, reads, kind: kill | team | bonus | unknown,
+  victimRank?, color?, hue? (our killer's squad colour, hue in degrees)}]; per game `rpFeed` {kills [{t, rp, victimRank?, color?, hue?}], killRp,
+  lines, unknownLines} and `rp` {start, last, lastAt, reads, laterLines?} from the counter: two reads in a row, never
+  lower, and a change only with a green line seen from 20 s before to 5 s after (a red 8 misread as 6, -48 -> -46,
+  has none). `laterLines` = green lines after the counter's last read (the player was dead / spectating: the total
+  misses them). Check (truths by eye; dev 17 Nov, held-out 18 Nov 22:28, split before tuning): every green number
+  given was right (126 / 126 dev, 44 / 44 held); held-out kill lines with RP: 18 of the 26 on screen reported, all 18
+  right (number and victim tier; the killer colour was not checked one by one), the other 8 counted as `unknown`
+  lines or seen once / faded; counter's last value right in 17 / 17 and 8 / 8 games.
+  Tiers never seen in our recordings (rookie, bronze, silver, master, predator) are not read. ~1.5 ms per keyframe.
 - **Ring circles** (`pcs_ring.py`): on the unzoomed full map the area outside the current ring is red-tinted with a
   dark line on the ring; the next ring is a see-through white disc (everything under it moved towards white by one
   fraction, 0.14..0.26 measured, alike in R, G, B). Edges that fit each look vote for a centre then a radius (Hough),

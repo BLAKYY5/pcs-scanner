@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked
 
 VERSION = '1.10.14'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -422,7 +422,7 @@ def duration(path):
     except Exception: return 0.0
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
-    mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); events = []; samples = []; t0 = time.time(); last = 0
+    mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); rpfeed = pcs_ranked.Tracker(); events = []; samples = []; t0 = time.time(); last = 0
     legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
@@ -477,9 +477,15 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                                + (pos if pos else [None, None, None]) + [vel, bool(rg and rg['fine']), bool(rg and rg.get('pre'))])
             try: feed.read(view_top_once() if st else img, t)
             except Exception: pass
+            if not st:          # ranked: green '+N RP' feed lines and the victim's rank badge (16:9 only)
+                try: rpfeed.read(img, t)
+                except Exception: pass
             try: perf.setdefault('_storm', []).append((round(t, 2), pcs_fights.read_storm(img)))   # ring damage: red screen edges
             except Exception: pass
             if not st:          # "N SQUADS LEFT" (16:9 only so far)
+                try: rp = pcs_ranked.panel_rp(img)        # ranked: the game's RP so far, under the rank emblem
+                except Exception: rp = None
+                if rp is not None and not (hud and hud[2] and hud[2]['spec']): perf.setdefault('_rp', []).append((round(t, 2), rp))
                 try: sq = HUD.SquadsLeft.read(img)
                 except Exception: sq = None
                 if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
@@ -517,7 +523,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             last = time.time(); pct = f' ({100 * t / total:.0f}%)' if total else ''
             print(f'  {int(t // 60):3d}:{int(t % 60):02d}{pct}  events: {len(events)}  HUD samples: {len(samples)}  [{time.time() - t0:.0f}s]', flush=True)
         tw = time.time(); perf['analysis'] = perf.get('analysis', 0) + tw - tp
-    perf['feedLines'] = len(feed.lines); perf['_feed'] = feed.lines
+    perf['feedLines'] = len(feed.lines); perf['_feed'] = feed.lines; perf['_rpSeen'] = rpfeed.seen; perf['_rpLines'] = rpfeed.finish()
     perf['_votes43'] = votes[True]; perf['_votes169'] = votes[False]
     return events, samples, labels
 
@@ -616,10 +622,10 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
         with mp.Pool(min(workers, len(todo))) as pool:
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
-    labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rank = []; squads = []; own = []
+    labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
     rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []
     for start, ev, sm, reps, pf in out:
-        feed += pf.pop('_feed', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
+        feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
         remap = {}
@@ -633,7 +639,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
     HUD.STRETCH = LAYOUT if LAYOUT is not None else v43 > v169; HUD.LOOSE = HUD.STRETCH
     perf['layout'] = '4:3 stretched' if HUD.STRETCH else '16:9'; perf['layoutVotes'] = {'4:3': v43, '16:9': v169}
     print(f'  layout: {perf["layout"]} ({v43} / {v169} reads)', flush=True)
-    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
+    perf['wall'] = time.time() - t0; perf['workers'] = workers; perf['chunks'] = chunks; perf['chunksResumed'] = len(done); perf['decoder'] = dec[0]; perf['_feed'] = sorted(feed, key=lambda l: l['t']); perf['_rp'] = sorted(rpc); perf['_rpLines'] = sorted(rpl, key=lambda l: l['t']); perf['_rpSeen'] = sorted(rps); perf['_rank'] = sorted(rank); perf['_squads'] = sorted(squads); perf['_own'] = sorted(own, key=lambda r: r[0])
     perf['_rings'] = sorted(rings, key=lambda r: r[0]); perf['_cards'] = sorted(cards, key=lambda r: r[0]); perf['_icons'] = sorted(icons, key=lambda r: r[0])
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
@@ -841,10 +847,23 @@ def main():
             for i, gm in enumerate(games):          # a game's lines: from 60 s before it starts to 60 s before the next
                 t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
                 gm['feedStats'] = HUD.feed_stats(feed_lines, gm['tStart'] - 60, t1, (gm.get('select') or {}).get('squad'))
+        rp_reads = perf.pop('_rp', []); rp_lines = perf.pop('_rpLines', []); rp_seen = perf.pop('_rpSeen', [])
+        for i, gm in enumerate(games):              # ranked: RP counter and the feed's green RP lines per game
+            t1 = games[i + 1]['tStart'] - 60 if i + 1 < len(games) else float('inf')
+            try:
+                g_rp = pcs_ranked.game_rp(rp_reads, gm['tStart'] - 60, t1, rp_seen)
+                if g_rp:            # green RP lines after the counter's last value: RP it never showed (spectating)
+                    later = [l for l in rp_lines if g_rp['lastAt'] + 5 < l['t'] < t1]
+                    if later: g_rp['laterLines'] = len(later)
+                    gm['rp'] = g_rp
+                f_rp = pcs_ranked.game_feed(rp_lines, gm['tStart'] - 60, t1)
+                if f_rp: gm['rpFeed'] = f_rp
+            except Exception as e: perf['rankedError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
-        if feed_lines:
-            json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines},
+        if feed_lines or rp_lines:
+            json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
+                       **({'rpLines': rp_lines} if rp_lines else {})},
                       open(os.path.join(A.out, name + '.feed.json'), 'w'))
             print(f'  kill/event feed: {len(feed_lines)} lines saved to {name}.feed.json', flush=True)
         res = {'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'scannedAt': datetime.datetime.now().isoformat(timespec='seconds'),
