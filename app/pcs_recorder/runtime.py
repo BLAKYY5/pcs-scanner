@@ -654,7 +654,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     en = tk.BooleanVar(value=s.enabled)
     row("Auto-record Apex", ttk.Checkbutton(f, variable=en), "records while Apex runs")
     hub = tk.StringVar(value=s.hub_url)
-    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = Drive only")
+    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = results stay on this PC")
     folder = tk.StringVar(value=s.folder)
     fr = ttk.Frame(f)
     ttk.Entry(fr, textvariable=folder, width=28).pack(side="left")

@@ -162,6 +162,7 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "ringCircles", "respawns",   # scanner PR #52: respawns [{t, who: teammate | self, hue, deadSince, how}], shown like kills
                "ownDeaths",                 # the recording player's deaths [t]: dead time and lives in the game bar
                "ownKnocks",   # own knocks [{t, end, reads, outcome}], shown like respawns
+               "shieldTimeline",   # pcs_bars: own shield / health [t, tier, shield, health]: a thin lane in review
                "carePackages", "strongholds",
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
                "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
