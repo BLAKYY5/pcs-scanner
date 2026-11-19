@@ -1023,7 +1023,8 @@ class Backend:
         return notes.fetch(url, it["path"], item_id, player)
 
     def note_change(self, item_id: str, action: str, body: dict) -> dict:
-        """Coach: save / delete a note; anyone: mark notes as seen. Returns the recording's notes afterwards."""
+        """Coach: save / delete a note; anyone: mark notes as seen, "Got it" / reply under a note (`reply`), remove
+        an own reply (`unreply`). Returns the recording's notes afterwards."""
         from pcs_recorder import notes
         url, it = self._notes_target(item_id)
         if not url:
@@ -1033,6 +1034,10 @@ class Backend:
             notes.save(url, it["path"], player or "", body.get("note") or {})
         elif action == "delete":
             notes.delete(url, body.get("note_id"))
+        elif action == "reply":
+            notes.reply(url, body.get("note_id"), ack=bool(body.get("ack")), text=str(body.get("text") or ""))
+        elif action == "unreply":
+            notes.delete_reply(url, body.get("note_id"), body.get("reply_id"))
         elif action == "seen":
             for nid in (body.get("note_ids") or [])[:50]:
                 notes.seen(url, nid)
@@ -1665,7 +1670,8 @@ class Server:
                     if path == "/api/youtube/block":
                         return self._json(b.yt_block(body.get("id", ""), body.get("action", ""),
                                                      body.get("title"), body.get("privacy")))
-                    if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen"):
+                    if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen", "/api/notes/reply",
+                                "/api/notes/unreply"):
                         return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
                     if path.startswith("/api/watch/"):
                         return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
