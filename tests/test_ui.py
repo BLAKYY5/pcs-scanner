@@ -949,7 +949,8 @@ def test_one_google_sign_in_scopes():
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
     yt = src[src.index("def youtube_service"):src.index("def google_id_token")]
     assert "from_client_secrets_file(client, SIGNIN_SCOPES)" in yt and "write_token(YT_TOKEN_F, signin_json(creds))" in yt
-    assert "auth/drive" not in src
+    # no Drive permission is ever asked: "auth/drive" only names the old file's permission for its removal (decision 26)
+    assert src.count("auth/drive") == 1 and "_OLD_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive'" in src
     full = Credentials("ya29.x", refresh_token="1//r", client_id="cid", client_secret="cs",
                        token_uri="https://oauth2.googleapis.com/token", scopes=core.SIGNIN_SCOPES,
                        granted_scopes=core.ID_SCOPES)                       # YouTube unticked on Google's page
