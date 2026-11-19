@@ -79,8 +79,11 @@ def read_cards(a):
             cards.append((y0 - 27, 'dead', status_of(lime[y0:y0 + SH])))
     # alive: a solid white bar from the name column (a knocked player's bar is red, a low one may be too short)
     wl = _left(white)
-    run = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
-                    if wl[y] < 999 else 0 for y in range(white.shape[0])])
+    # length of the white run from each row's first white pixel (0 for rows without white); one array step instead of
+    # a Python loop over the rows (same numbers)
+    after = ~white & (np.arange(white.shape[1])[None, :] >= wl[:, None])
+    gap = after.any(1)
+    run = np.where(wl < 999, np.where(gap, after.argmax(1) - wl, white.shape[1] - wl), 0)
     brow = (wl >= 3) & (wl <= 12) & (run >= 8) & (_trans(white) <= 3)
     for y0, y1 in _runs(brow, 4):
         if y1 - y0 <= 14 and not any(abs((y0 - 33) - c[0]) < 14 for c in cards): cards.append((y0 - 33, 'alive', None))

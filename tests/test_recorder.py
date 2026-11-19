@@ -4494,5 +4494,49 @@ def run_all(tests):
     return 1 if failed else 0
 
 
+def test_scanner_speedups_give_the_same_numbers():
+    """The faster weapon match, debug overlay glyphs and teammate-card bar runs give exactly the old values
+    (checked here on random data; on real recordings: same scan.json / feed.json for 3 recordings)."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as H
+    import pcs_respawn as R
+    rng = np.random.default_rng(7)
+    # weapon match: numpy's irfft2 vs its two steps with only the needed rows (bit for bit)
+    FH, FW = H.Weapons.FH, H.Weapons.FW
+    for h, th, tw in ((44, 29, 80), (64, 13, 88), (36, 32, 40)):
+        c = np.zeros((FH, FW)); c[:h, :600] = rng.integers(0, 256, (h, 600))
+        t = np.zeros((FH, FW)); t[:th, :tw] = rng.normal(size=(th, tw))
+        G, F = np.fft.rfft2(c), np.conj(np.fft.rfft2(t))
+        old = np.fft.irfft2(G * F, s=(FH, FW))[:h - th + 1, :600 - tw + 1]
+        new = np.fft.irfft(np.fft.ifft(G * F, FH, 0)[:h - th + 1], FW, 1)[:, :600 - tw + 1]
+        assert np.array_equal(old, new), (h, th, tw)
+    # debug overlay line: every glyph at once vs one at a time
+    m = rng.random((70, 300)) > 0.6
+    for k, (y, x) in enumerate(((22, 3 + 8 * 8), (50, 3 + 8 * 20))):            # real glyphs in some cells
+        m[y:y + 9, x:x + 7] = list(H.DBG_T.values())[k] > 0
+    m[22:31, 3 + 8 * 10:3 + 8 * 11] = False                                      # an empty cell
+    stack = H._DBG_STACK
+    try:
+        new = [H._dbg_line(m, y) for y in (22, 50)]
+        H._DBG_STACK = None
+        old = [H._dbg_line(m, y) for y in (22, 50)]
+    finally:
+        H._DBG_STACK = stack
+    assert new == old and stack is not None, (new, old)
+    # teammate cards: white run lengths without the per-row loop
+    for _ in range(5):
+        a = rng.integers(0, 256, (1440, 2560, 3), dtype=np.uint8)
+        a[R.Y0 + 40:R.Y0 + 52, R.NAME_X0 + 5:R.NAME_X0 + 120] = 255                  # a health bar
+        white, _ = R.masks(a)
+        wl = R._left(white)
+        old = np.array([(np.argmin(white[y, wl[y]:]) if not white[y, wl[y]:].all() else white.shape[1] - wl[y])
+                        if wl[y] < 999 else 0 for y in range(white.shape[0])])
+        after = ~white & (np.arange(white.shape[1])[None, :] >= wl[:, None])
+        new = np.where(wl < 999, np.where(after.any(1), after.argmax(1) - wl, white.shape[1] - wl), 0)
+        assert np.array_equal(old, new)
+        assert R.read_cards(a) is not None
+
+
 if __name__ == "__main__":
     sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))
