@@ -155,6 +155,34 @@ def youtube_service(interactive=True):
         write_token(YT_TOKEN_F, creds.to_json())
     return build('youtube', 'v3', credentials=creds, cache_discovery=False)
 
+# ---------------- the old Drive sign-in (removed at start) ----------------
+# Up to 1.10.x results went to Google Drive with a sign-in of their own (the file below) holding only the
+# drive.file permission. Drive results are gone since 1.11.0; the coach agreed (20 Nov 2026) to remove that file.
+# Only that file, and only while it is plainly the old kind: every permission in it is a Drive one. A file with any
+# other permission (YouTube, an account sign-in), without a list of permissions, or that can't be read here is left
+# alone, and youtube_token.json is never touched.
+OLD_DRIVE_TOKEN_F = os.path.join(DATA, 'google_token.json')
+_OLD_DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive'
+
+def remove_old_drive_signin(path=None):
+    """Remove the old Drive-only sign-in file. Returns True when it was removed."""
+    path = path or OLD_DRIVE_TOKEN_F
+    if os.path.normcase(os.path.abspath(path)) == os.path.normcase(os.path.abspath(YT_TOKEN_F)): return False
+    if not os.path.isfile(path): return False
+    info = read_token(path)
+    scopes = (info or {}).get('scopes')
+    if isinstance(scopes, str): scopes = scopes.split()
+    if not isinstance(scopes, list) or not scopes: return False
+    if not all(isinstance(s, str) and (s == _OLD_DRIVE_SCOPE or s.startswith(_OLD_DRIVE_SCOPE + '.')) for s in scopes):
+        return False
+    try:
+        os.remove(path)
+    except OSError as e:
+        logging.warning('old Drive sign-in not removed (%s)', e.__class__.__name__)
+        return False
+    logging.info('old Google Drive sign-in removed (not used since 1.11.0)')
+    return True
+
 # ---------------- team file: weapon icons for the kill feed ----------------
 # The scanner names kill-feed weapons from a small private file the coach builds from the game's own icons. It is
 # not in this (public) app: the coach shares it on Google Drive as "Anyone with the link" and each player pastes that
@@ -464,8 +492,13 @@ def clean_old_unpacked(tmp=None, current=None, min_age_s=600, now=None):
 def run_scan(files, log, out=OUT):
     import pcs_scan
     argv = sys.argv
+    try:                                 # the player's highlight rules (Settings -> Highlights)
+        from pcs_recorder import settings as rec_settings
+        rules = ['--highlights', rec_settings.saved_highlight_rules()]
+    except Exception:
+        rules = []
     try:
-        sys.argv = ['pcs_scan'] + list(files) + ['--out', out]
+        sys.argv = ['pcs_scan'] + list(files) + ['--out', out] + rules
         pcs_scan.main()
     finally:
         sys.argv = argv

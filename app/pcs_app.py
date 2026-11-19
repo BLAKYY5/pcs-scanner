@@ -22,12 +22,14 @@ from pcs_core import APP, OUT, BUILD, SETTINGS
 def selftest(out):
     """Used by the build: proves the libraries, the scanner and the interface files are inside the exe."""
     try:
-        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_ammo, pcs_minimap, pcs_ranked, scipy.fft, tkinter   # noqa: F401
+        import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_ammo, pcs_minimap, pcs_ranked, pcs_highlights, scipy.fft, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
+        import pcs_bans   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
+        import pcs_recorder.games   # noqa: F401
         import pcs_recorder.minimaps, pcs_recorder.squadpaths, pcs_recorder.weaponicons   # noqa: F401
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
@@ -38,10 +40,13 @@ def selftest(out):
         import pcs_recorder.comms, pcs_transcribe   # noqa: F401
         import pcs_recorder.clips   # noqa: F401
         import pcs_install   # noqa: F401
+        import pcs_i18n   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
-        web = all(os.path.exists(os.path.join(pcs_server.WEB, f)) for f in ('index.html', 'app.css', 'app.js'))
+        web = all(os.path.exists(os.path.join(pcs_server.WEB, f)) for f in ('index.html', 'app.css', 'app.js', 'i18n.js', 'i18n/en.json'))
+        langs = [l['code'] for l in pcs_i18n.languages()]                # the string tables are in the exe
+        web = web and 'fr' in langs and pcs_i18n.tables('fr')['tr'].get('Settings') not in (None, 'Settings')
         s = pcs_server.Server(pcs_server.Backend()); s.start()            # the local server answers
         import urllib.request
         with urllib.request.urlopen(f'http://127.0.0.1:{s.port}/api/state?t={s.token}', timeout=5) as resp:
@@ -49,7 +54,7 @@ def selftest(out):
         s.stop()
         msg = (f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} '
                f'ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(core.HERE, "client.json"))} '
-               f'ui {web and api} autorecord ok')
+               f'ui {web and api} languages {",".join(langs)} autorecord ok')
         if not (web and api):
             msg = 'FAIL interface files or local server missing: ' + msg
     except Exception:
@@ -358,6 +363,8 @@ def main():
         return
     core.cleanup_staged()
     threading.Thread(target=core.settle_install, daemon=True, name='settle-install').start()
+    try: core.remove_old_drive_signin()                    # the old Drive sign-in file of 1.10.x: not used any more
+    except Exception: logging.exception('old Drive sign-in')
     if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
         threading.Thread(target=core.clean_old_unpacked, daemon=True, name='clean-temp').start()
     try:

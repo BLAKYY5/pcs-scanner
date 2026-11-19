@@ -28,6 +28,11 @@ except ImportError:                      # Linux without Tk: the recorder's wind
 import pcs_core as core  # noqa: E402
 import pcs_server  # noqa: E402
 
+from pcs_recorder import games as _games  # noqa: E402
+# Tests never read this PC's programs or Windows' game list: no game runs unless a test says so (a game the
+# developer plays while the tests run must not change their results).
+_games.DETECTOR.procs, _games.DETECTOR.registry, _games.DETECTOR.foreground = (lambda: {}), (lambda: {}), (lambda: None)
+
 VIDEO = TMP / "vods" / "Apex Legends_2026.11.02-09.03.mp4"
 DATA = bytes(range(256)) * 4096          # 1 MB with a recognisable pattern
 
@@ -153,6 +158,8 @@ def test_recording_date_and_game_data_for_review():
             "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
             "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
+            "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[600.0, "blue", 75, 100], [900.0, "knocked"],
+                                                                                [912.0, "white", 0, 30]], "mates": [[], []]},
             "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
             "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
             "ammoEvents": [{"t": 700.0, "kind": "lowAmmoFight", "mag": 12, "reserve": 8, "magFull": 28, "fightEnd": 720.0},
@@ -191,8 +198,12 @@ def test_recording_date_and_game_data_for_review():
         assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
         assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
+        # own shield / health (pcs_bars shieldTimeline): a thin lane, shown only when the scan has it, words through t()
+        assert g["shieldTimeline"]["self"][1] == [900.0, "knocked"] and o["shieldTimeline"] is None
+        assert "shieldRuns(d).length ? '<div class=\"lane shield\" id=\"laneH\">" in js and "t('Your shield · health')" in js
+        assert "drawShield();" in js and "t('shield {shield} ({tier}) · health {health}'" in js
         # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
-        assert "knock: ['', 'Knocked']" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
+        assert "knock: ['', t('Knocked')]" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
         assert g["heals"][0]["item"] == "battery" and g["abilities"][0]["kind"] == "ult" and o["heals"] is None
         assert "battery: 'Shield battery'" in js and "'Ultimate used'" in js and "laneOnly: true" in js and "if (e.laneOnly) return;" in js
@@ -236,7 +247,7 @@ def test_review_page_texts():
     assert "Your microphone is never recorded" not in js                       # Settings offers mic recording
     assert "Changes apply right away" not in js                                # most fields need Save changes
     assert "'Legend select'" in js and "'Game start'" in js and "Unsaved changes" in js
-    assert "'banner picked up'" in js and "'banner crafted'" in js and "'beacon' + at(r.beaconAt)" in js   # respawn steps
+    assert "'banner picked up'" in js and "'banner crafted'" in js and "t('beacon') + at(r.beaconAt)" in js   # respawn steps
     assert "+ 480)" not in js and "r.gbPerHour + ' GB" not in js               # GB per hour: one formula (gbHour)
     assert "File missing" in js and "Video format not supported" in js
 
@@ -248,6 +259,8 @@ class _S:            # recorder settings stand-in
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     mic_device = "default"
     share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
+    share_clips = False
+    transcripts_withdraw = False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -638,8 +651,11 @@ def test_no_google_drive_results():
     root = Path(__file__).resolve().parent.parent
     for f in ("pcs_core.py", "pcs_server.py", "pcs_app.py", "pcs_recorder/runtime.py", "pcs_recorder/core.py"):
         text = (root / "app" / f).read_text(encoding="utf-8")
+        if f == "pcs_core.py":                  # only to recognise and remove the old Drive sign-in file at start
+            assert text.count("google_token.json") == 1 and text.count("auth/drive") == 1, f
+            text = text.replace("google_token.json", "").replace("auth/drive", "")
         assert "auth/drive" not in text and "'drive', 'v3'" not in text and "drive_upload" not in text, f
-        assert "PCS Scans" not in text and "google_token.json" not in text, f
+        assert "PCS Scans" not in text and "google_token.json" not in text and "Drive only" not in text, f
     privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
     assert "not used any more" in privacy and "never to Google Drive" in privacy
 
@@ -841,6 +857,32 @@ def test_installer_finish_update_from_old_version():
     finally:
         pcs_setup.PAYLOAD, pcs_setup.LAUNCHER, pcs_install.app_root, pcs_install.run_app = saved
     assert "installed 1.10.19" in Path(core.UPDATE_LOG).read_text()          # the test's data folder, not the PC's
+
+
+def test_update_waits_for_any_game():
+    """Coach, 20 Nov 2026: app updates wait while any game runs, not only Apex (with "Pause heavy work while any game
+    runs" on, the default). The switch off: only Apex holds the update."""
+    from pcs_recorder import games
+    real = games.DETECTOR
+    procs = {9: "deadlock.exe"}
+    games.DETECTOR = games.Detector(procs=lambda: dict(procs), registry=lambda: {}, foreground=lambda: None)
+    b = pcs_server.Backend(_Auto(str(TMP / "updgame")))
+    b._apex_running = lambda: False
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
+    try:
+        why = b.update_blocked()
+        assert why == "Deadlock is running. Update when you're done playing.", why
+        assert b.install_update() == why and b.update_state is None and not b.updating()
+        b._apex_running = lambda: True
+        assert b.update_blocked() == "Apex is running. Update after your games."
+        b._apex_running = lambda: False
+        b.auto.s.game_pause = False                          # the switch off: other games don't hold the update
+        assert b.update_blocked() is None
+        b.auto.s.game_pause = True
+        procs.clear(); games.DETECTOR._snap_at = float("-inf")
+        assert b.update_blocked() is None
+    finally:
+        games.DETECTOR = real
 
 
 def test_update_relaunch_arguments():
@@ -1047,6 +1089,51 @@ def test_sign_in_tokens_encrypted():
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
+def test_old_drive_signin_removed():
+    """At start the old Drive sign-in (google_token.json, drive.file only) is removed: only that file, only while
+    every permission in it is a Drive one. A YouTube or account sign-in in it, a file without permissions, one that
+    can't be read here, and youtube_token.json are left alone."""
+    base = {"token": "ya29.old", "refresh_token": "1//rt-old", "client_id": "cid", "client_secret": "cs",
+            "token_uri": "https://oauth2.googleapis.com/token"}
+    drive = ["https://www.googleapis.com/auth/drive.file"]
+    f = Path(core.OLD_DRIVE_TOKEN_F)
+    assert f.name == "google_token.json" and f.parent == Path(core.YT_TOKEN_F).parent
+    yt = Path(core.YT_TOKEN_F)
+    yt_before = yt.read_bytes() if yt.exists() else None
+    try:
+        assert core.remove_old_drive_signin() is False                         # no file: nothing to do
+        # the old kind, in clear (1.9 and older) and encrypted (1.10.x): removed
+        f.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        core.write_token(str(f), json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        f.write_text(json.dumps({**base, "scopes": " ".join(drive)}))         # scopes as one string
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        # anything else in that file stays
+        for info in ({**base, "scopes": core.YT_SCOPES},                        # YouTube
+                     {**base, "scopes": drive + core.YT_SCOPES},                # Drive and YouTube
+                     {**base, "scopes": drive + ["openid", "email"]},           # an account sign-in
+                     {**base, "scopes": []}, base):                             # no permissions written
+            f.write_text(json.dumps(info))
+            assert core.remove_old_drive_signin() is False and f.exists(), info
+            f.unlink()
+        for raw in (json.dumps({"dpapi": "AAAA"}), "not json"):               # another user's, damaged
+            f.write_text(raw)
+            assert core.remove_old_drive_signin() is False and f.exists()
+            f.unlink()
+        # youtube_token.json is never removed, even holding a Drive-only sign-in
+        yt.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin(str(yt)) is False and yt.exists()
+        assert core.remove_old_drive_signin() is False and yt.exists()
+        # the app calls it once at start
+        src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+        assert "core.remove_old_drive_signin()" in src
+    finally:
+        f.unlink(missing_ok=True)
+        if yt_before is None: yt.unlink(missing_ok=True)
+        else: yt.write_bytes(yt_before)
+
+
 def test_request_body_limit():
     """The page sends small JSON only: a huge request body is refused before it is read."""
     b = pcs_server.Backend()
@@ -1104,6 +1191,13 @@ def test_hub_notes_cleaned_for_the_page():
     assert [d["color"] for d in n["drawings"]] == ["#ffd60a", "#ffd60a"]
     assert n["drawings"][0]["pts"] == [[0.1, 0.2], [0.0, 1.0]]
     assert notes.num(float("nan")) == 0.0 and notes.num("12.5") == 12.5 and notes.num(None, 3.0) == 3.0
+    # the 2D replay range: two numbers in order, or none at all
+    assert notes.clean_note({"t": 1, "replayFrom": "-20", "replayTo": 40})["replayFrom"] == -20.0
+    for bad in ({"replayFrom": 10}, {"replayFrom": 50, "replayTo": 40}, {"replayFrom": "x", "replayTo": 4},
+                {"replayFrom": None, "replayTo": None}):
+        n = notes.clean_note({"t": 1, **bad})
+        assert "replayFrom" not in n and "replayTo" not in n, bad
+    assert "replayFrom" in notes.FIELDS and "replayTo" in notes.FIELDS
 
 
 def test_no_password_in_app_log():
@@ -1933,7 +2027,7 @@ def test_weapon_icons_from_hub():
         assert b.sync_icons() == "hub:error" and Path(core.ICONS_F).read_bytes() == one and drive["calls"] == calls
         # page words: the team link is hidden once the hub gives the icons (leaving-Drive plan step 2)
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-        for text in ("iconsFromHub", "${S.iconsFromHub ? `<label class=\"field\"><span>Weapon icons</span>",
+        for text in ("iconsFromHub", "${S.iconsFromHub ? `<label class=\"field\"><span>${t('Weapon icons')}</span>",
                      "no team link needed", "From the team hub", "invite link"):
             assert text in js, text
     finally:
@@ -2064,14 +2158,14 @@ def test_hub_only_results_page():
     assert "driveOff" not in js and "S.google" not in js and "/api/signin" not in js and "su-google" not in js
     assert "function setupDone(st) { return st.name && st.hub && choicesDone(st); }" in js
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
-    assert "const total = 3;" in setup and "${n} of ${total} done" in setup and "Google Drive" not in setup
+    assert "const total = 3;" in setup and "t('{n} of {total} done', {n, total})" in setup and "Google Drive" not in setup
     assert "Until you join, your results stay on this PC." in setup
     home = js[js.index("function renderHome"):js.index("function renderHome") + 6000]
     assert "hubSet() ?" in home and "Sent to the team hub" in home and "No team hub yet" in home
     assert "Kept on this PC until you join the hub" in home
     sett = js[js.index("function renderSettings"):js.index("function settingsBody")]
-    assert "${hubSet() ?" in sett and "Your results go to the team hub.</small>" in sett
-    assert "Your results stay on this PC until you join your team's hub" in sett and "f-signin" not in sett
+    assert "${hubSet() ?" in sett and "t('Your results go to the team hub.')}</small>" in sett
+    assert "Your results stay on this PC until you join your team\\'s hub" in sett and "f-signin" not in sett
     body = js[js.index("function settingsBody"):js.index("function settingsBody") + 600]
     assert "for (const k of ['team_link']) { const el = $('#f-' + k); if (el)" in body
     assert "$('#f-team_link').value" not in js
@@ -2266,6 +2360,9 @@ def test_coach_notes():
         r = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "Rotate now"}})[1]
         assert r["notes"][0]["text"] == "Rotate now" and r["notes"][0]["version"] == 2
         assert fake.calls[-2][0] == "PUT" and fake.calls[-2][2] == {"if_version": "1"}
+        # a 2D replay range (hub 0.6, seconds after the jump) goes with the note; null / null clears it
+        call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**r["notes"][0], "replayFrom": 30.5, "replayTo": 60}})
+        assert fake.calls[-2][0] == "PUT" and fake.calls[-2][3]["replayFrom"] == 30.5 and fake.calls[-2][3]["replayTo"] == 60
         code, r, _ = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "stale"}})
         assert code == 500 and "409" in r["error"] and "reload" in r["error"], r                # someone changed it
         # a recording the hub doesn't know: said so, and saving is refused with the hub's words
@@ -2802,7 +2899,7 @@ def test_watch_together_never_during_a_game():
         b.watch.leave()
         _fresh_hub()
     js = (Path(pcs_server.WEB) / "session.js").read_text(encoding="utf-8")
-    assert "apex: 'Apex started, so you left the session. The others keep watching.'" in js
+    assert "apex: t('Apex started, so you left the session. The others keep watching.')" in js
     assert "stopPlayers();" in js
 
 
@@ -2883,7 +2980,7 @@ def test_watch_session_plan_through_the_app():
         core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
     web = Path(pcs_server.WEB)
     js = (web / "session.js").read_text(encoding="utf-8")
-    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "Moment ${at + 1} of ${items.length}",
+    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "t('Moment {n} of {total}', {n: at + 1, total: items.length})",
                  "N / P = next / previous moment", "control('item', {index: i})", "Use a plan…"):
         assert text in js, text
     rx = (web / "review-extras.js").read_text(encoding="utf-8")
@@ -3032,8 +3129,8 @@ def test_review_kill_feed_our_squad():
     old, sides = pcs_server.feed_lines([{"t": 5.0, "jpg": "X"}])
     assert not sides and old == [{"t": 5.0, "jpg": "X"}]
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-    for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
-                 "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
+    for text in ("Only our squad", "Kill feed sides not read in this scan", "x.t.key === 'game' ? t('Preparing game sound…')",
+                 "'We knocked'", "'You got knocked'", "'{who} died'", ">${t('Theatre')}</button>", "pcs-theatre"):
         assert text in js, text
 
 
@@ -3076,7 +3173,7 @@ def test_review_respawns_like_kills():
         assert d["games"][1]["respawns"] is None                                           # older scan: just missing
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
         css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
-        assert "respawned`" in js and "Respawned</span>" in js and ".tick.respawn" in css
+        assert "t('{who} respawned', {who})" in js and "${t('Respawned')}</span>" in js and ".tick.respawn" in css
         page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
         try:
             end = time.time() + 15
@@ -3099,6 +3196,110 @@ def test_review_respawns_like_kills():
             page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
             page.js("document.querySelector('#rvBody .ev.respawn').click(); document.querySelector('#laneF .tick.respawn[data-t=\"650.5\"]').click(); 1")
             assert page.js("__seeks") == [400, 650.5], page.js("__seeks")
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
+
+
+
+HL_TAKEDOWNS = [{"t": 300.0, "kind": "knock", "sources": ["feed", "fight"]}, {"t": 303.0, "kind": "knock", "sources": ["feed", "fight"]},
+                {"t": 307.0, "kind": "kill", "sources": ["counter", "feed"]}, {"t": 308.0, "kind": "kill", "sources": ["counter", "feed"]},
+                {"t": 600.0, "kind": "kill", "sources": ["counter", "damage"]}, {"t": 601.0, "kind": "kill", "sources": ["counter", "damage"]},
+                {"t": 602.0, "kind": "kill", "sources": ["counter", "damage"]}]
+
+
+def test_highlight_settings_and_scan_rules():
+    """Settings -> Highlights: three numbers, clamped, saved, sent to the scanner as --highlights; the scan process
+    only reads them (never writes recorder.json)."""
+    from pcs_recorder import settings as st
+    s = st.Settings(hl_chain_s=99, hl_multi_min=1, hl_double_s=50).clamp()
+    assert (s.hl_chain_s, s.hl_multi_min, s.hl_double_s) == (30, 2, 30) and s.highlight_rules() == "30,2,30"
+    assert st.Settings().highlight_rules() == "8,3,5"
+    old = st.SETTINGS_FILE.read_text(encoding="utf-8") if st.SETTINGS_FILE.exists() else None
+    try:
+        st.SETTINGS_FILE.write_text(json.dumps({"hl_chain_s": 10, "hl_multi_min": 4, "hl_double_s": 3}), encoding="utf-8")
+        before = st.SETTINGS_FILE.stat().st_mtime_ns
+        assert st.saved_highlight_rules() == "10,4,3" and st.SETTINGS_FILE.stat().st_mtime_ns == before
+        st.SETTINGS_FILE.write_text("{broken", encoding="utf-8")
+        assert st.saved_highlight_rules() == "8,3,5"
+        st.SETTINGS_FILE.write_text(json.dumps({"hl_chain_s": 6}), encoding="utf-8")
+        import pcs_scan
+        seen = []
+        real = pcs_scan.main
+        pcs_scan.main = lambda: seen.append(list(sys.argv))
+        try:
+            core.run_scan(["x.mp4"], print, str(TMP / "hl-out"))
+        finally:
+            pcs_scan.main = real
+        assert seen and seen[0][-2:] == ["--highlights", "6,3,5"], seen
+    finally:
+        if old is None:
+            st.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            st.SETTINGS_FILE.write_text(old, encoding="utf-8")
+    for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
+        assert k in pcs_server.REC_FIELDS
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for text in ("<h2>${t('Highlights')}</h2>", 'id="f-hl_chain_s"', 'id="f-hl_multi_min"', 'id="f-hl_double_s"', "'hl_chain_s', 'hl_multi_min', 'hl_double_s'"):
+        assert text in js, text
+    root = Path(pcs_server.WEB).parent.parent                 # the new scanner module is in the exe
+    assert '"--hidden-import", "pcs_highlights"' in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_ranked, pcs_highlights," in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
+
+
+def test_review_highlights_list_star_and_clip():
+    """The review page gets the scan's highlights regrouped with the player's rules; the Events tab lists them best
+    first above the events, a gold star marks each on the kill feed lane, a click seeks there, and Clip it opens the
+    clip bar from 5 s before to 3 s after. Older scans: nothing."""
+    import pcs_highlights
+    from pcs_recorder import settings as st
+    game = dict(RESPAWN_GAME, takedowns=HL_TAKEDOWNS, lastAlive=[], fights=[],
+                highlights=pcs_highlights.find(HL_TAKEDOWNS, [], []))
+    assert [h["kind"] for h in game["highlights"]] == ["wipe", "double"]
+    out = [dict(game)]
+    pcs_server.regroup_highlights([game], out, st.Settings(hl_double_s=2))
+    assert [h["kind"] for h in out[0]["highlights"]] == ["wipe"]                         # stricter double: gone
+    out = [{"highlights": "kept"}]
+    pcs_server.regroup_highlights([{"highlights": "kept"}], out, None)                   # no takedowns: as scanned
+    assert out[0]["highlights"] == "kept"
+    folder = TMP / "highlight-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.18-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}
+    (rec.with_suffix(".scan")).mkdir(exist_ok=True)
+    (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [game, old]}))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = call(srv, "/api/library")[1][0]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert [h["kind"] for h in d["games"][0]["highlights"]] == ["wipe", "double"]
+        assert d["games"][1]["highlights"] is None
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "t('Highlights ({n})', {n: L.length})" in js and ">${t('Clip it')}</button>" in js and "HL_BEFORE = 5, HL_AFTER = 3" in js
+        assert "function clipOpenRange(a, b)" in (Path(pcs_server.WEB) / "clip.js").read_text(encoding="utf-8")
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            end = time.time() + 15
+            while time.time() < end and not page.js("!!document.querySelector('#rvBody .ev.hl')"):
+                time.sleep(0.2)
+            rows = page.js("[...document.querySelectorAll('#rvBody .ev.hl b')].map(x => x.textContent)")
+            assert rows == ["Squad wipe · 3 enemies", "Quick double · 2 enemies"], rows
+            assert page.js("document.querySelector('#rvBody .hlhead').textContent") == "Highlights (2)"
+            assert page.js("[...document.querySelectorAll('#laneF .mk.hl')].map(x => +x.dataset.t)") == [600, 300]
+            assert "highlights" in page.js("document.querySelector('#laneF .lane-label').textContent")
+            page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
+            page.js("document.querySelectorAll('#rvBody .ev.hl')[1].click(); document.querySelector('#laneF .mk.hl[data-t=\"600\"]').click(); 1")
+            assert page.js("__seeks") == [300, 600], page.js("__seeks")
+            page.js("document.querySelector('#rvBody [data-hlclip=\"1\"]').click(); 1")
+            assert page.js("CLIP.open") is True and page.js("[CLIP.a, CLIP.b]") == [295, 311], page.js("[CLIP.a, CLIP.b]")
+            assert page.js("__seeks") == [300, 600]                          # Clip it does not seek like the row
         finally:
             page.close()
     finally:
@@ -3246,7 +3447,7 @@ def test_minimap_transform_and_page():
     html = (web / "index.html").read_text(encoding="utf-8")
     assert '<script src="minimap.js"></script>' in html and 'href="minimap.css"' in html
     app = (web / "app.js").read_text(encoding="utf-8")
-    assert "minimapSetup(d, v)" in app and "minimapToggle()" in app and "<kbd>M</kbd> map" in app
+    assert "minimapSetup(d, v)" in app and "minimapToggle()" in app and "<kbd>M</kbd> ${t('map')}" in app
     # nothing of EA's in the app: no picture files next to the page
     assert not [f for f in web.rglob("*") if f.suffix.lower() in (".jpg", ".jpeg", ".img")]
 
@@ -3392,7 +3593,7 @@ def test_minimap_layers_and_quiet_drawing():
     web = Path(pcs_server.WEB)
     js = (web / "minimap.js").read_text(encoding="utf-8")
     for text in ("ringCircles", "/api/squadpaths?id=", "/api/squadpaths?gameKey=", "MM_EVERY_MS = 250", "document.hidden",
-                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">Squad</button>", "pcs-map-squad",
+                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">${t('Squad')}</button>", "pcs-map-squad",
                  "No teammate\\'s recording of this game on the hub", "Squad paths need the team hub",
                  "function wtMapSetup", "function wtMapTick", "pcs-wt-map", "Click the path or a mark to go there"):
         assert text in js, text
@@ -3400,7 +3601,7 @@ def test_minimap_layers_and_quiet_drawing():
     assert "ringCircles" in pcs_server.GAME_FIELDS                                   # passed to the page when the scan has it
     assert "ownDeaths" in pcs_server.GAME_FIELDS and "respawns" in pcs_server.GAME_FIELDS   # lives / dead time in the game bar
     app = (web / "app.js").read_text(encoding="utf-8")
-    assert "function livesOf(g)" in app and "<small>Dead</small>" in app and "<small>Lives</small>" in app
+    assert "function livesOf(g)" in app and "<small>${t('Dead')}</small>" in app and "<small>${t('Lives')}</small>" in app
     assert "if (!Array.isArray(g.respawns) || g.tEndGame == null) return null;" in app   # older scans: nothing, never 0
     ses = (web / "session.js").read_text(encoding="utf-8")
     assert 'id="wtMap"' in ses and "wtMapSetup($('#wtMap'), st," in ses
@@ -4199,6 +4400,7 @@ def test_setup_choices():
         assert s.transcript_asked and s.transcript_consent
         call(srv, "/api/setup/choice", {"choice": "transcripts", "on": False})
         assert s.transcript_asked and not s.transcript_consent
+        assert s.transcripts_withdraw is True                    # yes -> no: the hub must be told (decision 21)
         said = []
         b.say = said.append
         call(srv, "/api/setup/choice", {"choice": "autorecord", "on": False})
@@ -4209,6 +4411,9 @@ def test_setup_choices():
         s2._sync_sharing = lambda: None
         s2.save_settings({"transcript_consent": True})
         assert s2.auto.s.transcript_asked and not s2.auto.s.share_asked
+        assert not s2.auto.s.transcripts_withdraw
+        s2.save_settings({"transcript_consent": False})
+        assert s2.auto.s.transcripts_withdraw is True
     finally:
         srv.stop()
         st.save = st_save
@@ -4246,6 +4451,10 @@ class TeamHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         self.calls, self.shared, self.rec = [], [], rec
+        self.bodies = []                 # what PUT /api/me/sharing got
+        self.clips = None                # share_clips per track: None = an older hub without the field
+        self.features = ["comms"]        # GET /api/me features ("transcripts": takes PUT /api/me/transcripts)
+        self.transcripts = []            # what PUT /api/me/transcripts got
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -4266,14 +4475,25 @@ class TeamHub:
                     return self._json(401, {"error": "bad_key"})
                 if self.path == "/api/me/sharing" and self.command == "PUT":
                     n = int(self.headers.get("Content-Length") or 0)
-                    hub.shared.append(json.loads(self.rfile.read(n))["share_tracks"])
+                    hub.bodies.append(json.loads(self.rfile.read(n)))
+                    hub.shared.append(hub.bodies[-1]["share_tracks"])
                     return self._json(200, {"share_tracks": hub.shared[-1]})
+                if self.path == "/api/me" and self.command == "GET":
+                    return self._json(200, {"name": "Moe", "role": "player", "features": hub.features})
+                if self.path == "/api/me/transcripts" and self.command == "PUT":
+                    if "transcripts" not in hub.features:
+                        return self._json(404, {"error": "not_found"})
+                    n = int(self.headers.get("Content-Length") or 0)
+                    hub.transcripts.append(json.loads(self.rfile.read(n)))
+                    return self._json(200, {"transcripts": hub.transcripts[-1]["transcripts"]})
                 if self.path.startswith("/api/team-tracks"):
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     if q["recording"][0] != hub.rec:
                         return self._json(200, {"recording": q["recording"][0], "games": []})
                     t = {"player": "Zed", "recording": "zed-rec", "scan_id": 7, "name": "zed-rec.mic.m4a",
                          "size": len(MIC_BYTES)}
+                    if hub.clips is not None:
+                        t["share_clips"] = hub.clips
                     return self._json(200, {"recording": hub.rec, "player": "Moe", "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "start": 50.0, "end": 1550.0,
                          "tracks": [{**t, "jumpAt": 340.0}], "skipped": [{"player": "Kai", "reason": "not_shared"}]},
@@ -4298,6 +4518,62 @@ class TeamHub:
     def stop(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+def test_transcripts_no_tells_the_hub():
+    """Decision 21: a player who switches comms transcripts from yes to no has the hub told with his own key
+    (PUT /api/me/transcripts {"transcripts": false}; the hub deletes his transcripts). Only when GET /api/me lists the
+    feature "transcripts": an older hub gets nothing (asked again 6 h later). Hub out of reach: tried again later.
+    Said yes again before it was sent: nothing sent."""
+    from pcs_recorder import settings as st, teamtracks
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    real_up = hub.internet_up
+    hub.internet_up = lambda: True                           # no look at the outside world in tests
+    fake = TeamHub("none")
+    s = st.Settings()
+    s.hub_url = fake.url
+    saved = []
+    real_save = st.save
+    st.save = lambda x: saved.append(x.transcripts_withdraw)
+    clock = {"t": 1000.0}
+    tt = teamtracks.TeamTracks(lambda: s, lambda: {}, lambda: None, now=lambda: clock["t"])
+    try:
+        assert tt.sync_transcripts() is None and fake.calls == []            # nothing to withdraw: no request
+        s.transcripts_withdraw = True
+        assert tt.sync_transcripts() is None                                   # older hub: no feature, nothing sent
+        assert fake.calls == [("GET", "/api/me")] and fake.transcripts == [] and s.transcripts_withdraw
+        assert tt.sync_transcripts() is None and len(fake.calls) == 1        # not asked again at once
+        fake.features = ["comms", "transcripts"]                              # the hub updated
+        clock["t"] += teamtracks.OLD_HUB_RETRY_S + 1
+        assert tt.sync_transcripts() is True
+        assert fake.transcripts == [{"transcripts": False}] and fake.calls[-1] == ("PUT", "/api/me/transcripts")
+        assert s.transcripts_withdraw is False and saved[-1] is False
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and len(fake.calls) == n        # sent once
+        # hub out of reach: kept, sent at a later try
+        s.transcripts_withdraw = True
+        url = s.hub_url
+        s.hub_url = "http://127.0.0.1:9"
+        assert tt.sync_transcripts() is None and s.transcripts_withdraw
+        s.hub_url = url
+        assert tt.sync_transcripts() is True and len(fake.transcripts) == 2
+        # said yes again before it went out: nothing sent, the flag dropped
+        s.transcripts_withdraw, s.transcript_consent = True, True
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and not s.transcripts_withdraw and len(fake.calls) == n
+        # the minute tick sends it too (never during a game: tick does nothing then)
+        s.transcripts_withdraw, s.transcript_consent = True, False
+        tt.busy = lambda: "Apex is running"
+        assert not tt.tick() and s.transcripts_withdraw
+        tt.busy = lambda: None
+        tt.tick()
+        _tt_wait(tt)
+        assert not s.transcripts_withdraw and len(fake.transcripts) == 3
+    finally:
+        st.save = real_save
+        fake.stop()
+        _fresh_hub().internet_up = real_up
 
 
 def _tt_wait(tt, s=10):
@@ -4349,6 +4625,7 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert fake.shared == [False, True]
+        assert fake.bodies[-1] == {"share_tracks": True, "share_clips": False}   # clips: a separate yes, off by default
         asked = [c[1] for c in fake.calls if c[1].startswith("/api/team-tracks")]
         assert asked == ["/api/team-tracks?recording=" + rec.stem], asked   # not the old one, not the missing one
         got = teamtracks.base_dir() / rec.stem / "Zed-7.mic.m4a"
@@ -4366,6 +4643,13 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert len([c for c in fake.calls if c[1] == "/api/scans/7/file"]) == 1
+        # "Allow my voice in teammates' clips" on: the hub is told again, with the clips answer
+        s.share_clips = True
+        assert tt.sync_sharing() is True and fake.bodies[-1] == {"share_tracks": True, "share_clips": True}
+        n = len(fake.bodies)
+        assert tt.sync_sharing() is True and len(fake.bodies) == n             # unchanged: not sent again
+        s.share_clips = False
+        assert tt.sync_sharing() is True and fake.bodies[-1]["share_clips"] is False
         # Apex starting during a download: stopped, no partial file, tried again later
         got.unlink()
         tt.st["recs"][rec.stem]["checked"] = 0
@@ -4625,7 +4909,7 @@ def test_hub_uploads_resume():
             hub.upload(fake.url, [scan, feed, mic], stop=apex)
             raise AssertionError("not paused")
         except hub.HubError as e:
-            assert e.kind == "paused" and hub.reason(e) == "Waits for Apex to close", e
+            assert e.kind == "paused" and hub.reason(e) == "Waits for the game to close", e
         assert len(fake.puts()) == 1 and not fake.oneshot[1:]           # scan and feed wait for the mic track
         kept = hub.UPLOADS_FILE.read_text(encoding="utf-8")
         assert "up-" in kept and GOOD_KEY not in kept
@@ -4918,6 +5202,7 @@ def test_clip_routes_and_privacy():
     consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
     own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
     b, srv, fake, v, vid, started = _clip_server("clipapi")
+    fake.clips = True                                        # Zed allows his voice in teammates' clips
     try:
         body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
         code, r, _ = call(srv, "/api/clips/make", body)
@@ -4965,6 +5250,40 @@ def test_clip_routes_and_privacy():
         _fresh_hub().internet_up = _clip_server.internet_up
 
 
+def test_clip_teammate_voice_needs_their_clips_yes():
+    """Coach, 20 Nov 2026: a teammate's voice goes into a clip only when they said yes to clips (a separate answer,
+    off by default); sharing the mic with the team doesn't cover it. Said no, no answer, or an older hub without the
+    field = left out, and said so. The player's own answer: in Settings, saved, sent to the hub with the sharing one."""
+    from pcs_recorder import settings as st, teamtracks
+    b, srv, fake, v, vid, started = _clip_server("clipvoice")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7"], "notes": False}
+        for clips in (None, False):                          # an older hub (no field), then Zed said no
+            fake.clips = clips
+            code, r, _ = call(srv, "/api/clips/make", body)
+            assert code == 200 and started[-1]["team"] == [], r
+            assert started[-1]["leftOut"] == ["Zed's mic: they haven't allowed their voice in clips"], started[-1]
+        fake.clips = True
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and [p for _, _, p in started[-1]["team"]] == ["Zed"] and started[-1]["leftOut"] == []
+        # the player's own answer: off by default, a Settings field, needs the mic shared to count
+        assert st.Settings().share_clips is False and "share_clips" in pcs_server.REC_FIELDS
+        s = _S(str(TMP))
+        s.comms_consent = s.share_tracks = True
+        s.share_clips = True
+        assert teamtracks.clips_answer(s) is True
+        s.share_tracks = False
+        assert teamtracks.clips_answer(s) is False
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "f-share_clips" in js and "'share_clips'" in js
+        fr = _i18n_tables()["fr"]
+        assert fr["Allow my voice in teammates' clips"] != "Allow my voice in teammates' clips"
+    finally:
+        fake.stop()
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
 def test_clip_show_and_copy_only_own_clips():
     """Show in folder / Copy file act only on a clip the app made in this run, never on any path the page sends."""
     b, srv, fake, v, vid, started = _clip_server("clipshow")
@@ -5006,6 +5325,277 @@ def test_clip_in_review_page():
     root = web.parent.parent
     assert "pcs_recorder.clips" in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "import pcs_recorder.clips" in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
+
+# ------------------------------------------------------------------ languages (app/web/i18n, pcs_i18n)
+
+GAME_WORDS = ("knock", "third party", "ring", "care package", "harvester", "banner", "beacon", "Ranked", "Pubs", "Wildcard",
+              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical", "shield", "health")
+
+
+def _i18n_tables():
+    d = Path(pcs_server.WEB) / "i18n"
+    return {f.stem: json.loads(f.read_text(encoding="utf-8")) for f in d.glob("*.json")}
+
+
+def test_language_tables_match():
+    """One table per language, English text as the key. Every key of every language is in en.json, French has them
+    all (none falls back to English), every t('...') of the web UI is in en.json, a translation keeps the same {values},
+    and the game words stay in English in the French text."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import i18n_keys
+    tables = _i18n_tables()
+    en, fr = tables["en"], tables["fr"]
+    assert en["_language"] == "English" and fr["_language"] == "Français"
+    keys = {k for k in en if not k.startswith("_")}
+    assert len(keys) > 900, len(keys)
+    for code, tr in tables.items():
+        extra = [k for k in tr if not k.startswith("_") and k not in keys]
+        assert not extra, (code, extra[:5])
+    missing = sorted(k for k in keys if k not in fr)
+    assert not missing, missing[:10]                       # documented fallback: none for French today
+    used = i18n_keys.js_keys()
+    assert not [k for k in used if k not in keys], [k for k in used if k not in keys][:10]
+    for k in keys:
+        assert sorted(re.findall(r"\{(\w+)\}", k)) == sorted(re.findall(r"\{(\w+)\}", fr[k])), (k, fr[k])
+        for w in GAME_WORDS:
+            if re.search(r"(?<![A-Za-z])" + re.escape(w), k, re.I):
+                assert re.search(re.escape(w), fr[k], re.I), (w, k, fr[k])
+    gloss = (Path(pcs_server.WEB) / "i18n" / "glossary.md").read_text(encoding="utf-8")
+    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard",
+              "shield", "health", "purple"):
+        assert w in gloss, w
+    for c in ("white", "blue", "purple", "red", "gold"):     # armour colours are game words (coach, 20 Nov 2026)
+        assert fr[c] == c, (c, fr[c])
+
+
+def _web_leftovers(src):
+    """Player-facing English in a web UI file that does not go through t(): text between tags, title / placeholder /
+    aria-label / alt values, single-quoted sentences. Names and game words (glossary.md) may stay."""
+    keep = {"YouTube", "EEC", "Discord", "TeamSpeak", "PCS Scanner", "Scanner", "PCS Esports", "Scan", "ner", "Coach", "IGL",
+            "Fragger", "Anchor", "Support", "Sub", "Scrims", "Ranked", "Pubs", "Wildcard", "Scrim", "HEVC / H.264",
+            "World's Edge", "Storm Point", "E-District", "Olympus", "Broken Moon", "Kings Canyon", "Mad Maggie",
+            "Shield cell", "Shield battery", "Med kit", "Phoenix kit", "Waiting for Apex", "Mumble.exe", "Mb/s", "MB", "GB"}
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)(^|\s)//.*$", r"\1", src)
+    src = re.sub(r"""\b(?:t|tx)\(\s*(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")""", "t(''", src)
+    src = re.sub(r'(<[^>]*\sdata-i18n="[^"]*"[^>]*>)[^<]*', r"\1", src)          # index.html: translated at load
+    src = re.sub(r'\b(?:title|aria-label)="[^"]*"(?=[^>]*data-i18n-(?:title|aria)=)', "", src)
+    src = re.sub(r'data-i18n(?:-title|-aria)?="[^"]*"', "", src)
+    out = []
+    for m in re.finditer(r">([^<>]+)<", src):
+        seg = re.sub(r"\$\{[^{}]*\}", " ", m.group(1)).strip()
+        if (re.fullmatch(r"[A-Za-z][A-Za-z ,.…:!’'/-]*", seg) and re.search(r"[A-Za-z]{2,}", seg) and seg not in keep
+                and (seg[0].isupper() or " " in seg) and not re.search(r"\w\.\w", seg)):
+            out.append(seg)
+    for m in re.finditer(r'\b(title|placeholder|aria-label|alt)="([^"$]*)"', src):
+        v = m.group(2)
+        if re.search(r"[A-Za-z]{3,}", v) and v not in keep and not re.search(r"://|\\|^\w+\.\w+$", v):
+            out.append(f'{m.group(1)}="{v}"')
+    for m in re.finditer(r"'((?:[^'\\\n]|\\.)*)'", src):
+        v = m.group(1)
+        if v in keep or re.search(r"[<>=#{}$;]|\.\w+\(|^\W", v):
+            continue
+        if re.fullmatch(r"[A-Z][a-z’\\']+(?: [A-Za-z’\\',.:…!?/-]+)+[.…!?]?", v):
+            out.append(v)
+    return out
+
+
+def test_no_hardcoded_english_in_web_ui():
+    """What the player reads in the main pages goes through t() (or data-i18n in index.html); the check finds the
+    English that was there before (several hundred lines) and nothing now."""
+    web = Path(pcs_server.WEB)
+    assert _web_leftovers('<b>Get set up</b> <button title="Hide this">x</button> toast(\'Saved the file.\')')
+    for name in ("index.html", "app.js", "session.js", "review-extras.js", "minimap.js", "clip.js"):
+        left = _web_leftovers((web / name).read_text(encoding="utf-8"))
+        assert not left, (name, left[:10])
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert html.index("i18n.js") < html.index("app.js")      # t() exists before the pages are drawn
+
+
+def test_python_text_in_the_players_language():
+    """Python keeps writing English (app.log, Activity data); what reaches the player is matched to the table with its
+    values: corner messages, tray, Activity lines and reasons shown in the page."""
+    import pcs_i18n
+    try:
+        pcs_i18n.reset(); pcs_i18n.set_language("fr")
+        tx = pcs_i18n.tx
+        assert tx("Results sent") == "Résultats envoyés"
+        assert tx("Scan of Apex Legends_2026.11.02-09.03.mp4 done, but not sent: Hub down") == \
+            "Scan de Apex Legends_2026.11.02-09.03.mp4 terminé, mais non envoyé : Hub arrêté"      # value translated too
+        assert tx("[Auto-record] Results not sent yet: Hub down. They are kept and sent automatically as soon as it works.") == \
+            "[Enregistrement auto] Résultats pas encore envoyés : Hub arrêté. Ils sont gardés et envoyés automatiquement dès que ça marche."
+        assert tx("2 games: World's Edge, Storm Point") == "2 parties : World's Edge, Storm Point"     # map names stay
+        assert tx("not sent yet: no team hub") == "pas encore envoyé : pas de hub d'équipe"
+        assert tx("Something the table doesn't know") == "Something the table doesn't know"
+        assert pcs_i18n.t("Settings") == "Paramètres" and pcs_i18n.t("A key no table has") == "A key no table has"
+        assert pcs_i18n.t("Update to {tag}", tag="v1.12.0") == "Mettre à jour vers v1.12.0"
+        from pcs_recorder import runtime
+        assert runtime.tx("Open PCS Scanner") == "Ouvrir PCS Scanner"          # tray menu and corner messages
+        pcs_i18n.set_language("en")
+        assert tx("Results sent") == "Results sent" and runtime.tx("Quit") == "Quit"
+        # the app's own messages stay English (app.log, Activity data); only the page shows them translated
+        pcs_i18n.set_language("fr")
+        b = pcs_server.Backend()
+        b.say("Auto-record is off.")
+        assert b.messages[-1]["text"] == "Auto-record is off."
+    finally:
+        pcs_i18n.reset()
+
+
+def test_language_setting():
+    """Settings → Language: saved in the app's settings, the page's tables follow at once. A settings file from an
+    older version (no language) loads and gets the Windows display language when the app has it, else English."""
+    import pcs_i18n
+    old = dict(core.SETTINGS)
+    f = TMP / "old-settings.json"
+    f.write_text(json.dumps({"player": "Xno", "role": "", "uploaded": [], "library": []}), encoding="utf-8")
+    s = core.load_json(str(f), {})
+    assert s["player"] == "Xno" and "language" not in s
+    assert pcs_i18n.pick(s) in ("en", "fr") and pcs_i18n.pick(s) == pcs_i18n.windows_language()
+    assert pcs_i18n.pick({"language": "fr"}) == "fr" and pcs_i18n.pick({"language": "xx"}) == pcs_i18n.windows_language()
+    assert [l["code"] for l in pcs_i18n.languages()][:1] == ["en"] and {"en", "fr"} <= {l["code"] for l in pcs_i18n.languages()}
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        pcs_i18n.reset()
+        st, r, _ = call(srv, "/api/settings", {"language": "fr"})
+        assert st == 200 and core.SETTINGS["language"] == "fr" and r["language"] == "fr"
+        assert json.loads(Path(core.SETTINGS_F).read_text(encoding="utf-8"))["language"] == "fr"
+        st, d, _ = call(srv, "/api/i18n")
+        assert st == 200 and d["lang"] == "fr" and d["tr"]["Settings"] == "Paramètres" and d["en"]["Settings"] == "Settings"
+        assert {"code": "fr", "name": "Français"} in d["languages"]
+        assert call(srv, "/api/i18n", token=False)[0] == 403
+        st, r, _ = call(srv, "/api/settings", {"language": "xx"})
+        assert st >= 400 and core.SETTINGS["language"] == "fr"
+        call(srv, "/api/settings", {"language": "en"})
+        assert call(srv, "/api/i18n")[1]["tr"] == {}
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "id=\"lang-select\"" in js and "langChoiceHTML()" in js and "location.reload()" in js
+    finally:
+        srv.stop()
+        core.SETTINGS.clear(); core.SETTINGS.update(old); core.save_settings()
+        pcs_i18n.reset()
+
+
+def test_language_switch_changes_the_page():
+    """In a real page (headless Edge): English, then French after the setting changes; the pages draw without an
+    error in both languages (a t() hidden by a local variable would throw here)."""
+    import pcs_i18n
+    old = dict(core.SETTINGS)
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    page = None
+    try:
+        call(srv, "/api/settings", {"language": "en"})
+        page = _Page(srv.url)
+        pages = ["#home", "#recordings", "#settings", "#youtube", "#team", "#home"]
+
+        def visit():
+            page.js("window.__errs = window.__errs || []; window.onerror = m => { __errs.push(String(m)); }; 1")
+            seen = {}
+            for h in pages:
+                page.js(f"location.hash = '{h}'; 1")
+                time.sleep(0.8)
+                seen[h] = page.js("document.querySelector('#main').textContent")
+            return seen
+        en = visit()
+        assert page.js("document.querySelector('#nav a[data-page=settings]').textContent") == "Settings"
+        assert "Recordings" in en["#recordings"] and "Language" in en["#settings"], en["#settings"][:200]
+        call(srv, "/api/settings", {"language": "fr"})
+        page.send("Page.reload")
+        end = time.time() + 15
+        while time.time() < end and page.js("typeof I18N === 'object' && I18N.lang") != "fr":
+            time.sleep(0.2)
+        fr = visit()
+        assert page.js("document.querySelector('#nav a[data-page=settings]').textContent") == "Paramètres"
+        assert page.js("document.documentElement.lang") == "fr"
+        assert "Enregistrements" in fr["#recordings"] and "Langue" in fr["#settings"] and "Paramètres" in fr["#settings"]
+        assert fr["#settings"] != en["#settings"]
+        assert page.js("window.__errs") == [], page.js("window.__errs")
+    finally:
+        if page:
+            page.close()
+        srv.stop()
+        core.SETTINGS.clear(); core.SETTINGS.update(old); core.save_settings()
+        pcs_i18n.reset()
+
+
+def test_any_game_holds_server_work():
+    """A fake Deadlock running holds a scan by hand, clips, the hub backup copy / teammates' tracks / transcripts
+    (`_backup_busy`) and the map downloads; the state shows it; Watch together still only cares about Apex; the
+    switch off lets them run; /api/games lists the games for Settings."""
+    import subprocess
+    from pcs_recorder import games
+    real = games.DETECTOR
+    procs = {9: "deadlock.exe"}
+    games.DETECTOR = games.Detector(procs=lambda: dict(procs), registry=lambda: {}, foreground=lambda: None)
+    b = pcs_server.Backend(_Auto(str(TMP / "gamerecs")))
+    b._apex_running = lambda: False
+    stopped = []
+    from pcs_recorder import core as rcore
+    real_stop = rcore.stop_tree
+    rcore.stop_tree = lambda p, **k: stopped.append(p)
+    try:
+        assert b._busy_reason() == "Deadlock is running"
+        assert b._clip_busy() == "Deadlock is running. Close Deadlock to make a clip"
+        assert b._backup_busy() == "Deadlock is running"
+        assert b.game_now() == "Deadlock" and b.state()["game"] == "Deadlock"
+        b.auto.s.hub_url = "http://hub.invalid:8420"
+        assert b.minimaps_tick() == 0
+        b.auto.s.hub_url = ""
+
+        class P:
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("scan", timeout)
+        p = P()
+        assert b._run_scan(p, every_s=0.01) is None and stopped == [p] and b._scan_held_by == "Deadlock"
+        assert b._game_running() == "Deadlock"
+        b._apex_running = lambda: True
+        assert b._game_running() == "Apex" and b._busy_reason() == "Apex is running"
+        b._apex_running = lambda: False
+        b.auto.s.game_pause = False                          # the switch off: other games hold nothing
+        assert b._busy_reason() is None and b._backup_busy() is None and b._clip_busy() is None
+        b.auto.s.game_pause = True
+        info = b.games_info()
+        assert info["pause"] is True and any(g["exe"] == "deadlock.exe" and g["running"] for g in info["games"]), info
+        procs.clear(); games.DETECTOR._snap_at = float("-inf")
+        assert b._busy_reason() is None
+    finally:
+        games.DETECTOR = real
+        rcore.stop_tree = real_stop
+
+
+def test_games_settings_saved_through_api():
+    """Settings → Games: the switches and lists go through /api/settings and reach the detector at once."""
+    from pcs_recorder import settings as st, games
+    b = pcs_server.Backend(_Auto(str(TMP / "gamerecs2")))
+    st_save = st.save
+    st.save = lambda s: None
+    real = games.DETECTOR
+    games.DETECTOR = games.Detector(procs=lambda: {}, registry=lambda: {}, foreground=lambda: None)
+    try:
+        b.save_settings({"game_pause": False, "game_fullscreen": True, "game_exes": ["mygame.exe"],
+                         "game_ignore": ["peak.exe"]})
+        s = b.auto.s
+        assert s.game_pause is False and s.game_fullscreen is True and s.game_exes == ["mygame.exe"]
+        d = games.DETECTOR
+        assert d.pause is False and d.fullscreen is True and d.extra == ["mygame.exe"] and d.ignore == ["peak.exe"]
+        assert b.state()["recorder"]["settings"]["game_exes"] == ["mygame.exe"]
+    finally:
+        st.save = st_save
+        games.DETECTOR = real
+
+
+def test_settings_page_has_games_section():
+    """The Games section and its switch go through t() and are sent with Save changes."""
+    js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+    for k in ("t('Games')", "f-game_pause", "f-game_fullscreen", "body.game_exes", "/api/games",
+              "t('Paused while a game runs ({game})'"):
+        assert k in js, k
+    assert "gaming()" in js and "S.game" in js
+
 
 if __name__ == "__main__":
     try:

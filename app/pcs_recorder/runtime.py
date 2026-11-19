@@ -21,6 +21,15 @@ from . import obs as obsmod
 from . import settings as st
 from .core import NoHub, Recorder
 
+try:                                    # the player's language for what the corner messages and tray say (logs stay English)
+    import pcs_i18n as _i18n
+except ImportError:                     # a tool that runs without the app folder on its path
+    _i18n = None
+
+
+def tx(text: str) -> str:
+    return _i18n.tx(text) if _i18n else text
+
 log = logging.getLogger("recorder")
 PANEL, INK, MUTED, RED = "#1b1a18", "#f1efea", "#a39f96", "#ba1c14"
 GUARD_PORT = 4467          # localhost only: one background recorder per PC, and "show window" requests
@@ -364,6 +373,9 @@ class UI:
                 self.log_line(f"[Auto-record] {title}: {text}")
             except Exception:
                 pass
+        from . import games
+        if games.gaming_now():                  # another game runs: nothing on the screen (Activity only)
+            return
         self.on_main(lambda: self._toast(title, text, sticky, action))
 
     def activity(self, text: str) -> None:
@@ -431,21 +443,21 @@ class UI:
         mark.create_oval(4, 4, 12, 12, outline="white", width=1.6)
         mark.create_oval(7, 7, 9, 9, fill="white", outline="white")
         mark.pack(side="left", padx=(0, 7))
-        tk.Label(head, text=title.upper(), bg=panel, fg=INK, font=title_font, anchor="w").pack(side="left")
+        tk.Label(head, text=tx(title).upper(), bg=panel, fg=INK, font=title_font, anchor="w").pack(side="left")
         close = tk.Label(head, text="✕", bg=panel, fg=MUTED, font=("Segoe UI", 10), cursor="hand2", padx=4)
         close.pack(side="right")
         close.bind("<Button-1>", lambda _e: self._close_toast(w))
         close.bind("<Enter>", lambda _e: close.config(fg=INK))
         close.bind("<Leave>", lambda _e: close.config(fg=MUTED))
 
-        body = tk.Label(main, text=text, bg=panel, fg="#d9d6cf", font=body_font, wraplength=self.TOAST_W - 50,
+        body = tk.Label(main, text=tx(text), bg=panel, fg="#d9d6cf", font=body_font, wraplength=self.TOAST_W - 50,
                         justify="left", anchor="w")
         body.pack(fill="x", padx=(12, 12), pady=(4, 10))
         if action in self.actions:
             label, fn = self.actions[action]
             row = tk.Frame(main, bg=panel)
             row.pack(fill="x", padx=12, pady=(0, 10))
-            btn = tk.Label(row, text=label.upper(), bg=RED, fg="white", font=("Bahnschrift SemiCondensed", 10, "bold"),
+            btn = tk.Label(row, text=tx(label).upper(), bg=RED, fg="white", font=("Bahnschrift SemiCondensed", 10, "bold"),
                            padx=12, pady=4, cursor="hand2")
             btn.pack(side="right")
             btn.bind("<Button-1>", lambda _e: (self._close_toast(w, fade=False), fn()))
@@ -568,7 +580,7 @@ class UI:
             mark.create_oval(4, 4, 12, 12, outline="white", width=1.6)
             mark.create_oval(7, 7, 9, 9, fill="white", outline="white")
             mark.pack(side="left", padx=(0, 7))
-            tk.Label(head, text="SESSION RECORDED", bg=panel, fg=INK,
+            tk.Label(head, text=tx("Session recorded").upper(), bg=panel, fg=INK,
                      font=("Bahnschrift SemiCondensed", 12, "bold")).pack(side="left")
             tk.Label(main, text=f"{int(minutes // 60)} h {int(minutes % 60):02d} min  ·  {gb:.1f} GB", bg=panel, fg=INK,
                      font=("Bahnschrift SemiCondensed", 18, "bold")).pack(anchor="w", padx=12, pady=(2, 0))
@@ -589,7 +601,7 @@ class UI:
 
             def button(text, cmd, primary):
                 bg = RED if primary else "#2b2a26"
-                b = tk.Label(row, text=text.upper(), bg=bg, fg="white" if primary else INK, padx=14, pady=5,
+                b = tk.Label(row, text=tx(text).upper(), bg=bg, fg="white" if primary else INK, padx=14, pady=5,
                              font=("Bahnschrift SemiCondensed", 10, "bold"), cursor="hand2")
                 b.bind("<Button-1>", lambda _e: cmd())
                 b.bind("<Enter>", lambda _e: b.config(bg="#e5392d" if primary else "#3a3833"))
@@ -610,13 +622,13 @@ class UI:
                 if done.is_set():
                     return
                 if auto:
-                    msg.config(text=f"The scan starts in {left[0]} s, then the results are sent.")
+                    msg.config(text=tx(f"The scan starts in {left[0]} s, then the results are sent."))
                     bar.coords(line, 0, 0, bar.winfo_width() * max(0, left[0]) / max(1, delay), 2)
                     if left[0] <= 0:
                         return finish(True)
                     left[0] -= 1
                 else:
-                    msg.config(text="Scan it now and send the results?")
+                    msg.config(text=tx("Scan it now and send the results?"))
                 w.after(1000, count)
             count()
         self.on_main(build)
@@ -644,7 +656,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     en = tk.BooleanVar(value=s.enabled)
     row("Auto-record Apex", ttk.Checkbutton(f, variable=en), "records while Apex runs")
     hub = tk.StringVar(value=s.hub_url)
-    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = Drive only")
+    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = results stay on this PC")
     folder = tk.StringVar(value=s.folder)
     fr = ttk.Frame(f)
     ttk.Entry(fr, textvariable=folder, width=28).pack(side="left")
@@ -723,16 +735,16 @@ class AutoRecorder:
         from .precheck import RecCheck
         self.check = self.rec.check = RecCheck(self.s, self.rec.obs, self.rec, self.ui,
                                                setting_up=lambda: bool(getattr(self, "_setting_up", False)))
-        self.sender.stop = lambda: self.rec.is_apex_running()     # same rule as every upload: never during a game
+        self.sender.stop = lambda: bool(self.rec.holding())       # same rule as every upload: never during a game
         from .talk import Talk
         self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
         self.thread = None
         self.hotkeys = Hotkeys(self.s, self.rec)
         if youtube_service:
             from .youtube import Uploader
-            from .core import apex_running
+            from .core import game_running
             from .night import Night
-            self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, apex_running)
+            self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, game_running)
             self.rec.night = self.rec.youtube.night = Night(self.s, self.rec, self.ui)
             self.ui.actions["cancelshutdown"] = ("Cancel", lambda: self.rec.night.cancel("Cancelled: the PC stays on."))
         if yt_signin:
@@ -764,7 +776,7 @@ class AutoRecorder:
                     except Exception as e:
                         log.exception("tick failed")
                         crash.report_exception("unhandled", e)
-                    if not self.rec.apex:
+                    if not self.rec.hold:
                         crash.tick()                 # crash reports not delivered yet, new OBS crash files
                 time.sleep(3)
         self.thread = threading.Thread(target=loop, daemon=True)
@@ -790,15 +802,15 @@ class AutoRecorder:
         extra = []
         if update:
             text, run, can_run, shown = update
-            extra.append(pystray.MenuItem(lambda _: text(), lambda: run(), enabled=lambda _: can_run(),
+            extra.append(pystray.MenuItem(lambda _: tx(text()), lambda: run(), enabled=lambda _: can_run(),
                                           visible=lambda _: shown()))
         menu = pystray.Menu(
-            pystray.MenuItem(lambda _: ("● " if self.s.enabled else "○ ") + self.rec.status, None, enabled=False),
-            pystray.MenuItem("Open PCS Scanner", lambda: self.ui.on_main(show_window), default=True),
+            pystray.MenuItem(lambda _: ("● " if self.s.enabled else "○ ") + tx(self.rec.status), None, enabled=False),
+            pystray.MenuItem(lambda _: tx("Open PCS Scanner"), lambda: self.ui.on_main(show_window), default=True),
             *extra,
-            pystray.MenuItem("Settings…", lambda: self.ui.on_main(open_settings or self.open_settings)),
-            pystray.MenuItem("Open recordings folder", lambda: os.startfile(self.s.folder_path) if os.name == "nt" else None),
-            pystray.MenuItem("Quit", lambda: (self.ui.icon.stop(), self.ui.on_main(quit_app))),
+            pystray.MenuItem(lambda _: tx("Settings…"), lambda: self.ui.on_main(open_settings or self.open_settings)),
+            pystray.MenuItem(lambda _: tx("Open recordings folder"), lambda: os.startfile(self.s.folder_path) if os.name == "nt" else None),
+            pystray.MenuItem(lambda _: tx("Quit"), lambda: (self.ui.icon.stop(), self.ui.on_main(quit_app))),
         )
         self.ui.icon = pystray.Icon("PCS Scanner", img, "PCS Scanner", menu)
         self.ui.icon.run_detached()

@@ -271,7 +271,8 @@ class HubBackup:
             raise PermissionError("Only the coach's hub key can copy the hub backup.")
         why = self.busy()
         if why:
-            raise RuntimeError("Close Apex first." if "Apex" in why else f"Wait: {why}.")
+            raise RuntimeError(f"Close {why[:-len(' is running')]} first." if why.endswith(" is running")
+                               and not why.startswith("a ") else f"Wait: {why}.")
         if not self.folder:
             raise RuntimeError("Pick a folder first.")
         if not self.start("by hand"):

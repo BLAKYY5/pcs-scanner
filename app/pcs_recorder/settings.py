@@ -65,8 +65,10 @@ class Settings:
     server_scan: bool = False                          # scan on the team server (serverscan.py), this PC if it can't
     share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
     share_asked: bool = False                          # the player answered the mic sharing question (setup step)
+    share_clips: bool = False                          # my voice may go into teammates' clips (a separate yes, 20 Nov 2026)
     transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes
     transcript_asked: bool = False                     # the player answered the transcripts question (setup step)
+    transcripts_withdraw: bool = False                 # said no after yes: the hub must still be told (decision 21)
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"
     hk_mute_mic: str = "ctrl+alt+3"
@@ -90,11 +92,19 @@ class Settings:
     night_shutdown: bool = False                       # turn the PC off once the night uploads are done
     auto_scan: bool = True                             # scan after Apex closes unless the player clicks Skip
     scan_delay_s: int = 60                             # countdown before the scan starts on its own
+    hl_chain_s: int = 8                                # highlights: takedowns this close (s) are one chain
+    hl_multi_min: int = 3                              # ...this many enemies in a chain = a multi-kill highlight
+    hl_double_s: int = 5                               # ...2 enemies this close (s) = a quick double
     capture: str = "window"                            # window | game | display
     obs_port: int = 4466
     obs_password: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     obs_password_new: bool = False                     # replaced once after versions <= 1.10.10 logged it (obs.py)
     encoder: str = ""                                  # found by the first-run encoder test
+    # Settings → Games (coach's request, 19 Nov 2026): heavy work waits while any game runs, not only Apex
+    game_pause: bool = True                            # pause heavy work while any game runs (Apex always pauses it)
+    game_fullscreen: bool = False                      # also count a full-screen program in front (videos would too)
+    game_exes: list = field(default_factory=list)      # the player's own games, by program name ("game.exe")
+    game_ignore: list = field(default_factory=list)    # programs found as games that are not ("Remove")
 
     def clamp(self) -> "Settings":
         self.keep_days = max(1, min(MAX_KEEP_DAYS, int(self.keep_days)))
@@ -103,6 +113,7 @@ class Settings:
             self.bitrate_mbps = default_mbps(self.encoder)
         self.bitrate_mbps = max(MIN_MBPS, min(MAX_MBPS, int(self.bitrate_mbps)))
         self.scan_delay_s = max(5, min(600, int(self.scan_delay_s)))
+        self.clamp_highlights()
         self.hub_url = hub_address(self.hub_url)
         for k in ("hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark"):
             v = (getattr(self, k) or "").strip().lower().replace(" ", "")
@@ -123,7 +134,20 @@ class Settings:
             self.capture = "window"
         self.voice_app = self.voice_app if self.voice_app in VOICE_APPS else "discord"
         self.voice_exe = valid_exe(self.voice_exe) or ""
+        from .games import exe_list
+        self.game_pause, self.game_fullscreen = bool(self.game_pause), bool(self.game_fullscreen)
+        self.game_exes = exe_list(self.game_exes)
+        self.game_ignore = [e for e in exe_list(self.game_ignore) if e not in self.game_exes]
         return self
+
+    def clamp_highlights(self) -> None:          # same ranges as pcs_highlights.rules
+        self.hl_chain_s = max(2, min(30, int(self.hl_chain_s)))
+        self.hl_multi_min = max(2, min(6, int(self.hl_multi_min)))
+        self.hl_double_s = max(1, min(self.hl_chain_s, int(self.hl_double_s)))
+
+    def highlight_rules(self) -> str:
+        """The highlight rules for the scanner (`--highlights`): chain seconds, enemies for a multi-kill, double seconds."""
+        return f"{self.hl_chain_s},{self.hl_multi_min},{self.hl_double_s}"
 
     def mbps_for(self, encoder: str) -> int:
         """Bitrate to record with on this encoder: the player's own value, or the encoder's default
@@ -199,6 +223,20 @@ def hub_address(text) -> str:
     except ValueError:
         pass
     return t
+
+
+def saved_highlight_rules() -> str:
+    """The highlight rules saved in recorder.json (read only: the scan process never writes the settings)."""
+    s = Settings()
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
+            if k in saved:
+                setattr(s, k, saved[k])
+        s.clamp_highlights()
+    except (OSError, ValueError, TypeError, AttributeError):
+        s = Settings()
+    return s.highlight_rules()
 
 
 def load() -> Settings:
