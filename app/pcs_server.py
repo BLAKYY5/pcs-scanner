@@ -25,6 +25,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pcs_core as core
+import pcs_i18n as i18n
 from pcs_recorder import labels
 from pcs_recorder.core import NoHub
 
@@ -866,7 +867,7 @@ class Backend:
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
-        return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
+        return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""), "language": i18n.language(),
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "role": core.SETTINGS.get("role", ""), "coach": getattr(self, "coach", False),
@@ -1260,6 +1261,18 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "language" in body:                              # the app's language: the page reloads in it
+            code = str(body.pop("language"))
+            if not any(l["code"] == code for l in i18n.languages()):
+                raise ValueError("Unknown language")
+            core.SETTINGS["language"] = code
+            i18n.set_language(code)
+            icon = getattr(getattr(self.auto, "ui", None), "icon", None)
+            if icon:
+                try:
+                    icon.update_menu()                       # the tray menu's words
+                except Exception:
+                    pass
         body.pop("coach_email", None)       # field removed (coach role = hub key); an old page may still send it
         if "team_link" in body:
             link = str(body["team_link"]).strip()
@@ -1702,6 +1715,8 @@ class Server:
                         return self._video(path.split("/")[2])
                     if path == "/api/state":
                         return self._json(b.state())
+                    if path == "/api/i18n":                     # the page's string tables (i18n.js, before it draws)
+                        return self._json(i18n.tables())
                     if path == "/api/library":
                         return self._json(b.library())
                     if path == "/api/youtube/queue":
