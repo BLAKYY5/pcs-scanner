@@ -4024,6 +4024,178 @@ def test_ranked_rp_and_badges():
     assert R.last_twice([5, 5, None, 7, 7, 8]) == (7, 2) and R.last_twice([5, None, 5]) == (None, 0)
 
 
+def _check_settings(**kw):
+    kw = {"encoder": "av1_texture_amf", "comms_consent": True, **kw}
+    s = settings.Settings(folder=str(TMP / f"vids-{time.time_ns()}"), **kw)
+    return s.clamp()
+
+
+class _Usage:
+    def __init__(self, free_gb):
+        self.free = free_gb * 1e9
+
+
+def test_rec_check_items():
+    """Each item of the recording check: green / red / amber with a short fix line, nothing personal in the summary."""
+    from pcs_recorder import precheck as pc
+    s = _check_settings()
+    # disk: a 4 h session at the chosen bitrate
+    need = s.gb_per_hour * pc.SESSION_H
+    assert pc.disk_item(s, lambda p: _Usage(need + 50))["state"] == "ok"
+    low = pc.disk_item(s, lambda p: _Usage(need / 2))
+    assert low["state"] == "bad" and "GB free" in low["text"] and low["fix"]
+
+    def gone(p):
+        raise OSError("drive missing")
+    assert pc.disk_item(s, gone)["state"] == "bad"
+    # other capture apps: Medal red, NVIDIA overlay / AMD Instant Replay / Game Bar amber, our own OBS ignored
+    ours = str(pc.obsmod.OBS_EXE)
+    assert pc.apps_item([("obs64.exe", ours), ("explorer.exe", "")])["state"] == "ok"
+    red = pc.apps_item([("Medal.exe", "C:/x/Medal.exe"), ("MedalEncoder.exe", ""), ("Overwolf.exe", "")])
+    assert red["state"] == "bad" and red["text"].startswith("Medal, Overwolf are running") and "Close Medal" in red["fix"]
+    amber = pc.apps_item([("NVIDIA Share.exe", "")], amd_replay=True, gamebar_bg=True)
+    assert amber["state"] == "warn" and "Alt+Z" in amber["fix"] and "Record what happened" in amber["fix"]
+    assert pc.apps_item([("obs64.exe", "C:/Program Files/obs-studio/bin/64bit/obs64.exe")])["state"] == "warn"
+    # encoder: the test's result is reused
+    assert pc.encoder_item(s, "amd radeon rx 9070 xt")["state"] == "ok"
+    assert "AV1 on your AMD card" in pc.encoder_item(s, "amd radeon rx 9070 xt")["text"]
+    assert pc.encoder_item(s, "nvidia geforce rtx 3060 ti")["state"] == "bad"          # card changed since the test
+    assert pc.encoder_item(s, None, last_failed=True)["state"] == "warn"
+    assert pc.encoder_item(s, None, setting_up=True)["state"] == "wait"
+    assert pc.encoder_item(_check_settings(encoder=""), None)["state"] == "bad"
+    # game sound: only once Apex runs
+    assert pc.game_item(s, False)["text"] == "Checked when Apex starts"
+    assert pc.game_item(s, True, 0.2)["state"] == "ok" and pc.game_item(s, True, 0.0, done=True)["state"] == "bad"
+    assert pc.game_item(_check_settings(game_audio=False), True)["state"] == "off"
+    # voice app and mic
+    assert pc.voice_item(s, set())["state"] == "bad" and "Discord isn't open" in pc.voice_item(s, set())["text"]
+    assert pc.voice_item(s, {"discord.exe"}, 0.3)["state"] == "ok"
+    assert pc.voice_item(s, {"discord.exe"}, 0.0)["state"] == "wait"                   # nobody talks: not red
+    assert pc.voice_item(settings.Settings().clamp(), set())["state"] == "off"          # no team consent
+    mics = [{"id": "{0.0.1.00000000}.{abc}", "name": "Mic"}]
+    assert pc.mic_item(s, mics, True)["state"] == "bad"                                 # Windows privacy blocks it
+    s2 = _check_settings(mic_device="{0.0.1.00000000}.{gone}")
+    assert pc.mic_item(s2, mics, False)["state"] == "bad" and pc.mic_item(s, [], False)["state"] == "bad"
+    assert pc.mic_item(s, mics, False, 0.01)["state"] == "ok" and pc.mic_item(s, mics, False, 0.0)["state"] == "warn"
+    # the summary for crash reports: states and app names only
+    items = {"obs": pc.obs_item(True, False, "OBS didn't answer on port 4466: refused"), "apps": red,
+             "disk": low, "mic": pc.mic_item(s2, mics, False)}
+    line = pc.summary(items)
+    assert line.startswith("obs:bad(") and "apps:bad(Medal, Overwolf)" in line and "disk:bad" in line, line
+    assert "vids-" not in line and "{gone}" not in line and len(line) <= 300
+
+
+class _FakeAdapter:
+    def __init__(self, fail=None):
+        self.fail, self.calls = fail, 0
+
+    def ensure_ready(self):
+        self.calls += 1
+        if self.fail:
+            raise RuntimeError(self.fail)
+
+
+def _check_for(s, rec=None, adapter=None, ui=None, procs=(), peaks=None):
+    from pcs_recorder import precheck as pc
+    c = pc.RecCheck(s, adapter if adapter is not None else _FakeAdapter(), rec, ui)
+    c.threaded = False
+    c.procs = lambda: list(procs)
+    c.disk = lambda p: _Usage(500)
+    c.mics = lambda: [{"id": "{0.0.1.00000000}.{abc}", "name": "Mic"}]
+    c.mic_blocked = c.amd_replay = c.gamebar = lambda: False
+    c.installed = lambda: True
+    c.read_gpu = lambda: "amd radeon rx 9070 xt"
+    c.listened = []
+
+    def listen(s_, names, seconds, stop=lambda: False, enough=lambda p: False):
+        c.listened.append((sorted(set(names.values())), seconds))
+        return dict(peaks or {})
+    c.listen = listen
+    c.confirm_after = 0
+    return c
+
+
+def test_rec_check_full_run():
+    """Check again: OBS started and asked (no encoder test, no restart), voice / mic from the level meters."""
+    s = _check_settings()
+    ad = _FakeAdapter()
+    c = _check_for(s, adapter=ad, procs=[("Discord.exe", "")], peaks={"discord": 0.2, "mic": 0.0})
+    assert c.start()
+    pub = c.public()
+    st_ = {i["id"]: i["state"] for i in pub["items"]}
+    assert ad.calls == 1 and not pub["running"] and pub["at"], pub
+    assert st_ == {"obs": "ok", "encoder": "ok", "game": "wait", "voice": "ok", "mic": "warn", "disk": "ok",
+                   "apps": "ok"}, st_
+    assert c.listened == [(["discord", "mic"], c.listen_s)]                 # game sound is not listened before Apex
+    assert pub["red"] == 0
+    # OBS doesn't answer: red with a fix, the meters aren't asked
+    c2 = _check_for(s, adapter=_FakeAdapter("OBS didn't answer on port 4466: refused"), procs=[("Discord.exe", "")])
+    c2.start()
+    obs_ = c2.public()["items"][0]
+    assert obs_["id"] == "obs" and obs_["state"] == "bad" and "Check again" in obs_["fix"] and c2.listened == []
+    assert c2.public()["red"] == 1
+
+
+def test_rec_check_at_apex_start():
+    """Apex starts: one message when something is red (once per Apex session), Apex's sound confirmed from the
+    meters in the first minutes; no sound = red, a message and a crash report carrying the check's summary."""
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        s.comms_consent = True
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI(False)
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r._final_file = lambda p, wait_s=0: p
+        c = _check_for(s, rec=r, ui=ui, procs=[("Medal.exe", ""), ("Discord.exe", "")],
+                       peaks={"game": 0.0, "discord": 0.1, "mic": 0.05})
+        r.check = c
+        r.tick()
+        apex["on"] = True; r.tick(); r.tick()
+        notes = [n for n in ui.notes if n[0] == "Recording check"]
+        assert len(notes) == 2, ui.notes                       # Medal (at start) + no Apex sound (first minutes)
+        assert "Medal" in notes[0][1] and "Fix:" in notes[0][1] and notes[0][2] is True
+        assert "No Apex sound" in notes[1][1]
+        st_ = {i["id"]: i["state"] for i in c.public()["items"]}
+        assert st_["game"] == "bad" and st_["voice"] == "ok" and st_["mic"] == "ok" and st_["obs"] == "ok", st_
+        assert sent[-1]["kind"] == "record_start" and "No Apex sound" in sent[-1]["error"]
+        assert "apps:bad(Medal)" in sent[-1]["context"]["check"] and "game:bad" in sent[-1]["context"]["check"]
+        apex["on"] = False; r.tick()
+        # next session, sound fine: one message again (Medal still runs), no new report
+        n_sent = len(sent)
+        c.listen = lambda *a, **k: {"game": 0.3, "discord": 0.1, "mic": 0.05}
+        apex["on"] = True; r.tick()
+        assert len([n for n in ui.notes if n[0] == "Recording check"]) == 3
+        assert {i["id"]: i["state"] for i in c.public()["items"]}["game"] == "ok" and len(sent) == n_sent
+        apex["on"] = False; r.tick()
+    finally:
+        _crash_teardown()
+
+
+def test_rec_check_in_failed_start_report():
+    """Recording doesn't start: the crash report carries the check (what was red), one message with the cause."""
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+        apex = {"on": False}
+        obs, ui = FakeOBS(s.folder_path), FakeUI(False)
+
+        def bad_start():
+            raise RuntimeError("OBS didn't answer on port 4466")
+        obs.start = bad_start
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r.check = _check_for(s, rec=r, ui=ui, procs=[("Outplayed.exe", "")])
+        apex["on"] = True; r.tick(); r.tick(); r.tick()          # the recorder tries again every tick
+        ctx = sent[0]["context"]["check"]
+        assert sent[0]["kind"] == "record_start" and "obs:bad(" in ctx and "apps:bad(Outplayed)" in ctx, ctx
+        msgs = [n for n in ui.notes if n[0] == "Recording check"]
+        assert len(msgs) == 1 and "Outplayed" in msgs[0][1], ui.notes
+    finally:
+        _crash_teardown()
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback
