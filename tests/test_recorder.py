@@ -3371,6 +3371,46 @@ def test_region_cache_round_trip():
         assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
 
 
+def test_repo_check_refuses_private_files():
+    """tools/repo_check.py (CI, before the tests): no game files, scan results, sign-in files or secrets in the
+    public repo; our own icons pass. Never prints the matched text."""
+    root = Path(__file__).resolve().parent.parent
+    if str(root / "tools") not in sys.path:
+        sys.path.insert(0, str(root / "tools"))
+    import repo_check as R
+    t = TMP / f"repo-{time.time_ns()}"
+    files = {
+        "app/ok.py": b"x = 1\nKEY = 'pcs_' + 'K' * 43   # built at run time: fine\n",
+        "app/assets/pcs.png": b"\x89PNG\r\n\x1a\n\0\0",
+        "scanner/pcs_weapons.npz": b"PK\x03\x04",
+        "client.json": b"{}",
+        "app/client_secret_123.json": b"{}",
+        "data/x.scan.json": b"{}",
+        "app/web/new.png": b"\x89PNG\r\n\x1a\n\0\0",
+        "app/leak.py": ("token = 'ya29." + "a" * 60 + "'\n").encode(),
+        "app/leak2.py": ("k = 'pcs_" + "Q" * 43 + "'\n").encode(),
+        "app/leak3.txt": ("-----BEGIN " + "RSA PRIVATE KEY-----\nabc\n").encode(),   # split: this file stays clean
+        "tools/big.json": b"[" + b"0," * 600000 + b"0]",
+        "app/fake.py": b"t = 'ya29.a0Abc_def-ghi'  # a short test fake: fine\n",
+    }
+    for rel, data in files.items():
+        p = t / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    bad = dict(R.check(str(t), list(files)))
+    assert set(bad) == {"scanner/pcs_weapons.npz", "client.json", "app/client_secret_123.json", "data/x.scan.json",
+                        "app/web/new.png", "app/leak.py", "app/leak2.py", "app/leak3.txt", "tools/big.json"}, bad
+    assert bad["app/leak.py"] == "Google OAuth token" and bad["app/leak2.py"] == "hub key or invite code"
+    assert "aaaa" not in " ".join(bad.values())
+    # the real repo is clean (git ls-files when this is a checkout)
+    try:
+        tracked = R.tracked(str(root))
+    except Exception:
+        tracked = None
+    if tracked:
+        assert R.check(str(root), tracked) == []
+
+
 def test_checksets_event_scorers():
     """Developer tool: tools/checksets.py scores the event check sets (bans, fights, highlights, mode, own state,
     respawns, heals / abilities) on made-up scan.json files: found / missed / false, results right, per split."""
@@ -3438,7 +3478,7 @@ def test_checksets_event_scorers():
           "abilities": [{"t": 261, "kind": "tactical"}, {"t": 350, "kind": "tactical"}]}
     g1 = {"tStart": 930, "mode": None, "select": {"tFirst": 880, "tLast": 905}, "bans": [{"legend": "seer"}]}
     (scans / "A.scan.json").write_text(_json.dumps({"games": [g0, g1]}), encoding="utf-8")
-    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": None}]}), encoding="utf-8")
+    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": "unknown"}]}), encoding="utf-8")
     assert C.recordings(str(folder)) == ["A", "B"]
     res, misses, missing = C.score_all(str(folder), str(scans))
     assert missing == []
@@ -5814,6 +5854,82 @@ def test_comms_transcribes_and_sends_to_hub():
     assert sent3 == [] and job3.unsent() == []
     s3.hub_url, s3.transcript_consent = "http://hub", False
     assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
+
+
+def test_comms_made_on_the_team_server():
+    """A hub that lists "comms-server" makes the transcripts on its GPU (coach, 20 Nov 2026): nothing runs on this
+    PC, the hub is told the yes once, and the hub's transcript of this PC's recording is downloaded for the review
+    player. Said no: the downloaded copy is deleted here. No mic sent to the hub = this PC, as before."""
+    import json
+    comms, job, s, idx, rec, sent = _comms_setup("comms-server")
+    s.send_mic = True
+    calls, feats = [], {"server": True}
+    body = json.dumps({"v": 1, "kind": "comms", "speaker": "tester",
+                       "segments": [{"start": 2.0, "end": 3.0, "text": "on push", "speaker": "tester"}]}).encode()
+
+    class R:
+        def __init__(self, code=200, data=None, content=b""):
+            self.status_code, self._d, self.content = code, data, content
+        def json(self): return self._d
+
+    def call(m, path, **kw):
+        calls.append((m, path, kw.get("json")))
+        if path == "/api/me":
+            return R(data={"name": "Tester"})
+        if path == "/api/scans":
+            return R(data=[{"id": 7, "kind": "comms", "recording": rec.stem, "uploader": "Tester"},
+                           {"id": 8, "kind": "comms", "recording": rec.stem, "uploader": "Zed"},
+                           {"id": 9, "kind": "scan", "recording": rec.stem, "uploader": "Tester"}])
+        if path == "/api/scans/7/file":
+            return R(content=body)
+        return R()
+    job.server_ok, job.hub_call = (lambda: feats["server"]), call
+    from pcs_recorder import hub
+    old_key = hub.get_key
+    hub.get_key = lambda: "pcs_testkey"
+    try:
+        assert job.where() == "server" and job.public()["where"] == "server"
+        _fake_worker(comms)
+        job._run_server()                                         # what tick() starts in a thread
+        assert ("PUT", "/api/me/transcripts", {"transcripts": True}) in calls
+        assert [c for c in calls if c[1].endswith("/file")] == [("GET", "/api/scans/7/file", None)]
+        assert comms.transcript_of(rec)["segments"][0]["text"] == "on push"
+        assert job.st["recs"][rec.stem]["status"] == "server" and sent == []     # nothing made or sent from here
+        assert job.todo() == []
+        n = len(calls)
+        job._run_server()                                         # yes told once; nothing left to fetch
+        assert not [c for c in calls[n:] if c[0] == "PUT"]
+        s.transcript_consent = False                              # said no: the copy from the hub goes
+        assert job.tick() is False and not comms.comms_path(rec).exists() and rec.stem not in job.st["recs"]
+        s.transcript_consent = True
+        s.send_mic = False                                        # the mic doesn't go to the hub: this PC
+        assert job.where() == "local"
+        s.send_mic, feats["server"] = True, False                 # hub without the worker: this PC
+        assert job.where() == "local"
+        comms2, job2, *_ = _comms_setup("comms-server-none")      # the app without server hooks: this PC
+        assert job2.where() == "local"
+    finally:
+        hub.get_key = old_key
+
+
+def test_transcribe_worker_finds_pip_cuda_libraries():
+    """--device cuda (team server): CTranslate2 needs cuBLAS / cuDNN; pip puts them in site-packages/nvidia/<lib>/bin,
+    which the worker adds to the DLL search (no system change)."""
+    import site
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
+    import pcs_transcribe as T
+    sp = TMP / "fake-site"
+    for lib in ("cublas", "cudnn"):
+        (sp / "nvidia" / lib / "bin").mkdir(parents=True, exist_ok=True)
+    old = site.getsitepackages, site.getusersitepackages, os.environ.get("PATH", "")
+    try:
+        site.getsitepackages, site.getusersitepackages = (lambda: [str(sp)]), (lambda: str(TMP / "none"))
+        found = T.cuda_dlls()
+        assert sorted(Path(f).parent.name for f in found) == ["cublas", "cudnn"], found
+        assert os.environ["PATH"].split(os.pathsep)[0] in found
+    finally:
+        site.getsitepackages, site.getusersitepackages = old[0], old[1]
+        os.environ["PATH"] = old[2]
 
 
 def test_comms_not_sent_to_a_hub_without_comms():

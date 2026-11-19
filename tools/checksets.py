@@ -259,7 +259,7 @@ def score_highlights(cs, scans, split=None):
 
 def score_mode(cs, scans, split=None):
     """Per labelled game (games[] order): the scan's `mode`. null truth = not a game: right when the scan has no
-    game there or a game with no mode. A different number of games is listed as a miss."""
+    game there or a game with no mode (`unknown`). A different number of games is listed as a miss."""
     R = Result()
     for rec, tr in (cs.get('truths') or {}).items():
         sp = tr.get('split')
@@ -272,6 +272,7 @@ def score_mode(cs, scans, split=None):
             R.miss(sp, 'game count', recording=rec_name(rec), truth=len(want), read=len(real))
         for i, m in enumerate(want):
             got = real[i].get('mode') if i < len(real) else None
+            got = None if got in ('unknown', '') else got          # the scanner's "no mode" (CLAUDE.md, Game mode)
             if m is None:
                 R.add(sp, 'notGames')
                 R.add(sp, 'notGamesRight', got is None)

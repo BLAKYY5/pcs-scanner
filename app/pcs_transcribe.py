@@ -7,13 +7,17 @@ Whisper model folder (large-v3-turbo, downloaded by the app with a SHA-256 check
 because it adds ~200 MB that every start would unpack.
 
     pcs_transcribe.py RECORDING --stream N --ffmpeg PATH --model DIR --out FILE.comms.json --speaker NAME
-                      [--language auto|fr|en|...] [--prompt TEXT] [--threads N]
+                      [--language auto|fr|en|...] [--prompt TEXT] [--threads N] [--device cpu|cuda]
+
+--device cuda (the team server's NVIDIA GPU, coach's decision 20 Nov 2026): float16 on the GPU; needs CTranslate2's
+CUDA 12 libraries (pip nvidia-cublas-cu12, nvidia-cudnn-cu12 in the same Python: their DLL folders are added here).
 
 Reads audio stream N of the recording (the mic track: one voice, the player's own) through ffmpeg as 16 kHz mono,
 cuts it into parts of about PART_S seconds at a quiet moment, and writes FILE.comms.json:
 
     {"v": 1, "kind": "comms", "recording", "speaker", "track": "mic", "model", "language", "languageProb",
-     "audioSeconds", "speechSeconds", "seconds" (wall), "cpuSeconds", "threads", "createdAt", "transcriber",
+     "audioSeconds", "speechSeconds", "seconds" (wall), "cpuSeconds", "threads", "device", "computeType", "createdAt",
+     "transcriber",
      "segments": [{"start", "end" (recording seconds, as scan.json), "text", "speaker", "p" (avg log prob)}]}
 
 Progress: one JSON line per finished part on stdout ({"done": s, "total": s}). Finished parts are kept in
@@ -128,6 +132,25 @@ def _no_av() -> None:
             sys.modules[name] = types.ModuleType(name)
 
 
+def cuda_dlls() -> list[str]:
+    """The CUDA libraries from pip (site-packages/nvidia/<lib>/bin) where CTranslate2 finds them on Windows."""
+    import glob
+    import site
+    found = []
+    for sp in list(site.getsitepackages()) + [site.getusersitepackages()]:
+        for d in glob.glob(os.path.join(sp, "nvidia", "*", "bin")):
+            if os.path.isdir(d) and d not in found:
+                found.append(d)
+    for d in found:
+        try:
+            os.add_dll_directory(d)
+        except (AttributeError, OSError):
+            pass
+    if found:
+        os.environ["PATH"] = os.pathsep.join(found + [os.environ.get("PATH", "")])
+    return found
+
+
 def cpu_seconds() -> float:
     t = os.times()
     return t.user + t.system
@@ -157,7 +180,13 @@ def transcribe(args) -> dict:
     except (OSError, ValueError):
         pass
     threads = args.threads or max(2, (os.cpu_count() or 4) // 2)
-    model = WhisperModel(args.model, device="cpu", compute_type="int8", cpu_threads=threads)
+    if args.device == "cuda":
+        cuda_dlls()
+        compute = args.compute_type or "float16"
+        model = WhisperModel(args.model, device="cuda", compute_type=compute, cpu_threads=min(threads, 4))
+    else:
+        compute = args.compute_type or "int8"
+        model = WhisperModel(args.model, device="cpu", compute_type=compute, cpu_threads=threads)
     lang = None if args.language in ("", "auto") else args.language
     prompt = args.prompt or PROMPT
     for i, (a, b) in enumerate(parts(pcm)):
@@ -196,7 +225,7 @@ def transcribe(args) -> dict:
            "languageProb": max((p["languageProb"] for p in done.values() if p["language"] == language), default=None),
            "audioSeconds": total, "speechSeconds": round(sum(p["speech"] for p in done.values()), 1),
            "seconds": round(time.time() - t0, 1), "cpuSeconds": round(cpu_seconds() - c0, 1), "threads": threads,
-           "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "transcriber": args.version, "segments": segments}
+           "device": args.device, "computeType": compute, "createdAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "transcriber": args.version, "segments": segments}
     tmp = args.out + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(res, f, ensure_ascii=False, indent=0)
@@ -238,6 +267,8 @@ def main(argv=None) -> int:
     ap.add_argument("--prompt", default="")
     ap.add_argument("--threads", type=int, default=0)
     ap.add_argument("--version", default="")
+    ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"), help="cuda = NVIDIA GPU (team server)")
+    ap.add_argument("--compute-type", default="", help="CTranslate2 compute type (default int8 on cpu, float16 on cuda)")
     args = ap.parse_args(argv)
     if not os.path.isfile(args.recording) or not os.path.isdir(args.model):
         print(json.dumps({"error": "recording or model folder missing"}), flush=True)
