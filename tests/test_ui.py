@@ -2955,6 +2955,110 @@ def test_review_respawns_like_kills():
         core.SETTINGS["library"] = before
 
 
+
+HL_TAKEDOWNS = [{"t": 300.0, "kind": "knock", "sources": ["feed", "fight"]}, {"t": 303.0, "kind": "knock", "sources": ["feed", "fight"]},
+                {"t": 307.0, "kind": "kill", "sources": ["counter", "feed"]}, {"t": 308.0, "kind": "kill", "sources": ["counter", "feed"]},
+                {"t": 600.0, "kind": "kill", "sources": ["counter", "damage"]}, {"t": 601.0, "kind": "kill", "sources": ["counter", "damage"]},
+                {"t": 602.0, "kind": "kill", "sources": ["counter", "damage"]}]
+
+
+def test_highlight_settings_and_scan_rules():
+    """Settings -> Highlights: three numbers, clamped, saved, sent to the scanner as --highlights; the scan process
+    only reads them (never writes recorder.json)."""
+    from pcs_recorder import settings as st
+    s = st.Settings(hl_chain_s=99, hl_multi_min=1, hl_double_s=50).clamp()
+    assert (s.hl_chain_s, s.hl_multi_min, s.hl_double_s) == (30, 2, 30) and s.highlight_rules() == "30,2,30"
+    assert st.Settings().highlight_rules() == "8,3,5"
+    old = st.SETTINGS_FILE.read_text(encoding="utf-8") if st.SETTINGS_FILE.exists() else None
+    try:
+        st.SETTINGS_FILE.write_text(json.dumps({"hl_chain_s": 10, "hl_multi_min": 4, "hl_double_s": 3}), encoding="utf-8")
+        before = st.SETTINGS_FILE.stat().st_mtime_ns
+        assert st.saved_highlight_rules() == "10,4,3" and st.SETTINGS_FILE.stat().st_mtime_ns == before
+        st.SETTINGS_FILE.write_text("{broken", encoding="utf-8")
+        assert st.saved_highlight_rules() == "8,3,5"
+        st.SETTINGS_FILE.write_text(json.dumps({"hl_chain_s": 6}), encoding="utf-8")
+        import pcs_scan
+        seen = []
+        real = pcs_scan.main
+        pcs_scan.main = lambda: seen.append(list(sys.argv))
+        try:
+            core.run_scan(["x.mp4"], print, str(TMP / "hl-out"))
+        finally:
+            pcs_scan.main = real
+        assert seen and seen[0][-2:] == ["--highlights", "6,3,5"], seen
+    finally:
+        if old is None:
+            st.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            st.SETTINGS_FILE.write_text(old, encoding="utf-8")
+    for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
+        assert k in pcs_server.REC_FIELDS
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for text in ("<h2>Highlights</h2>", 'id="f-hl_chain_s"', 'id="f-hl_multi_min"', 'id="f-hl_double_s"', "'hl_chain_s', 'hl_multi_min', 'hl_double_s'"):
+        assert text in js, text
+    root = Path(pcs_server.WEB).parent.parent                 # the new scanner module is in the exe
+    assert '"--hidden-import", "pcs_highlights"' in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_ranked, pcs_highlights," in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
+
+
+def test_review_highlights_list_star_and_clip():
+    """The review page gets the scan's highlights regrouped with the player's rules; the Events tab lists them best
+    first above the events, a gold star marks each on the kill feed lane, a click seeks there, and Clip it opens the
+    clip bar from 5 s before to 3 s after. Older scans: nothing."""
+    import pcs_highlights
+    from pcs_recorder import settings as st
+    game = dict(RESPAWN_GAME, takedowns=HL_TAKEDOWNS, lastAlive=[], fights=[],
+                highlights=pcs_highlights.find(HL_TAKEDOWNS, [], []))
+    assert [h["kind"] for h in game["highlights"]] == ["wipe", "double"]
+    out = [dict(game)]
+    pcs_server.regroup_highlights([game], out, st.Settings(hl_double_s=2))
+    assert [h["kind"] for h in out[0]["highlights"]] == ["wipe"]                         # stricter double: gone
+    out = [{"highlights": "kept"}]
+    pcs_server.regroup_highlights([{"highlights": "kept"}], out, None)                   # no takedowns: as scanned
+    assert out[0]["highlights"] == "kept"
+    folder = TMP / "highlight-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.18-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    old = {"map": "WE", "tStart": 1000.0, "drop": {"spots": [], "err": 0}}
+    (rec.with_suffix(".scan")).mkdir(exist_ok=True)
+    (rec.with_suffix(".scan") / (rec.stem + ".scan.json")).write_text(json.dumps({"games": [game, old]}))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        vid = call(srv, "/api/library")[1][0]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert [h["kind"] for h in d["games"][0]["highlights"]] == ["wipe", "double"]
+        assert d["games"][1]["highlights"] is None
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "Highlights (${L.length})" in js and ">Clip it</button>" in js and "HL_BEFORE = 5, HL_AFTER = 3" in js
+        assert "function clipOpenRange(a, b)" in (Path(pcs_server.WEB) / "clip.js").read_text(encoding="utf-8")
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            end = time.time() + 15
+            while time.time() < end and not page.js("!!document.querySelector('#rvBody .ev.hl')"):
+                time.sleep(0.2)
+            rows = page.js("[...document.querySelectorAll('#rvBody .ev.hl b')].map(x => x.textContent)")
+            assert rows == ["Squad wipe · 3 enemies", "Quick double · 2 enemies"], rows
+            assert page.js("document.querySelector('#rvBody .hlhead').textContent") == "Highlights (2)"
+            assert page.js("[...document.querySelectorAll('#laneF .mk.hl')].map(x => +x.dataset.t)") == [600, 300]
+            assert "highlights" in page.js("document.querySelector('#laneF .lane-label').textContent")
+            page.js("window.__seeks = []; window.seek = t => __seeks.push(t); 1")
+            page.js("document.querySelectorAll('#rvBody .ev.hl')[1].click(); document.querySelector('#laneF .mk.hl[data-t=\"600\"]').click(); 1")
+            assert page.js("__seeks") == [300, 600], page.js("__seeks")
+            page.js("document.querySelector('#rvBody [data-hlclip=\"1\"]').click(); 1")
+            assert page.js("CLIP.open") is True and page.js("[CLIP.a, CLIP.b]") == [295, 311], page.js("[CLIP.a, CLIP.b]")
+            assert page.js("__seeks") == [300, 600]                          # Clip it does not seek like the row
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
+
+
 class MinimapHub:
     """A hub 0.5.2 with the `minimaps` collection: the list and the pictures need a key (any role). `docs` and `blobs`
     can be changed by the test; `blob_calls` counts picture downloads."""

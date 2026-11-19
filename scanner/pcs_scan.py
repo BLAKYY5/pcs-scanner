@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo, pcs_highlights
 
 VERSION = '1.10.15'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -838,6 +838,7 @@ def main():
     ap.add_argument('--chunks', type=int, default=0, help='pieces the recording is cut into (default: half your CPU threads, max 8; results depend on it)')
     ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
     ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
+    ap.add_argument('--highlights', default='', help='highlight rules: chain seconds, enemies for a multi-kill, seconds for a double (default 8,3,5)')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
     # scan on the team server: the file is a keyframes-only copy of the recording (pcs_recorder.serverscan)
     ap.add_argument('--duration', type=float, default=0, help=argparse.SUPPRESS)      # the recording's own length
@@ -864,7 +865,8 @@ def main():
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
         if kind == 'video': games = split_restarts(games, samples)
-        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), perf.pop('_own', []),
+        own_reads = perf.pop('_own', [])     # the own stats strip: also the counter rises behind highlights
+        timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), own_reads,
                  perf.pop('_emblem', []))
         try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
@@ -924,6 +926,8 @@ def main():
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_highlights.attach(games, feed_lines, own_reads, bar_reads, pcs_highlights.parse_rules(A.highlights))   # key plays
+        except Exception as e: perf['highlightsError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},

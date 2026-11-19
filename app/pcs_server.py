@@ -41,9 +41,25 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
               "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h",
-              "min_record_min")
+              "min_record_min", "hl_chain_s", "hl_multi_min", "hl_double_s")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 MAX_BODY = 4 << 20                  # largest request body the page may send (bytes)
+
+
+def regroup_highlights(scan_games: list, games: list, s) -> None:
+    """Highlights with the player's own rules (Settings -> Highlights): the scan's takedowns grouped again, so a changed
+    rule shows at once in the review (pcs_highlights.find). Scans without takedowns keep what they have."""
+    try:
+        import pcs_highlights
+        rule = pcs_highlights.parse_rules(s.highlight_rules()) if s is not None else pcs_highlights.rules()
+    except Exception:
+        return
+    for g, out in zip(scan_games, games):
+        if isinstance(g.get("takedowns"), list):
+            try:
+                out["highlights"] = pcs_highlights.find(g["takedowns"], g.get("fights"), g.get("lastAlive"), rule)
+            except Exception:
+                pass
 
 
 def to_recycle_bin(path: str) -> None:
@@ -147,7 +163,8 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "carePackages", "strongholds",
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
                "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
-               "ammoEvents", "ammoSummary")   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
+               "ammoEvents", "ammoSummary",
+               "highlights")             # pcs_highlights: key plays [{t0, t1, kind, count, score...}], best first   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
 
 
 # the game's minimap transform per map (world -> picture), as in scanner/pcs_minimap.MAPS and the hub's minimaps
@@ -624,6 +641,7 @@ class Backend:
                                 # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]; without
                                 # the debug overlay the HUD minimap's reads every 3 s (seenFrom "minimap")
                                 "seen": seen, "seenFrom": seen_from})
+            regroup_highlights(d.get("games", []), games, self.auto.s if self.auto else None)
             it["games"] = games
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))

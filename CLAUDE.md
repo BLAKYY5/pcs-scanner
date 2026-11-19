@@ -584,6 +584,20 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   lines on a red plate (+RP) are read with both sides 'squad' (pcs_hud.kill_parts): such a fight is missed.
   The review player draws fights as bands on the kill feed lane (green won, grey lost, amber even, dashed = third party)
   and time outside the ring as an orange bar on the rings lane, both in Events.
+- **Highlights** (`pcs_highlights.py`, key plays for the team's media person, 19 Nov 2026): per game `takedowns`
+  [{t, kind, sources, enemy?}], `lastAlive` [[t0, t1]] and `highlights` [{t0, t1, kind: multi | double | wipe | clutch,
+  count (enemies), gaps, score, sources, knocks, kills, tags}], best first. Rules (Settings → Highlights, `hl_chain_s` 8,
+  `hl_multi_min` 3, `hl_double_s` 5; the scan gets them as `--highlights`, the review regroups `takedowns` with the
+  player's current values, `pcs_server.regroup_highlights`): a chain = own knocks / kills each within 8 s; 3+ enemies =
+  multi, 2 enemies whose first takedowns are within 5 s = double, 3 own kills in a chain = wipe, 2 enemies while no
+  teammate card is alive in a fight that ends won = clutch. Every takedown needs two sources: a kill-feed line in the
+  player's own colour (legend select `self`), the kills number on the strip (only kills: in Ranked the third number rose
+  when teammates knocked enemies the player had hit, so it is not his knocks), the damage number rising, a fight.
+  The kills plate flashes red ~2 s after a change and is not read then: steps are placed inside that gap. A knock and a
+  kill of ours within 5 s are one enemy; one line captured again (same event and weapon within 10 s) counts once.
+  Review: "Highlights (n)" at the top of Events (click = seek, "Clip it" = clip bar from 5 s before to 3 s after),
+  gold stars on the kill feed lane. Truths and numbers: private handoff folder and the PR (feed lines with rank badges
+  are sometimes not captured: then the kills number places the kill).
 - **Heals, ult and tactical uses** (`pcs_usage.py`, 16:9 only, ~1 ms per keyframe, read only on own-HUD frames: no map,
   drop or select screen). Heal panel right of centre (frame lines rows 928 / 1023, progress bar from x 1800 rows 991..1009,
   icon x 1636..1718): the item by its icon's colours and shape (cell = narrow blue down to row ~997, battery = blue

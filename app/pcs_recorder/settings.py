@@ -90,6 +90,9 @@ class Settings:
     night_shutdown: bool = False                       # turn the PC off once the night uploads are done
     auto_scan: bool = True                             # scan after Apex closes unless the player clicks Skip
     scan_delay_s: int = 60                             # countdown before the scan starts on its own
+    hl_chain_s: int = 8                                # highlights: takedowns this close (s) are one chain
+    hl_multi_min: int = 3                              # ...this many enemies in a chain = a multi-kill highlight
+    hl_double_s: int = 5                               # ...2 enemies this close (s) = a quick double
     capture: str = "window"                            # window | game | display
     obs_port: int = 4466
     obs_password: str = field(default_factory=lambda: secrets.token_urlsafe(16))
@@ -103,6 +106,7 @@ class Settings:
             self.bitrate_mbps = default_mbps(self.encoder)
         self.bitrate_mbps = max(MIN_MBPS, min(MAX_MBPS, int(self.bitrate_mbps)))
         self.scan_delay_s = max(5, min(600, int(self.scan_delay_s)))
+        self.clamp_highlights()
         self.hub_url = hub_address(self.hub_url)
         for k in ("hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark"):
             v = (getattr(self, k) or "").strip().lower().replace(" ", "")
@@ -124,6 +128,15 @@ class Settings:
         self.voice_app = self.voice_app if self.voice_app in VOICE_APPS else "discord"
         self.voice_exe = valid_exe(self.voice_exe) or ""
         return self
+
+    def clamp_highlights(self) -> None:          # same ranges as pcs_highlights.rules
+        self.hl_chain_s = max(2, min(30, int(self.hl_chain_s)))
+        self.hl_multi_min = max(2, min(6, int(self.hl_multi_min)))
+        self.hl_double_s = max(1, min(self.hl_chain_s, int(self.hl_double_s)))
+
+    def highlight_rules(self) -> str:
+        """The highlight rules for the scanner (`--highlights`): chain seconds, enemies for a multi-kill, double seconds."""
+        return f"{self.hl_chain_s},{self.hl_multi_min},{self.hl_double_s}"
 
     def mbps_for(self, encoder: str) -> int:
         """Bitrate to record with on this encoder: the player's own value, or the encoder's default
@@ -199,6 +212,20 @@ def hub_address(text) -> str:
     except ValueError:
         pass
     return t
+
+
+def saved_highlight_rules() -> str:
+    """The highlight rules saved in recorder.json (read only: the scan process never writes the settings)."""
+    s = Settings()
+    try:
+        saved = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
+            if k in saved:
+                setattr(s, k, saved[k])
+        s.clamp_highlights()
+    except (OSError, ValueError, TypeError, AttributeError):
+        s = Settings()
+    return s.highlight_rules()
 
 
 def load() -> Settings:
