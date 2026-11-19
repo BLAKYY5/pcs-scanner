@@ -3244,6 +3244,104 @@ def test_region_cache_round_trip():
         assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
 
 
+def test_checksets_event_scorers():
+    """Developer tool: tools/checksets.py scores the event check sets (bans, fights, highlights, mode, own state,
+    respawns, heals / abilities) on made-up scan.json files: found / missed / false, results right, per split."""
+    import json as _json
+    root = Path(__file__).resolve().parent.parent
+    if str(root / "tools") not in sys.path:
+        sys.path.insert(0, str(root / "tools"))
+    import checksets as C
+    folder, scans = TMP / f"cs-{time.time_ns()}", TMP / f"cs-scans-{time.time_ns()}"
+    folder.mkdir()
+    scans.mkdir()
+
+    def w(name, d):
+        (folder / name).write_text(_json.dumps(d), encoding="utf-8")
+
+    w("checkset-bans.json", {
+        "games": [{"recording": "A", "game": 0, "selectAt": 100, "bans": ["crypto", "vantage"], "split": "dev"},
+                  {"recording": "A", "game": 1, "selectAt": 900, "bans": ["seer", "wraith"], "split": "held"}],
+        "negatives": ["B (no ban shown)"]})
+    w("checkset-fights.json", {
+        "fights": [{"rec": "A", "t0": 300, "t1": 320, "result": "won", "thirdParty": False, "split": "dev"},
+                   {"rec": "A", "t0": 500, "t1": 510, "result": "lost", "thirdParty": True, "split": "dev"},
+                   {"rec": "A", "t0": 700, "t1": 705, "result": "even", "split": "held"}],
+        "notFights": [{"rec": "A", "t": 600, "split": "dev"}],
+        "ring": [{"rec": "A", "t0": 400, "t1": 420, "outside": True, "split": "dev"},
+                 {"rec": "A", "t": [450, 800], "outside": False, "split": "dev"}]})
+    w("checkset-highlights.json", {
+        "_about": "x",
+        "A": {"split": "dev", "highlights": [{"t0": 300, "t1": 310, "kind": "multi+wipe"},
+                                             {"t0": 1000, "t1": 1001, "kind": "double"}],
+              "borderline": [{"t0": 1200, "t1": 1206}]}})
+    w("checkset-mode.json", {"truths": {"A.mp4": {"split": "dev", "modes": ["ranked", "pubs"]},
+                                        "B.mp4": {"split": "held", "modes": [None]}}})
+    w("checkset-own-state.json", {
+        "scope": {"A.mp4": [0, 2000]},
+        "knocks": [{"recording": "A.mp4", "t": 330, "end": 340, "outcome": "revived", "split": "dev"},
+                   {"recording": "A.mp4", "t": 520, "end": 530, "outcome": "died", "split": "dev"}],
+        "bars": [{"recording": "A.mp4", "t": 250, "who": "self", "state": "alive", "tier": "blue", "shield": 72,
+                  "health": 100, "split": "dev"},
+                 {"recording": "A.mp4", "t": 335, "who": "self", "state": "knocked", "split": "dev"},
+                 {"recording": "A.mp4", "t": 250, "who": "mate", "slot": 2, "state": "alive", "tier": "white",
+                  "shield": 50, "health": 60, "split": "dev"}]})
+    w("checkset-respawn-ring.json", {"respawns": [{"recording": "A.mp4", "t": 610, "tol": 6, "who": "self", "split": "dev"},
+                                                  {"recording": "A.mp4", "t": 640, "tol": 6, "who": "teammate", "split": "dev"}]})
+    w("checkset-usage.json", {
+        "windows": [{"recording": "A.mp4", "from": 200, "to": 400, "what": "heals+tactical", "split": "dev"}],
+        "heals": [{"recording": "A.mp4", "t": 210, "item": "cell", "done": True, "split": "dev"},
+                  {"recording": "A.mp4", "t": 230, "item": "battery", "done": False, "split": "dev"}],
+        "abilities": [{"recording": "A.mp4", "t": 260, "kind": "tactical", "split": "dev"}]})
+    g0 = {"tStart": 120, "mode": "ranked", "select": {"tFirst": 95, "tLast": 110},
+          "bans": [{"legend": "crypto"}, {"legend": "vantage"}],
+          "fights": [{"t0": 298, "t1": 322, "result": "won", "thirdParty": False},
+                     {"t0": 505, "t1": 512, "result": "even", "thirdParty": True},
+                     {"t0": 598, "t1": 601, "result": "lost"}],
+          "ringDamage": {"segments": [{"t0": 405, "t1": 415}, {"t0": 798, "t1": 802}]},
+          "highlights": [{"t0": 305, "t1": 309, "kind": "multi", "tags": ["multi", "wipe"]},
+                         {"t0": 1203, "t1": 1204, "kind": "double", "tags": ["double"]},
+                         {"t0": 1500, "t1": 1501, "kind": "double", "tags": ["double"]}],
+          "ownKnocks": [{"t": 331, "end": 340, "outcome": "revived"}, {"t": 900, "end": 905, "outcome": "died"}],
+          "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[200, "blue", 75, 100], [331, "knocked"]],
+                             "mates": [[[200, "white", 50, 98]], [[200, "white", 50, 62]]]},
+          "respawns": [{"t": 613, "who": "self"}, {"t": 700, "who": "teammate"}],
+          "heals": [{"t": 211, "item": "cell", "done": True}, {"t": 231, "item": "cell", "done": True},
+                    {"t": 300, "item": "syringe", "done": True}],
+          "abilities": [{"t": 261, "kind": "tactical"}, {"t": 350, "kind": "tactical"}]}
+    g1 = {"tStart": 930, "mode": None, "select": {"tFirst": 880, "tLast": 905}, "bans": [{"legend": "seer"}]}
+    (scans / "A.scan.json").write_text(_json.dumps({"games": [g0, g1]}), encoding="utf-8")
+    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": None}]}), encoding="utf-8")
+    assert C.recordings(str(folder)) == ["A", "B"]
+    res, misses, missing = C.score_all(str(folder), str(scans))
+    assert missing == []
+    b = res["bans"]["all"]
+    assert (b["games"], b["gamesRight"], b["legendsFound"], b["legends"], b["negativeFalse"]) == (2, 1, 3, 4, 0), b
+    f = res["fights"]
+    assert f["dev"]["found"] == 2 and f["dev"]["resultRight"] == 1 and f["dev"]["thirdPartyRight"] == 2, f
+    assert f["held"]["fights"] == 1 and f["held"].get("found", 0) == 0
+    assert f["dev"]["notFightsFalse"] == 1 and f["dev"]["ringFound"] == 1 and f["dev"]["redSceneryFalse"] == 1
+    h = res["highlights"]["dev"]
+    assert (h["highlights"], h["found"], h["kindRight"], h["borderline"], h["false"]) == (2, 1, 1, 1, 1), h
+    m = res["mode"]
+    assert m["dev"]["games"] == 2 and m["dev"]["right"] == 1 and m["held"]["notGamesRight"] == 1, m
+    o = res["ownState"]["dev"]
+    assert (o["knocks"], o["found"], o["outcomeRight"], o["false"]) == (2, 1, 1, 1), o
+    assert o["bars"] == 3 and o["barsRead"] == 3 and o["barsRight"] == 3, o     # within 5: shield 75 / 72, health 62 / 60
+    r = res["respawns"]["dev"]
+    assert (r["respawns"], r["found"], r["selfFound"], r.get("teammateFound", 0)) == (2, 1, 1, 0), r
+    u = res["usage"]["dev"]
+    assert (u["heals"], u["healsFound"], u["itemRight"], u["doneRight"], u["healsFalse"]) == (2, 2, 1, 1, 1), u
+    assert (u["tacticals"], u["tacticalsFound"], u["tacticalsFalse"]) == (1, 1, 1) and "ults" not in u, u
+    assert any(x["what"] == "fight result" for x in misses["fights"])
+    # a missing scan counts its truths as unread, never as false ones
+    (scans / "A.scan.json").unlink()
+    res, _, missing = C.score_all(str(folder), str(scans), split="dev")
+    assert missing == ["A"] and res["fights"]["dev"]["missed"] == 2 and "false" not in res["highlights"]["dev"]
+    assert C.main(["score", str(folder), "--scans", str(scans), "--json", str(folder / "out.json")]) == 0
+    assert _json.loads((folder / "out.json").read_text(encoding="utf-8"))["format"] == "pcs-checksets-score/1"
+
+
 def test_check_set_scoring():
     """Developer tool: the check set scorer counts truths, reads and correct reads per field, at the nearest
     keyframe and within 3 s."""
