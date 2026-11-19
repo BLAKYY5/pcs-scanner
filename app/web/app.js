@@ -1007,18 +1007,64 @@ function drawNotes(body) {
       n.drawings && n.drawings.length ? 'drawing' : '', `${Math.round(n.dur)} s`,
       coach && seen ? (seen.length ? 'Seen by ' + esc(seen.join(', ')) : 'Not seen yet') : ''].filter(Boolean).join(' · ');
     return `<div class="ev note ${RV.ed && RV.ed.id === n.id ? 'editing' : ''}" data-t="${n.t}" data-id="${esc(n.id)}"><time>${fmtT(n.t)}</time><i style="background:${(n.drawings && n.drawings[0] && n.drawings[0].color) || '#ffd60a'}"></i>
-      <span><b>${esc(n.text || 'Drawing')}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">Edit</button><button class="btn small danger" data-a="del">Delete</button></span>` : ''}</span></div>`;
+      <span><b>${esc(n.text || 'Drawing')}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">Edit</button><button class="btn small danger" data-a="del">Delete</button></span>` : ''}${repliesHTML(n, r, coach)}</span></div>`;
   }).join('') || `<div class="empty">${coach ? 'No notes yet. Pause where you want one and press New note.' : 'No coach notes on this recording.'}</div>`;
+  const focus = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.reply;
   body.innerHTML = html;
   $$('.ev.note', body).forEach(el => el.onclick = e => {
     const n = notes.find(x => x.id === el.dataset.id), a = e.target.dataset && e.target.dataset.a;
     if (a === 'edit') return openEditor(n);
     if (a === 'del') return deleteNote(n);
+    if (a === 'ack') return sendReply(n, {ack: true}, e.target);
+    if (a === 'send') return sendReply(n, {text: $(`input[data-reply="${CSS.escape(n.id)}"]`, el).value}, e.target);
+    if (a === 'unreply') return removeReply(n, e.target.dataset.rid, e.target);
+    if (e.target.closest('.nreply')) return;            // typing a reply: the video stays where it is
     if (!RV.ed) seek(n.t);
     markSeen([n]);
   });
+  $$('input[data-reply]', body).forEach(inp => {          // a draft survives redraws (hub refresh, new notes)
+    inp.value = replyDrafts[inp.dataset.reply] || '';
+    inp.oninput = () => { replyDrafts[inp.dataset.reply] = inp.value; };
+    inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const b = inp.parentNode.querySelector('[data-a="send"]'); if (b) b.click(); } };
+    if (focus && inp.dataset.reply === focus) inp.focus();
+  });
   const nn = $('#nNew', body); if (nn) nn.onclick = () => openEditor(null);
   const np = $('#nPlayer', body); if (np) np.onchange = () => { closeEditor(); loadNotes(RV.d.id, np.value); };
+}
+
+/* replies under a note (hub with replies): "Got it" in one click, or a short text; the coach answers back.
+   The list comes with the notes (cached for offline); sending needs the hub. */
+const replyDrafts = {};
+function repliesHTML(n, r, coach) {
+  if (!Array.isArray(n.replies)) return '';                 // a hub from before replies
+  const me = ((r.me && r.me.name) || '').toLowerCase();
+  const mine = x => x.by.toLowerCase() === me;
+  const list = n.replies.map(x => `<div class="nrep${x.role === 'coach' ? ' coach' : ''}"><b>${esc(mine(x) ? 'You' : x.by)}</b> ${x.kind === 'ack' ? '<span class="nack">Got it</span>' : `<span class="ntext">${esc(x.text)}</span>`}
+    <small>${esc(fmtWhen(x.at))}</small>${mine(x) && !r.offline ? ` <button class="nlink" data-a="unreply" data-rid="${esc(x.id)}" title="Remove your reply">Remove</button>` : ''}</div>`).join('');
+  if (r.offline) return list ? `<div class="nreplies">${list}</div><small class="faint">Replies need the team hub.</small>` : '';
+  const acked = n.replies.some(x => x.kind === 'ack' && mine(x));
+  return `${list ? `<div class="nreplies">${list}</div>` : ''}<div class="nreply">${coach || acked ? '' : '<button class="btn small brand" data-a="ack" title="Tell the coach you read it">Got it</button>'}<span class="nrow"><input type="text" data-reply="${esc(n.id)}" maxlength="500" placeholder="${coach ? 'Reply' : 'Reply to the coach'}" autocomplete="off"><button class="btn small" data-a="send">Send</button></span></div>`;
+}
+function fmtWhen(iso) {
+  const d = new Date(iso); if (isNaN(d)) return '';
+  return d.toLocaleString(undefined, {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'});
+}
+async function sendReply(n, body, btn) {
+  if (!body.ack && !(body.text || '').trim()) return toast('Write a reply first.', true);
+  if (btn) btn.disabled = true;
+  try {
+    if (!body.ack) replyDrafts[n.id] = '';
+    setNotes(await api('/api/notes/reply', {id: RV.d.id, player: RV.notes.player, note_id: n.id, ...body}));
+    toast(body.ack ? 'Sent: Got it.' : 'Reply sent.');
+  } catch (e) {
+    if (!body.ack) replyDrafts[n.id] = body.text;
+    toast('Reply not sent: ' + e.message, true); if (btn) btn.disabled = false;
+  }
+}
+async function removeReply(n, rid, btn) {
+  if (btn) btn.disabled = true;
+  try { setNotes(await api('/api/notes/unreply', {id: RV.d.id, player: RV.notes.player, note_id: n.id, reply_id: rid})); }
+  catch (e) { toast(e.message, true); if (btn) btn.disabled = false; }
 }
 
 /* the drawing layer: a canvas exactly over the picture (the video keeps its shape inside its box) */
