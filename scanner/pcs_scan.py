@@ -431,7 +431,7 @@ def duration(path):
 
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); rpfeed = pcs_ranked.Tracker(); events = []; samples = []; t0 = time.time(); last = 0
-    legends = HUD.Legends(); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
+    legends = HUD.Legends(); legends43 = HUD.Legends43(like=legends); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -441,14 +441,32 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
         def view_top_once():    # 4:3 stretched: the remapped top, built once per keyframe
             if not top: top.append(view_top(img))
             return top[0]
-        if False in cands:     # legend select screen (16:9 only so far): start of a game, the squad's legends
-            try: d = legends.read(img)
-            except Exception: d = None
-            if d: events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
-            else:               # loading banner before it: the mode and the map in words
-                try: bn = HUD.Banner.read(img)
-                except Exception: bn = None
-                if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
+        lay = mode if mode is not None else votes[True] > votes[False]      # the layout as known before this keyframe
+        # legend select screen (start of a game, the squad's legends), else the loading banner (mode and map in words).
+        # Both sit in the top band, so a 4:3 stretched recording is read on its remapped top (view_top). The stretched
+        # view is tried only once the recording is known to be stretched, or while nothing is known yet and the 16:9
+        # read found nothing (the start of a chunk is often the lobby, before any ring or map read could vote).
+        # While unknown, both views are read: the 16:9 reader also "reads" a stretched roster now and then (slots
+        # misplaced: a slot gets its neighbour's legend), so the select read whose named slots score higher wins, and
+        # a stretched banner read must name its mode or map (an unnamed word could be anything white).
+        guess = not lay and mode is None and votes[True] == votes[False]
+        tops = [None] if lay else ([img] if False in cands else []) + ([None] if guess else [])
+        sel = []
+        for v in tops:
+            st43 = v is None
+            try: r = (legends43 if st43 else legends).read(view_top_once() if st43 else v)
+            except Exception: r = None
+            if r: sel.append(r)
+        if len(sel) > 1:
+            score = lambda r: sum(x['score'] for x in r['squad'] if x['legend'])
+            sel = [max(sel, key=score)] if score(sel[1]) > score(sel[0]) else sel[:1]
+        if sel: d = sel[0]; events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
+        for v in ([] if d else tops):
+            st43 = v is None
+            try: bn = (HUD.Banner43 if st43 else HUD.Banner).read(view_top_once() if st43 else v)
+            except Exception: bn = None
+            if bn and st43 and guess and not (bn.get('mode') or bn.get('map')): bn = None
+            if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn; break
         # The readers take the uint8 frame and make int16 only the small areas they compute on: converting the whole
         # 1440p frame cost about 6 ms each time, up to three times per keyframe (results are identical).
         # A banner read does not end the keyframe: the scrim drop screen shows the map's name in the same place at the
@@ -498,27 +516,34 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 except Exception: pass
             try: perf.setdefault('_storm', []).append((round(t, 2), pcs_fights.read_storm(img)))   # ring damage: red screen edges
             except Exception: pass
-            if not st:          # "N SQUADS LEFT" (16:9 only so far)
-                try: rp = pcs_ranked.panel_rp(img)        # ranked: the game's RP so far, under the rank emblem
+            if not st:          # ranked: the game's RP so far, under the rank emblem (16:9 only so far)
+                try: rp = pcs_ranked.panel_rp(img)
                 except Exception: rp = None
                 if rp is not None and not (hud and hud[2] and hud[2]['spec']): perf.setdefault('_rp', []).append((round(t, 2), rp))
-                try: sq = HUD.SquadsLeft.read(img)
-                except Exception: sq = None
-                if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
-                try: own = HUD.OwnStats.read(img)
-                except Exception: own = {}
-                if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
-                    perf.setdefault('_own', []).append((round(t, 2), own))
+            # "N SQUADS LEFT" and the own stats strip under it: 4:3 stretched on the remapped top, with the stretched
+            # readers (softer text: the game draws the HUD at its 4:3 render size)
+            try: sq = (HUD.SquadsLeft43 if st else HUD.SquadsLeft).read(view_top_once() if st else img)
+            except Exception: sq = None
+            if sq: perf.setdefault('_squads', []).append((round(t, 2), sq))
+            try: own = (HUD.OwnStats43 if st else HUD.OwnStats).read(view_top_once() if st else img)
+            except Exception: own = {}
+            if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
+                perf.setdefault('_own', []).append((round(t, 2), own))
+            if not st:
                 if t - mm_at >= pcs_minimap.EVERY and not (hud and hud[2] and hud[2]['spec']):   # HUD minimap: position
                     try: mm = pcs_minimap.grab(img)
                     except Exception: mm = None
                     if mm is not None: mm_at = t; perf.setdefault('_minimap', []).append((round(t, 2), mm))
-        if not (mode if mode is not None else votes[True] > votes[False]):      # squad cards (16:9 only so far)
-            if (not d or bn) and t - emb_at >= EMBLEM_EVERY:     # playlist emblem, top right (pubs, Wildcard)
-                emb_at = t
-                try: em = HUD.ModeEmblem.read(img)
+        lay = mode if mode is not None else votes[True] > votes[False]
+        if (not d or bn) and t - emb_at >= EMBLEM_EVERY:     # playlist emblem, top right (pubs, Wildcard)
+            emb_at = t
+            try: em = HUD.ModeEmblem.read(view_top_once() if lay else img)
+            except Exception: em = None
+            if not em and not lay and mode is None and votes[True] == votes[False]:    # layout not known yet
+                try: em = HUD.ModeEmblem.read(view_top_once())
                 except Exception: em = None
-                if em: perf.setdefault('_emblem', []).append((round(t, 2),) + em)
+            if em: perf.setdefault('_emblem', []).append((round(t, 2),) + em)
+        if not lay:      # squad cards (16:9 only so far)
             try: cards = pcs_respawn.read_cards(img)
             except Exception: cards = []
             if cards: perf.setdefault('_cards', []).append((round(t, 2), cards, bool(hud[2]['spec']) if hud and hud[2] else None))
@@ -758,6 +783,10 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
             st = {}
             end = max((t_ for t_, _ in own if g['tStart'] <= t_ < hi), default=None)
             for k in ('kills', 'assists', 'knocks', 'damage'):
+                # 4:3 stretched (OwnStats43 '_seen'): the number was on the strip but not read twice after its last read:
+                # it may have grown meanwhile, so no total
+                last = max((t_ for t_, o in own if k in o and g['tStart'] <= t_ < hi), default=None)
+                if last is not None and sum(1 for t_, o in own if last < t_ < hi and k not in o and k in o.get('_seen', ())) >= 2: continue
                 f = HUD.stat_final([(t_, o[k]) for t_, o in own if k in o], g['tStart'], hi, end,
                                    HUD.SINGLE_JUMP if k == 'damage' else None)   # damage: a consistent last read counts
                 if f:
