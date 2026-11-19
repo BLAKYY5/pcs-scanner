@@ -2611,6 +2611,72 @@ def test_own_bars_and_knocks():
     assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
 
 
+def test_highlights_key_plays():
+    """pcs_highlights: the player's own takedowns need two sources (kill line in his colour + kills number, a fight or
+    damage); a line captured twice counts once; a kill line the kills number did not follow is not his; a knock and its
+    kill are one enemy; chains of 8 s give multi-kills (3+), quick doubles (2 within 5 s), squad wipes (3 kills),
+    clutches (2 enemies while last alive, fight won); Settings regroup them; best first."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_highlights as H
+    assert H.parse_rules("8,3,5") == {'chainS': 8.0, 'multiMin': 3, 'doubleS': 5.0} == H.rules()
+    assert H.parse_rules("") == H.rules() and H.parse_rules("x,y") == H.rules()
+    assert H.parse_rules("99,1,40") == {'chainS': 30.0, 'multiMin': 2, 'doubleS': 30.0}
+    # the kills plate only shows once above 0: reads of the strip without it before count as 0
+    own = [(t, {'damage': 10}) for t in range(100, 110)] + [(t, {'kills': 1, 'damage': 80}) for t in range(112, 120)] + \
+          [(120.0, {'kills': 7, 'damage': 80})] + [(t, {'kills': 3, 'damage': 200}) for t in range(124, 130)]
+    assert H.counter_rises(own, 'kills', 0, 1e9) == [(112, 109, 1), (124, 119, 2)]      # one misread 7 never counts
+    assert H.counter_rises(own + [(131.0, {'kills': 2}), (132.0, {'kills': 2})], 'kills', 0, 1e9) == []   # went down
+    SQ = {'select': {'squad': [{'slot': 1, 'hue': 40, 'self': True}, {'slot': 2, 'hue': 180, 'self': False},
+                               {'slot': 3, 'hue': 77, 'self': False}]}}
+    def line(t, ev, hue=40, sig='a' * 36, weapon='r301', y=300):
+        return {'t': float(t), 'y': y, 'event': ev, 'weapon': weapon, 'killer': {'side': 'squad', 'hue': hue},
+                'victim': {'side': 'other'}, 'victimSig': sig}
+    fight = lambda a, b, res='won': {'t0': a, 't1': b, 'result': res, 'ours': {'knocks': 1, 'kills': 1}}
+    reads = lambda kills: [(float(t), {'kills': v, 'damage': 100 + 50 * v}) for t, v in kills]
+    # two knocks 3 s apart (one captured twice), both killed: a quick double; the teammate's kill line is not ours
+    lines = [line(200, 'knock', sig='1' * 36), line(202, 'knock', sig='3' * 36), line(203, 'knock', sig='2' * 36, weapon='flatline'),
+             line(207, 'kill', sig='1' * 36), line(208, 'kill', sig='2' * 36, weapon='flatline'), line(209, 'kill', hue=180)]
+    k = reads([(t, 0) for t in range(190, 206)] + [(t, 2) for t in range(210, 230)])
+    g = {'tStart': 0.0, **SQ, 'fights': [fight(199, 209)]}
+    td = H.takedowns(g, lines, k, 0, 1e9)
+    assert [(e['t'], e['kind']) for e in td] == [(200, 'knock'), (203, 'knock'), (207, 'kill'), (208, 'kill')], td
+    assert td[2]['sources'] == ['counter', 'damage', 'feed', 'fight']
+    hl = H.find(td, g['fights'], [])
+    assert len(hl) == 1 and hl[0]['kind'] == 'double' and hl[0]['count'] == 2 and hl[0]['t0'] == 200 and hl[0]['t1'] == 208
+    assert hl[0]['gaps'] == [3.0, 4.0, 1.0] and hl[0]['kills'] == 2 and hl[0]['knocks'] == 2
+    assert H.find(td, g['fights'], [], H.rules(8, 3, 2)) == []                            # stricter double: not one
+    # a kill line in our colour while the kills number holds still around it: a teammate's (or misread), dropped
+    still = reads([(t, 1) for t in range(290, 320)])
+    assert H.takedowns(g, [line(300, 'kill')], still, 0, 1e9) == []
+    # a single line with no second source never counts
+    assert H.takedowns({'tStart': 0.0, **SQ}, [line(300, 'knock')], [], 0, 1e9) == []
+    # kills the feed missed: the kills number + damage alone, three in a chain = multi-kill and squad wipe
+    k3 = [(float(t), {'kills': 0, 'damage': 100}) for t in range(380, 392)] + \
+         [(float(t), {'kills': 1, 'damage': 300}) for t in range(394, 398)] + \
+         [(float(t), {'kills': 3, 'damage': 500}) for t in range(401, 410)]
+    td3 = H.takedowns({'tStart': 0.0, **SQ}, [], k3, 0, 1e9)
+    assert [e['sources'] for e in td3] == [['counter', 'damage']] * 3, td3
+    h3 = H.find(td3, [], [])
+    assert h3[0]['kind'] == 'wipe' and h3[0]['tags'] == ['multi', 'wipe'] and h3[0]['count'] == 3
+    assert h3[0]['score'] > hl[0]['score']
+    # clutch: two enemies while no teammate card is alive, in a fight that ends won
+    bars = [(float(t), {'state': 'alive'}, [{'y': 1}, {'y': 2}], False) for t in range(500, 510)] + \
+           [(float(t), {'state': 'alive'}, [], False) for t in range(510, 530)]
+    assert H.last_alive(bars, 0, 1e9) == [[510.0, 529.0]]
+    tdc = [{'t': 515.0, 'kind': 'knock', 'sources': ['feed', 'fight']}, {'t': 519.0, 'kind': 'knock', 'sources': ['feed', 'fight']},
+           {'t': 522.0, 'kind': 'kill', 'sources': ['counter', 'fight']}]
+    assert [h['tags'] for h in H.find(tdc, [fight(512, 524, 'lost')], [[510.0, 529.0]])] == [['double']]   # lost: no clutch
+    hc = H.find(tdc, [fight(512, 524)], [[510.0, 529.0]])
+    assert hc[0]['kind'] == 'clutch' and hc[0]['tags'] == ['double', 'clutch'] and 'cards' in hc[0]['sources'] and hc[0]['t0'] == 510.0
+    # attach adds the fields to every game and never breaks a scan
+    games = [{'tStart': 0.0, **SQ, 'fights': [fight(199, 209)]}, {'tStart': 1000.0}]
+    H.attach(games, lines, k, [])
+    assert games[0]['highlights'][0]['kind'] == 'double' and games[1]['highlights'] == [] and games[1]['takedowns'] == []
+    bad = [{'tStart': 0.0, 'select': 'broken'}]
+    H.attach(bad, lines, k, [])
+    assert bad[0]['highlights'] == [] and 'highlightsError' in bad[0]
+
+
 def test_fights_and_ring_damage():
     """pcs_fights: ring damage from the red screen edges and health ticks (shield untouched); fights from our squad's
     kill-feed lines, own knocks and hits: kills decide, the player's own death counts, a wiped squad lost; one line

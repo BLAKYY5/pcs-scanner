@@ -808,7 +808,7 @@ async function renderReview(id) {
             ${commsOf(d).length ? '<div class="lane" id="laneC"><span class="lane-label">' + t('Your comms (text)') + '</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>${t('Game start')}</span><span><i style="background:#6aa0ff"></i>${t('Jump')}</span><span><i style="background:#5fd08f"></i>${t('Landing')}</span><span><i style="background:#c48bff"></i>${t('Ring')}</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>${t('We knocked / killed')}</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>${t('We went down')}</span><span><i class="respawn"></i>${t('Respawned')}</span><span><i style="background:rgba(95,208,143,.45)"></i>${t('Fight won')}</span><span><i style="background:rgba(138,135,127,.5)"></i>${t('Fight lost')}</span><span><i style="background:rgba(224,98,58,.45)"></i>${t('Outside the ring')}</span><span><i style="background:#e6ad45;border-radius:2px"></i>${t('Loud game sound (likely fight)')}</span><span><i style="background:#6aa0ff"></i>${t('Loud call')}</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>${t('Game start')}</span><span><i style="background:#6aa0ff"></i>${t('Jump')}</span><span><i style="background:#5fd08f"></i>${t('Landing')}</span><span><i style="background:#c48bff"></i>${t('Ring')}</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>${t('We knocked / killed')}</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>${t('We went down')}</span><span><i class="respawn"></i>${t('Respawned')}</span><span><i style="background:#ffd60a"></i>${t('Highlight')}</span><span><i style="background:rgba(95,208,143,.45)"></i>${t('Fight won')}</span><span><i style="background:rgba(138,135,127,.5)"></i>${t('Fight lost')}</span><span><i style="background:rgba(224,98,58,.45)"></i>${t('Outside the ring')}</span><span><i style="background:#e6ad45;border-radius:2px"></i>${t('Loud game sound (likely fight)')}</span><span><i style="background:#6aa0ff"></i>${t('Loud call')}</span></div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
               <button class="btn small" id="rvTheatre" title="${t('Video across the whole window (T)')}">${t('Theatre')}</button><button class="btn small" id="rvFull" title="${t('Full screen (F)')}">${t('Full screen')}</button></div>
           </div>
@@ -910,7 +910,7 @@ function drawTimeline() {
   }
   const resp = RV.ev.some(e => e.k === 'respawn'), kn = RV.ev.some(e => e.k === 'knock');
   const fts = RV.ev.filter(e => e.k === 'scanfight');
-  $('#laneF').innerHTML = `<span class="lane-label">${[t('Kill feed · our squad'), fts.length ? t('fights') : '', kn ? t('your knocks') : '', resp ? t('respawns') : ''].filter(Boolean).join(' · ')}</span>` +
+  $('#laneF').innerHTML = `<span class="lane-label">${[t('Kill feed · our squad'), fts.length ? t('fights') : '', kn ? t('your knocks') : '', resp ? t('respawns') : '', hlList(RV.d).length ? t('highlights') : ''].filter(Boolean).join(' · ')}</span>` +
     // fights under the ticks: a band per fight, coloured by its result, dashed edge when a third party came in
     fts.map(e => `<div class="sfight ${esc(e.result || 'even')}${e.third ? ' third' : ''}" data-t="${e.t}" style="left:${pct(e.t)};width:${pct(Math.max(1, e.t1 - e.t))}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('') +
     RV.ev.filter(e => e.k === 'feed').map(e =>
@@ -920,7 +920,10 @@ function drawTimeline() {
     `<div class="tick respawn" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}"></div>`).join('') +
     // own knocks: a grey tick with a square head (grey = we went down, as on the feed ticks)
     RV.ev.filter(e => e.k === 'knock').map(e =>
-    `<div class="tick knock" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('');
+    `<div class="tick knock" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('') +
+    // highlights (pcs_highlights): a gold star at the start of each key play
+    hlList(RV.d).map(h =>
+    `<button class="mk hl" data-t="${h.t0}" style="left:${pct(h.t0)}" title="${fmtT(h.t0)} · ${esc(hlTitle(h))} · ${esc(hlSub(h))}">★</button>`).join('');
   const lc = $('#laneC');
   if (lc) lc.innerHTML = '<span class="lane-label">' + t('Your comms (text)') + '</span>' + commsOf(RV.d).map(c =>
     `<div class="tick comms" data-t="${c.start}" style="left:${pct(c.start)};width:${pct(Math.max(0.6, c.end - c.start))}" title="${fmtT(c.start)} · ${esc(c.text)}"></div>`).join('');
@@ -953,7 +956,7 @@ function drawSide() {
   if (RV.tab === 'comms') { drawComms(body); return; }
   if (!d.scan) { body.innerHTML = '<div class="empty"><strong>' + t('Not scanned yet') + '</strong>' + t('Scan this recording to see its drop, landing, rings and kill feed.') + '</div>'; return; }
   if (RV.tab === 'events') {
-    let html = '', g = -1;
+    let html = hlHTML(d), g = -1;
     RV.ev.forEach((e, i) => {
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">${t('Game {n} · {map}', {n: g + 1, map: esc(mapName(sp.map))})}</div>`; }
       if (e.laneOnly) return;
@@ -973,7 +976,42 @@ function drawSide() {
     body.innerHTML = (d.games || []).map((g, i) => dropHTML(g, i)).join('') || '<div class="empty">' + t('No drop map found.') + '</div>';
   }
   $$('[data-t]', body).forEach(el => el.onclick = () => seek(+el.dataset.t));
+  $$('[data-hlclip]', body).forEach(el => el.onclick = e => { e.stopPropagation(); hlClip(+el.dataset.hlclip); });
   onTime(true);
+}
+/* Highlights (scanner pcs_highlights, regrouped with this player's Settings): key plays of the recording player,
+   best first. Each: kind, enemies taken down, the gaps between them, the score; "Clip it" opens the clip bar from
+   HL_BEFORE s before the first takedown to HL_AFTER s after the last. */
+const HL_BEFORE = 5, HL_AFTER = 3;
+const HL_KIND = {multi: () => t('Multi-kill'), double: () => t('Quick double'), wipe: () => t('Squad wipe'), clutch: () => t('Clutch')};
+function hlList(d) {
+  const out = [];
+  ((d && d.games) || []).forEach((g, gi) => (g.highlights || []).forEach(h => {
+    if (h && typeof h.t0 === 'number' && typeof h.t1 === 'number') out.push(Object.assign({g: gi}, h));
+  }));
+  return out.sort((a, b) => (b.score || 0) - (a.score || 0) || a.t0 - b.t0);
+}
+function hlTitle(h) {
+  const n = h.count || 0;
+  return `${HL_KIND[h.kind] ? HL_KIND[h.kind]() : t('Highlight')} · ${n === 1 ? t('1 enemy') : t('{n} enemies', {n})}`;
+}
+function hlSub(h) {
+  const tags = (h.tags || []).filter(k => k !== h.kind && HL_KIND[k]).map(k => HL_KIND[k]().toLowerCase());
+  const list = (h.gaps || []).map(x => (+x).toFixed(1) + ' s').join(', ');
+  const gaps = !list ? '' : h.gaps.length === 1 ? t('gap {list}', {list}) : t('gaps {list}', {list});
+  return [gaps, ...tags, t('score {n}', {n: h.score})].filter(Boolean).join(' · ');
+}
+function hlHTML(d) {
+  const L = hlList(d);
+  if (!L.length) return '';
+  const many = (d.games || []).length > 1;
+  return `<div class="gamehead hlhead">${t('Highlights ({n})', {n: L.length})}</div>` + L.map((h, i) =>
+    `<div class="ev hl" data-t="${h.t0}"><time>${fmtT(h.t0)}</time><i class="hlstar">★</i><span><b>${esc(hlTitle(h))}</b><small>${many ? t('Game {n}', {n: h.g + 1}) + ' · ' : ''}${esc(hlSub(h))}</small></span>` +
+    (window.clipOpenRange ? `<button class="btn small" data-hlclip="${i}" title="${t('Clip from {a} s before to {b} s after', {a: HL_BEFORE, b: HL_AFTER})}">${t('Clip it')}</button>` : '') + '</div>').join('');
+}
+function hlClip(i) {
+  const h = hlList(RV && RV.d)[i];
+  if (h && window.clipOpenRange) clipOpenRange(h.t0 - HL_BEFORE, h.t1 + HL_AFTER);
 }
 // EEC's drop for a game of this recording, when EEC's results were compared with it (EEC wins for display; ours stays)
 function eecOf(d, gi) { return ((d && d.eecGames) || []).find(x => x.i === gi && x.eecDrop) || null; }
@@ -1577,6 +1615,13 @@ function renderSettings() {
       <div class="form">
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, t('Scan automatically'), t('Starts after a countdown unless you press Skip'))}</div>
         <label class="field"><span>${t('Countdown (seconds)')}</span><input id="f-scan_delay_s" type="number" min="5" max="600" value="${s.scan_delay_s}"></label>
+      </div></section>
+    <section class="card section"><h2>${t('Highlights')}</h2>
+      <p class="muted" style="margin:0 0 10px">${t('Key plays the scan finds for clips: your own knocks and kills close together. Shown in the review player with a star.')}</p>
+      <div class="form">
+        <label class="field"><span>${t('Chain: next takedown within (seconds)')}</span><input id="f-hl_chain_s" type="number" min="2" max="30" value="${s.hl_chain_s}"></label>
+        <label class="field"><span>${t('Multi-kill: enemies in one chain')}</span><input id="f-hl_multi_min" type="number" min="2" max="6" value="${s.hl_multi_min}"></label>
+        <label class="field"><span>${t('Quick double: 2 enemies within (seconds)')}</span><input id="f-hl_double_s" type="number" min="1" max="30" value="${s.hl_double_s}"><small>${t('Also: squad wipe (you finish a whole squad) and clutch (you win a fight as the last one of your squad alive).')}</small></label>
       </div></section>` : '<div class="notice">' + t('Auto-record isn\'t available in this build.') + '</div>'}
     <section class="card section"><h2>${t('About')}</h2>
       <div class="row between"><span class="muted">PCS Scanner ${esc(S.version)}${r && r.encoder ? ' · ' + t('encoder {name}', {name: esc(r.encoder)}) : ''}</span>
@@ -1655,7 +1700,7 @@ function settingsBody() {
   for (const k of ['team_link']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }   // hidden when icons come from the hub
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
-    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
+    for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
     for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged

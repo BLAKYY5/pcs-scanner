@@ -290,6 +290,11 @@ input:disabled{opacity:.5}
 .ev.note.editing{outline:1px solid #ffd60a}
 .ev.note .nacts{margin-top:6px;gap:6px}
 .mk.note{background:#ffd60a}
+.mk.hl{background:#ffd60a;color:#2a2410;width:16px;height:16px;font-size:11px;line-height:1;top:30%;z-index:3}   /* highlights: gold star */
+.ev.hl{grid-template-columns:54px 14px minmax(0,1fr) auto}
+.ev.hl .btn{align-self:center}
+.ev .hlstar{background:none;color:#ffd60a;font-style:normal;font-size:13px;line-height:16px;width:auto;height:auto;margin-top:1px}
+.hlhead{color:#ffd60a}
 /* game header under the video: mode, map, squad, the player's own numbers, squads left */
 .mk.select,.mk.start{background:#e6ad45}
 .gamebar{margin-top:12px;padding:10px 16px;display:flex;flex-wrap:wrap;align-items:center;gap:6px 22px}

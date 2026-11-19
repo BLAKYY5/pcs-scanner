@@ -38,6 +38,16 @@ function clipOpen() {
   const b = $('#rvClip'); if (b) b.classList.add('brand');
   clipDraw();
 }
+/* open the clip bar with a range set from outside (a highlight's "Clip it": 5 s before to 3 s after) */
+function clipOpenRange(a, b) {
+  if (!CLIP.d) return;
+  if (CLIP.last && CLIP.last.running) { clipOpen(); toast('A clip is being made. Wait for it to finish.'); return; }
+  const D = clipDur() || 1e9;
+  CLIP.a = Math.max(0, Math.min(a, D - 1)); CLIP.b = Math.min(D, Math.max(b, CLIP.a + 1)); CLIP.picked = true; CLIP.mom = null;
+  if (CLIP.v) CLIP.v.currentTime = CLIP.a;
+  clipOpen();
+  const bar = $('#clipBar'); if (bar && bar.scrollIntoView) bar.scrollIntoView({block: 'nearest'});
+}
 function clipClose() {
   CLIP.open = false;
   const bar = $('#clipBar'); if (bar) { bar.hidden = true; bar.innerHTML = ''; }
