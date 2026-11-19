@@ -468,9 +468,9 @@ def test_eec_drops_confirm_scrims():
     res = eec.results(lobby, "PCS")
     assert [g["drop"] for g in res["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
     assert eec.compare_drop("WE", "Staging", "we-staging")[0] == "same"
-    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] in ("near", None)
+    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] == "same"           # an alias in our map table
     assert eec.compare_drop("WE", "Staging", "we-thermal")[0] == "different"
-    assert eec.compare_drop("WE", "Skyhook West", "we-staging")[0] is None          # not in our map table: no verdict
+    assert eec.compare_drop("WE", "Nowhere Plaza", "we-staging")[0] is None         # not in our map table: no verdict
     assert eec.compare_drop("WE", "", "we-staging")[0] is None
 
     folder = TMP / f"eecdrops-{time.time_ns()}"
@@ -515,6 +515,87 @@ def test_eec_drops_confirm_scrims():
     labels.set_label(idx2["b"].path, "ranked")
     assert labels.explain_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2)["source"] == "hand"
     labels.FILE.unlink(missing_ok=True)
+
+
+def test_poi_names_and_aliases():
+    """POI names: a name, an old name, an alias or EEC's 'NAME (6)' all resolve to the same POI id (scans keep ids,
+    so a rename never splits history); a name two POIs share resolves to none; the EEC check compares ids. Fake map."""
+    import threading
+    from pcs_recorder import eec
+    keep = eec._POIS, eec._ALIASES
+    try:
+        eec._POIS = {"ZZ": {"zz-north": "Fake North", "zz-south": "The Fake Mill", "zz-east": "Glass Yard",
+                            "zz-west": "Glass Yards East"}}
+        eec._ALIASES = {"ZZ": {"zz-north": ["Old Fake North", "Fake Top"], "zz-south": [], "zz-east": ["Shared"],
+                               "zz-west": ["Shared"]}}
+        assert eec.resolve("ZZ", "zz-north") == "zz-north"
+        assert eec.resolve("ZZ", "FAKE NORTH (6)") == "zz-north"
+        assert eec.resolve("ZZ", "Old Fake North") == "zz-north"
+        assert eec.resolve("ZZ", "fake top") == "zz-north"
+        assert eec.resolve("ZZ", "Fake Mills") == "zz-south"                       # no 'The', plural s
+        assert eec.resolve("ZZ", "Shared") is None                                  # two POIs: none
+        assert eec.resolve("ZZ", "Somewhere") is None
+        assert eec.resolve("QQ", "Fake North") is None                              # other map
+        assert eec.compare_drop("ZZ", "OLD FAKE NORTH (3)", "zz-north")[0] == "same"
+        assert eec.compare_drop("ZZ", "Fake Top", "zz-south")[0] == "different"
+        assert eec.compare_drop("ZZ", "Glass", "zz-east")[0] == "near"              # unknown name: old rule
+        assert eec.compare_drop("ZZ", "Somewhere", "zz-east")[0] is None
+        # shown names: the hub's language only while its English name is ours
+        keys = {"pois:zz-north": ["Fake North", "Nord factice"], "pois:zz-east": ["Old Glass", "Verre"]}
+        shown = eec.shown_names(keys)
+        assert shown["zz-north"] == "Nord factice" and shown["zz-east"] == "Glass Yard"
+        assert eec.shown_names(None)["zz-south"] == "The Fake Mill"
+        # the hub is asked in the background, once per 6 h; the page gets English until then
+        calls = []
+        done, go = threading.Event(), threading.Event()
+
+        def fetch(url, path):
+            calls.append((url, path))
+            go.wait(5)                                                              # the hub answers late
+            done.set()
+            return {"lang": "fr", "keys": keys}
+        eec._HUB_NAMES.update(url="", at=0.0, lang="en", keys={}, busy=False)
+        first = eec.app_poi_names("http://hub.test:8420", fetch)
+        assert first["lang"] == "en" and first["names"]["zz-north"] == "Fake North"   # the page never waits
+        go.set()
+        assert done.wait(5)
+        for _ in range(50):
+            if not eec._HUB_NAMES["busy"]:
+                break
+            time.sleep(0.02)
+        again = eec.app_poi_names("http://hub.test:8420", fetch)
+        assert again["lang"] == "fr" and again["names"]["zz-north"] == "Nord factice"
+        assert calls == [("http://hub.test:8420", "/api/names")]
+        assert eec.app_poi_names("", fetch)["lang"] == "en"                          # no hub: English
+        eec._HUB_NAMES.update(url="", at=0.0, lang="en", keys={}, busy=False)
+    finally:
+        eec._POIS, eec._ALIASES = keep
+
+
+def test_maps_game_names():
+    """pcs_maps.json: every POI has a name, aliases are a list of other names (never the name itself), no two POIs of
+    a map share a name or alias, and the EEC names seen in our lobbies resolve to the right POI."""
+    import json as _json
+    from pcs_recorder import eec
+    maps = _json.loads((Path(__file__).resolve().parent.parent / "scanner" / "pcs_maps.json").read_text(encoding="utf-8"))
+    for mp, d in maps.items():
+        seen = {}
+        for p in d["pois"]:
+            assert p["name"], p["id"]
+            al = p.get("aliases", [])
+            assert isinstance(al, list) and all(isinstance(a, str) and a for a in al), p["id"]
+            assert p["name"] not in al, p["id"]
+            for n in [p["name"], *al]:
+                k = eec.norm(n)
+                assert seen.get(k, p["id"]) == p["id"], f"{mp}: {n} on {seen.get(k)} and {p['id']}"
+                seen[k] = p["id"]
+    for mp, name, pid in [("WE", "SKYHOOK WEST (2)", "we-skyhook"), ("WE", "Skyhook East", "we-skyhook-east"),
+                          ("WE", "MIRAGE A TROIS (6)", "we-mirage"), ("WE", "STACKS (14)", "we-stacks"),
+                          ("ED", "Canal", "ed-canal-plaza"), ("ED", "Uptown", "ed-vibe-isle"),
+                          ("SP", "Mills", "sp-the-mill"), ("SP", "Cascades", "sp-cascade-falls"),
+                          ("SP", "Pylon", "sp-wattsons-pylon"), ("SP", "Zeus Station", "sp-zeus-station"),
+                          ("KC", "Cage", "kc-cage")]:
+        assert eec.resolve(mp, name) == pid, (mp, name)
 
 
 def test_eec_drops_refuse_tournament():
