@@ -519,6 +519,11 @@ class Uploader:
             sent += 1
         return sent
 
+    def _game(self) -> str:
+        """The game that holds uploads ("" = none): `is_apex_running` may give True (Apex) or a game's name."""
+        g = self.is_apex_running()
+        return "" if not g else ("Apex" if g is True else str(g))
+
     def tick(self) -> None:
         if self.is_apex_running():
             return
@@ -612,8 +617,12 @@ class Uploader:
             req = yt.videos().insert(part="snippet,status", body=body, media_body=media)
             resp = None
             while resp is None:
-                while self.is_apex_running():                     # never share the connection with a game
-                    self.status = "YouTube upload paused while Apex runs"
+                while True:                                       # never share the connection with a game
+                    g = self._game()
+                    if not g:
+                        break
+                    self.status = ("YouTube upload paused while Apex runs" if g == "Apex"
+                                   else f"YouTube upload paused while a game runs ({g})")
                     time.sleep(10)
                 status, resp = req.next_chunk(num_retries=5)
                 if status:
@@ -670,15 +679,17 @@ class Uploader:
             if by_hand and kind != "scrims":
                 return f"won't upload: labelled {labels.TITLE[kind]} (Scrims only is on)"
         if st.get("status") == "requested":
-            if self.is_apex_running():
-                return "uploads as soon as Apex is closed"
+            g = self._game()
+            if g:
+                return f"uploads as soon as {g} is closed"
             return "uploads in a moment"
         if self.s.yt_wait_eec and not (st.get("eec") or st.get("eec_res")):
             return f"waiting for the EEC results (up to {self.s.yt_wait_eec_h} h)"
         if self.night and not self.night.upload_allowed():
             return f"waiting for the night ({self.s.night_from}:00 to {self.s.night_to}:00, PC idle)"
-        if self.is_apex_running():
-            return "waiting for Apex to close"
+        g = self._game()
+        if g:
+            return f"waiting for {g} to close"
         return "ready"
 
     def queue(self, limit: int = 40) -> list[dict]:

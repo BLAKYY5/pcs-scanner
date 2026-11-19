@@ -91,7 +91,7 @@ def reason(e: Exception) -> str:
     if kind == "wait":
         return "Hub asks to wait"
     if kind == "paused":
-        return "Waits for Apex to close"
+        return "Waits for the game to close"
     if reach in REACH_SHORT:
         return REACH_SHORT[reach]
     if kind == "http":
@@ -518,7 +518,7 @@ PART_FILE = 50 * 1024 * 1024          # a file over this goes in parts (the hub'
 ONESHOT_MAX = 90 * 1024 * 1024        # one request stays under this (Cloudflare refuses bodies over 100 MB)
 PART_MAX = 50 * 1024 * 1024           # never a bigger part, whatever the hub says
 UPLOADS_FILE = APP_DIR / "hub-uploads.json"
-PAUSED = "Paused while Apex runs: goes on when it closes"
+PAUSED = "Paused while a game runs: goes on when it closes"
 _up_lock = threading.Lock()
 
 

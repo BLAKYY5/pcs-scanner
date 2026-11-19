@@ -262,6 +262,7 @@ input:disabled{opacity:.5}
 .seen .ring{color:#c48bff}.seen .hot{color:var(--warn);font-weight:600}.seen .hot.blue{color:var(--info)}
 .seen .feedimgs{display:flex;flex-direction:column;gap:2px;margin-top:4px}.seen .feedimgs img{max-width:260px;border-radius:2px}
 .lane.sound{height:40px}
+.lane.shield{height:14px}
 .sfight{position:absolute;top:2px;bottom:2px;border-radius:3px;cursor:pointer;background:rgba(230,173,69,.2);border:1px solid rgba(230,173,69,.6)}
 .sfight.won{background:rgba(95,208,143,.22);border-color:rgba(95,208,143,.75)}
 .sfight.lost{background:rgba(138,135,127,.28);border-color:rgba(138,135,127,.8)}
@@ -383,3 +384,7 @@ input:disabled{opacity:.5}
 .commsbar input{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid #3a3833;background:#1c1b19;color:inherit;font:inherit}
 .ev.cline span{white-space:normal;overflow-wrap:anywhere}
 .commsnote{padding:8px 4px;font-size:12px}
+/* Settings → Games: one line per game, wraps at 900 px */
+.gamelist{display:flex;flex-direction:column;gap:6px}
+.gamerow{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line)}
+.gamerow .row{gap:6px}

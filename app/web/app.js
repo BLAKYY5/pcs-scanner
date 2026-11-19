@@ -78,7 +78,7 @@ function renderTop() {
   else if (r.enabled) { cls += ' on'; text = t('Ready · waiting for Apex'); }
   if (S && S.scans.now) { cls = 'live on'; text = t('Scanning'); }
   pill.className = cls; pill.querySelector('span').textContent = text;
-  document.body.classList.toggle('quiet', !!(S && S.apex));          // Apex runs: no animation at all (app.css)
+  document.body.classList.toggle('quiet', gaming());                 // a game runs: no animation at all (app.css)
   const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = t('Update to {tag}', {tag: S.update.tag});
   u.disabled = !!(S && S.updateState);
@@ -134,17 +134,18 @@ window.addEventListener('keydown', e => {
 }, true);
 function confirmBox(msg) { return window.confirm(msg); }
 
-/* The window stays quiet while it isn't seen and while Apex runs (it shares the graphics card with the game):
-   no polling at all when hidden (tray) or minimized, every 10 s while Apex runs unless the player is using the
-   window, every 2 s otherwise. Shown again = refreshed at once. */
+/* The window stays quiet while it isn't seen and while a game runs (Apex or another one: it shares the graphics
+   card with the game): no polling at all when hidden (tray) or minimized, every 10 s during a game unless the player
+   is using the window, every 2 s otherwise. Shown again = refreshed at once. */
+function gaming() { return !!(S && (S.apex || S.game)); }
 const POLL_MS = 2000, POLL_APEX_MS = 10000, ACTIVE_MS = 30000;
 let pollTimer = null, polling = false, lastInput = 0;
 ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, () => {
   const idle = Date.now() - lastInput > ACTIVE_MS; lastInput = Date.now();
-  if (idle && S && S.apex && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
+  if (idle && gaming() && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
 }, {capture: true, passive: true}));
 function pollDelay() { if (S && S.updateState && S.updateState.step !== 'failed') return 1000;   // the Updating screen moves
-  return S && S.apex && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
+  return gaming() && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
 function schedulePoll(ms) {
   clearTimeout(pollTimer); pollTimer = null;
   if (document.hidden || polling) return;                             // hidden: nothing runs until it's shown
@@ -195,7 +196,7 @@ function route() {
 window.addEventListener('hashchange', route);
 
 /* ------------------------------------------------------------------ home */
-function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub, s.accountAsk]); }
+function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub, s.game, s.accountAsk]); }
 
 /* First-run setup: the steps a new player needs, in order, each one click (or one paste). Shown on Home until the
    needed ones are done (name, auto-record, team hub or Google), or until hidden. Auto-record comes second: its
@@ -349,7 +350,7 @@ function renderHome(prev, force) {
   if (!r) { title = 'Scanner'; sub = t('Auto-record isn\'t available in this build. You can still add and scan recordings.'); }
   else if (r.recording) { state = 'rec'; title = t('Recording Apex'); sub = t('Recording stops when you close Apex. Then the scan starts (you can skip it).'); }
   else if (r.scanning || S.scans.now) { state = 'busy'; title = t('Scanning'); sub = t('{what} · it pauses by itself if you start Apex.', {what: S.scans.now ? S.scans.now : t('Your last session')}); }
-  else if (r.enabled) { state = 'on'; title = t('Ready'); sub = r.status === 'Waiting for Apex' ? t('Waiting for Apex. Recording starts by itself when the game opens.') : tx(r.status); }
+  else if (r.enabled) { state = 'on'; title = t('Ready'); sub = S.game ? gamePausedLine() : r.status === 'Waiting for Apex' ? t('Waiting for Apex. Recording starts by itself when the game opens.') : tx(r.status); }
   const used = r ? r.used : 0, max = r ? r.settings.max_gb * 1e9 : 1, pct = Math.min(100, used / max * 100);
   const recent = LIB.slice(0, 4);
   const setup = setupHTML();
@@ -814,6 +815,7 @@ async function renderReview(id) {
             <div class="lane games" id="laneG"><span class="lane-label">${t('Games')}</span></div>
             <div class="lane" id="laneE"><span class="lane-label">${t('Start · jump · landing · rings')}</span></div>
             <div class="lane" id="laneF"><span class="lane-label">${t('Kill feed')}</span></div>
+            ${shieldRuns(d).length ? '<div class="lane shield" id="laneH"><span class="lane-label">' + t('Your shield · health') + '</span></div>' : ''}
             <div class="lane sound" id="laneS"><span class="lane-label">${t('Sound')} · <span id="soundState">${t('analysing…')}</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">' + t('Your marks · muted sound') + '</span></div>' : ''}
             <div class="lane" id="laneN" hidden><span class="lane-label">${t('Coach notes')}</span></div>
@@ -1129,6 +1131,23 @@ const TOOLS = [['pen', t('Pen')], ['arrow', t('Arrow')], ['circle', t('Circle')]
 const isCoachKey = () => !!(RV && RV.notes && RV.notes.me && RV.notes.me.role === 'coach');
 const noteTitle = n => n.text ? n.text.split('\n')[0].slice(0, 80) : t('Drawing');
 
+/* 2D replay range of a note (hub 0.6 replayFrom / replayTo, the hub's /replay/?note=<id>): game time = seconds after
+   the jump of the game the note is in (the hub's rule: the last game started by then, 30 s of slack; jump as the hub
+   imports it: landing exitAtExact, else exitAt). The coach sets it as seconds before / after the note's moment. */
+function noteJump(at) {
+  let g = null;
+  ((RV && RV.d.games) || []).forEach(x => { if (typeof x.tStart === 'number' && x.tStart - 30 <= at) g = x; });
+  const L = (g && g.landing) || {}, j = L.exitAtExact || L.exitAt;
+  return typeof j === 'number' ? j : null;
+}
+function noteReplay(e) {      // fields to send: a range, null / null to clear one, or nothing
+  const r = e.replay;
+  if (r && r.on && e.jump != null) {
+    const a = Math.max(-60, Math.round((e.t - r.before - e.jump) * 10) / 10), b = Math.round((e.t + r.after - e.jump) * 10) / 10;
+    if (b > a) return {replayFrom: a, replayTo: Math.min(b, a + 1800)};
+  }
+  return r && r.had && e.jump != null ? {replayFrom: null, replayTo: null} : {};   // no jump here: the hub's range stays
+}
 async function loadNotes(id, player) {
   clearTimeout(loadNotes.h);
   let r;
@@ -1162,6 +1181,7 @@ function drawNotes(body) {
     const mine = !n.from, seen = n.seenBy ? Object.keys(n.seenBy) : null;
     const sub = [n.from ? t('From {player}\'s recording', {player: esc(n.from.player)}) : (n.scope === 'squad' ? t('Squad') : (coach ? t('This recording') : '')),
       n.drawings && n.drawings.length ? t('drawing') : '', `${Math.round(n.dur)} s`,
+      n.replayFrom != null ? t('2D replay {from}–{to} after the jump', {from: fmtT(Math.max(0, n.replayFrom)), to: fmtT(Math.max(0, n.replayTo))}) : '',
       coach && seen ? (seen.length ? t('Seen by {names}', {names: esc(seen.join(', '))}) : t('Not seen yet')) : ''].filter(Boolean).join(' · ');
     return `<div class="ev note ${RV.ed && RV.ed.id === n.id ? 'editing' : ''}" data-t="${n.t}" data-id="${esc(n.id)}"><time>${fmtT(n.t)}</time><i style="background:${(n.drawings && n.drawings[0] && n.drawings[0].color) || '#ffd60a'}"></i>
       <span><b>${esc(n.text || t('Drawing'))}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">${t('Edit')}</button><button class="btn small danger" data-a="del">${t('Delete')}</button></span>` : ''}${repliesHTML(n, r, coach)}</span></div>`;
@@ -1329,6 +1349,11 @@ function openEditor(n) {
   RV.ed = {id: n ? n.id : null, version: n ? n.version : null, t: n ? n.t : Math.round(v.currentTime * 100) / 100,
            dur: n ? n.dur : 5, text: n ? n.text : '', scope: n ? n.scope : 'recording',
            drawings: n ? JSON.parse(JSON.stringify(n.drawings || [])) : [], tool: last.tool, color: last.color, cur: null};
+  RV.ed.jump = noteJump(RV.ed.t);
+  const had = n && n.replayFrom != null && RV.ed.jump != null;
+  RV.ed.replay = {on: had, had: !!(n && n.replayFrom != null),
+                  before: had ? Math.max(0, Math.round(RV.ed.t - RV.ed.jump - n.replayFrom)) : 10,
+                  after: had ? Math.max(1, Math.round(n.replayTo + RV.ed.jump - RV.ed.t)) : 20};
   $('#player').classList.add('drawing');
   $('#cnote').hidden = true;
   drawEditor(); fitInk(); drawSide();
@@ -1352,6 +1377,8 @@ function drawEditor() {
     <textarea id="edText" rows="2" maxlength="2000" placeholder="${t('Note for the player (optional with a drawing)')}">${esc(e.text)}</textarea>
     <div class="row" style="gap:10px">
       <div class="seg" id="edScope"><button data-s="recording" class="${e.scope === 'recording' ? 'on' : ''}">${t('This recording')}</button><button data-s="squad" class="${e.scope === 'squad' ? 'on' : ''}">${t('Squad')}</button></div>
+      ${e.jump != null ? `<label class="row" style="gap:6px"><input type="checkbox" id="edRp" ${e.replay.on ? 'checked' : ''}> ${t('2D replay on the hub')}</label>
+      <label class="row" style="gap:6px">${t('from')} <input type="number" id="edRpB" min="0" max="900" step="1" value="${e.replay.before}" ${e.replay.on ? '' : 'disabled'} style="width:64px;padding:5px 8px"> ${t('s before to')} <input type="number" id="edRpA" min="1" max="900" step="1" value="${e.replay.after}" ${e.replay.on ? '' : 'disabled'} style="width:64px;padding:5px 8px"> ${t('s after')}</label>` : ''}
       <label class="row" style="gap:6px">${t('Shows for')} <input type="number" id="edDur" min="1" max="120" step="1" value="${Math.round(e.dur)}" style="width:70px;padding:5px 8px"> s</label>
       <span style="flex:1"></span>
       <button class="btn small ghost" id="edCancel">${t('Cancel')}</button><button class="btn small brand" id="edSave">${t('Save')}</button></div>
@@ -1362,6 +1389,11 @@ function drawEditor() {
   $$('#edScope button', bar).forEach(b => b.onclick = () => { e.scope = b.dataset.s; drawEditor(); });
   $('#edText', bar).oninput = x => e.text = x.target.value;
   $('#edDur', bar).oninput = x => e.dur = Math.max(1, Math.min(120, +x.target.value || 5));
+  if ($('#edRp', bar)) {
+    $('#edRp', bar).onchange = x => { e.replay.on = x.target.checked; drawEditor(); };
+    $('#edRpB', bar).oninput = x => e.replay.before = Math.max(0, Math.min(900, Math.round(+x.target.value || 0)));
+    $('#edRpA', bar).oninput = x => e.replay.after = Math.max(1, Math.min(900, Math.round(+x.target.value || 1)));
+  }
   $('#edUndo', bar).onclick = inkUndo;
   $('#edClear', bar).onclick = () => { e.drawings = []; paintInk(); };
   $('#edCancel', bar).onclick = closeEditor;
@@ -1373,7 +1405,7 @@ async function saveNote() {
   const btn = $('#edSave'); btn.disabled = true;
   try {
     const r = await api('/api/notes/save', {id: RV.d.id, player: RV.notes.player,
-      note: {id: e.id, version: e.version, t: e.t, dur: e.dur, text: e.text.trim(), scope: e.scope, drawings: e.drawings.map(({kind, color, pts}) => ({kind, color, pts}))}});
+      note: {id: e.id, version: e.version, t: e.t, dur: e.dur, text: e.text.trim(), scope: e.scope, drawings: e.drawings.map(({kind, color, pts}) => ({kind, color, pts})), ...noteReplay(e)}});
     closeEditor(); setNotes(r); toast(t('Note saved. Your players see it in their review.'));
   } catch (x) { btn.disabled = false; toast(x.message, true); }
 }
@@ -1396,7 +1428,48 @@ async function loadLevels(id) {
   RV.ev.sort((a, b) => a.t - b.t);
   drawSound(); drawSide();
 }
+/* The player's own shield and health over each game (scanner pcs_bars `shieldTimeline.self`: [t, tier, shield,
+   health] kept when it changed, [t, 'knocked']): a thin strip, shield on top in the armour's colour (out of 125, the
+   most a shield holds), health below (out of 100), dark red while knocked. A value holds until the next row, the
+   player's death or the game's end. Drawn with the sound lane (same redraws: resize, theatre, video length known). */
+const TIERC = {white: '#c6c4c8', blue: '#288cf0', purple: '#af2deb', red: '#e8343a', gold: '#e8c040'};
+function shieldRuns(d) {
+  const out = [];
+  ((d && d.games) || []).forEach(g => {
+    const rows = ((g.shieldTimeline || {}).self || []).filter(r => Array.isArray(r) && typeof r[0] === 'number');
+    const end = typeof g.tEndGame === 'number' ? g.tEndGame : null, deaths = (g.ownDeaths || []).filter(x => typeof x === 'number');
+    rows.forEach((r, i) => {
+      let t1 = i + 1 < rows.length ? rows[i + 1][0] : (end != null ? end : r[0]);
+      const dead = deaths.find(x => x > r[0] && x < t1); if (dead != null) t1 = dead;
+      if (t1 > r[0]) out.push(r[1] === 'knocked' ? {t0: r[0], t1, knocked: true} : {t0: r[0], t1, tier: r[1], shield: +r[2] || 0, health: +r[3] || 0});
+    });
+  });
+  return out;
+}
+function drawShield() {
+  const lane = $('#laneH'); if (!lane || !RV) return;
+  const runs = shieldRuns(RV.d), D = dur(), w = lane.clientWidth, h = lane.clientHeight;
+  $$('canvas', lane).forEach(x => x.remove());
+  if (!w || !h || !D) return;
+  const cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2; cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+  const c = cv.getContext('2d'), H = cv.height, half = H / 2, X = s => s / D * cv.width;
+  runs.forEach(r => {
+    const x0 = X(r.t0), wd = Math.max(1, X(r.t1) - x0);
+    if (r.knocked) { c.fillStyle = 'rgba(170,40,40,.75)'; c.fillRect(x0, 0, wd, H); return; }
+    const s = Math.min(1, r.shield / 125) * (half - 1), hp = Math.min(1, r.health / 100) * (half - 1);
+    c.fillStyle = TIERC[r.tier] || '#8a877f'; c.fillRect(x0, half - 1 - s, wd, s);
+    c.fillStyle = 'rgba(232,227,218,.85)'; c.fillRect(x0, H - hp, wd, hp);
+  });
+  lane.appendChild(cv);
+  lane.onmousemove = e => {            // tooltip: the value at the pointer
+    const b = lane.getBoundingClientRect(), at = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)) * D;
+    const r = runs.find(x => x.t0 <= at && at < x.t1);
+    lane.title = !r ? '' : r.knocked ? `${fmtT(at)} · ${t('knocked')}` :
+      `${fmtT(at)} · ${t('shield {shield} ({tier}) · health {health}', {shield: r.shield, tier: ({white: t('white'), blue: t('blue'), purple: t('purple'), red: t('red'), gold: t('gold')})[r.tier] || '?', health: r.health})}`;
+  };
+}
 function drawSound() {
+  drawShield();
   const lane = $('#laneS'), lv = RV && RV.levels; if (!lane || !lv) return;
   const D = dur(), w = lane.clientWidth, h = lane.clientHeight;
   $$('canvas, .fight, .mk.call', lane).forEach(x => x.remove());
@@ -1628,6 +1701,15 @@ function renderSettings() {
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, t('Scan automatically'), t('Starts after a countdown unless you press Skip'))}</div>
         <label class="field"><span>${t('Countdown (seconds)')}</span><input id="f-scan_delay_s" type="number" min="5" max="600" value="${s.scan_delay_s}"></label>
       </div></section>
+    <section class="card section"><h2>${t('Games')}</h2>
+      ${switchHTML('f-game_pause', s.game_pause !== false, t('Pause heavy work while any game runs'), t('Scans, audio tracks, transcripts, clips, downloads and uploads wait while you play, as they do for Apex. Only Apex is recorded.'))}
+      <p class="muted" id="gamesNow" style="margin:4px 0 0">${S.game ? esc(gamePausedLine()) : ''}</p>
+      <h3>${t('Games found on this PC')}</h3>
+      <div id="gamesList" class="gamelist"><span class="muted">${t('Looking…')}</span></div>
+      <div class="row" style="margin-top:8px"><input id="g-add" type="text" placeholder="${t('Program name, like Game.exe')}" spellcheck="false" style="width:240px"><button class="btn small" id="g-add-btn">${t('Add')}</button></div>
+      <small class="muted">${t('Add a game that isn\'t listed by its program name (Task Manager → Details). Remove = never counted as a game.')}</small>
+      ${switchHTML('f-game_fullscreen', !!s.game_fullscreen, t('Also count any full-screen program'), t('Off by default: a full-screen video would count too. Browsers and video players are never counted.'))}
+    </section>
     <section class="card section"><h2>${t('Highlights')}</h2>
       <p class="muted" style="margin:0 0 10px">${t('Key plays the scan finds for clips: your own knocks and kills close together. Shown in the review player with a star.')}</p>
       <div class="form">
@@ -1652,6 +1734,7 @@ function renderSettings() {
   wireHotkeys();
   wireHubKey();
   wireHubBackup();
+  wireGames(s);
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast(t('Your browser opens: sign in and pick the team channel.')); };
   settingsBase = settingsSnap();
   // the microphone list arrives later: it joins the starting point unless something was changed meanwhile
@@ -1713,9 +1796,10 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
+    if (gamesEdit) { body.game_exes = gamesEdit.exes.slice(); body.game_ignore = gamesEdit.ignore.slice(); }
     const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }
   }
   return body;
@@ -1724,6 +1808,49 @@ async function saveSettings() {
   const body = settingsBody();
   try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast(t('Settings saved.')); if (page === 'settings') renderSettings(); renderTop(); return true; }
   catch (e) { toast(t('Not saved: {why}', {why: tx(e.message)}), true); return false; }
+}
+
+/* ------------------------------------------------------------------ Settings → Games (heavy work waits during any game) */
+let gamesEdit = null;                    // {exes, ignore, info}: the lists as edited, saved with Save changes
+function gamePausedLine() { return t('Paused while a game runs ({game})', {game: S.game}); }
+function gamesListHTML() {
+  const g = gamesEdit, info = g.info || {games: [], builtIn: []};
+  const rows = info.games.filter(x => x.source !== 'yours' && !g.ignore.includes(x.exe))
+    .concat(g.exes.map(e => { const k = info.games.find(x => x.exe === e); return {exe: e, name: k ? k.name : e.replace(/\.exe$/i, ''), running: !!(k && k.running), source: 'yours'}; }))
+    .sort((a, b) => (a.source !== 'yours') - (b.source !== 'yours') || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  const src = {yours: t('Added by you'), 'built-in': t('Built in'), windows: t('Found by Windows')};
+  const list = rows.length ? rows.map(x => `<div class="gamerow"><span><b>${esc(x.name)}</b> <span class="faint mono">${esc(x.exe)}</span></span>
+      <span class="row">${x.running ? '<span class="pill info">' + t('Running') + '</span>' : ''}<span class="pill">${src[x.source] || ''}</span><button class="btn small ghost" data-g-remove="${esc(x.exe)}">${t('Remove')}</button></span></div>`).join('')
+    : `<span class="muted">${t('None found yet.')}</span>`;
+  const ign = g.ignore.length ? `<p class="muted" style="margin:8px 0 0">${t('Never counted:')} ${g.ignore.map(e => `<span class="chip">${esc(e)}</span> <button class="btn small ghost" data-g-back="${esc(e)}">${t('Add back')}</button>`).join(' ')}</p>` : '';
+  const built = info.builtIn && info.builtIn.length ? `<p class="faint" style="margin:8px 0 0">${t('Always counted when they run:')} ${esc(info.builtIn.join(', '))}</p>` : '';
+  return list + ign + built;
+}
+function drawGames() {
+  const box = $('#gamesList'); if (!box || !gamesEdit) return;
+  box.innerHTML = gamesListHTML();
+  $$('[data-g-remove]', box).forEach(b => b.onclick = () => {
+    const e = b.dataset.gRemove;
+    if (gamesEdit.exes.includes(e)) gamesEdit.exes = gamesEdit.exes.filter(x => x !== e);
+    else if (!gamesEdit.ignore.includes(e)) gamesEdit.ignore.push(e);
+    drawGames(); syncDirty();
+  });
+  $$('[data-g-back]', box).forEach(b => b.onclick = () => { gamesEdit.ignore = gamesEdit.ignore.filter(x => x !== b.dataset.gBack); drawGames(); syncDirty(); });
+}
+function wireGames(s) {
+  if (!$('#gamesList')) { gamesEdit = null; return; }
+  gamesEdit = {exes: (s.game_exes || []).slice(), ignore: (s.game_ignore || []).slice(), info: null};
+  const add = () => {
+    const el = $('#g-add'), v = el.value.trim().replace(/^.*[\\/]/, '').toLowerCase();
+    if (!/^[a-z0-9][a-z0-9 ._()+\-!]{0,79}\.exe$/.test(v) || /^r5apex/.test(v)) { toast(t('Type the game\'s program name, like Game.exe'), true); return; }
+    gamesEdit.ignore = gamesEdit.ignore.filter(x => x !== v);
+    if (!gamesEdit.exes.includes(v)) gamesEdit.exes.push(v);
+    el.value = ''; drawGames(); syncDirty();
+  };
+  $('#g-add-btn').onclick = add;
+  $('#g-add').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+  api('/api/games').then(info => { if (gamesEdit) { gamesEdit.info = info; drawGames(); } })
+    .catch(() => { const box = $('#gamesList'); if (box) box.innerHTML = '<span class="muted">' + t('Couldn\'t read the list of games.') + '</span>'; });
 }
 
 /* ------------------------------------------------------------------ hub backup copy (Settings, coach's hub key only) */

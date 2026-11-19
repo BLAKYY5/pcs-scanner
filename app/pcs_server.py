@@ -43,7 +43,8 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
               "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h",
-              "min_record_min", "hl_chain_s", "hl_multi_min", "hl_double_s")
+              "min_record_min", "hl_chain_s", "hl_multi_min", "hl_double_s",
+              "game_pause", "game_fullscreen", "game_exes", "game_ignore")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 MAX_BODY = 4 << 20                  # largest request body the page may send (bytes)
 
@@ -162,6 +163,7 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "ringCircles", "respawns",   # scanner PR #52: respawns [{t, who: teammate | self, hue, deadSince, how}], shown like kills
                "ownDeaths",                 # the recording player's deaths [t]: dead time and lives in the game bar
                "ownKnocks",   # own knocks [{t, end, reads, outcome}], shown like respawns
+               "shieldTimeline",   # pcs_bars: own shield / health [t, tier, shield, health]: a thin lane in review
                "carePackages", "strongholds",
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
                "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
@@ -393,14 +395,17 @@ class Backend:
         return False
 
     def update_blocked(self) -> str | None:
-        """Never restart in the middle of a game, a recording, a scan or an upload."""
+        """Never restart in the middle of a game (Apex, or any other game while "Pause heavy work while any game
+        runs" is on: coach, 20 Nov 2026), a recording, a scan or an upload."""
         a = self.auto
         try:
-            from pcs_recorder.core import apex_running
-            if apex_running():
-                return "Apex is running. Update after your games."
+            g = self._game_running()
         except Exception:
-            pass
+            g = ""
+        if g == "Apex":
+            return "Apex is running. Update after your games."
+        if g:
+            return f"{g} is running. Update when you're done playing."
         if a and a.rec.current is not None:
             return "A recording is running. Update after your games."
         if (a and a.rec.scan_proc is not None) or self.scan_now:
@@ -837,32 +842,34 @@ class Backend:
         return n
 
     def _busy_reason(self) -> str | None:
-        """Manual scans wait while Apex runs or the recorder is busy, so a game never shares the PC with a scan."""
+        """Manual scans wait while a game runs (Apex or any other) or the recorder is busy, so a game never shares
+        the PC with a scan."""
         a = self.auto
         if a and (a.rec.current is not None or a.rec.scan_proc is not None):
             return "the auto-recorder is busy"
         try:
-            from pcs_recorder.core import apex_running
-            if apex_running():
-                return "Apex is running"
+            g = self._game_running()
+            if g:
+                return f"{g} is running"
         except Exception:
             pass
         return None
 
     def _run_scan(self, proc, every_s: float = 3) -> int | None:
-        """Wait for a scan; None when Apex started meanwhile: the scan is then stopped (not kept paused in memory
-        during the game) and the scanner goes on from its finished chunks next time."""
-        from pcs_recorder.core import apex_running, stop_tree
+        """Wait for a scan; None when a game (Apex or any other) started meanwhile: the scan is then stopped (not
+        kept paused in memory during the game) and the scanner goes on from its finished chunks next time."""
+        from pcs_recorder.core import stop_tree
         while True:
             try:
                 return proc.wait(timeout=every_s)
             except subprocess.TimeoutExpired:
                 pass
             try:
-                apex = apex_running()
+                game = self._game_running()
             except Exception:
-                apex = False
-            if apex:
+                game = ""
+            if game:
+                self._scan_held_by = game
                 stop_tree(proc)
                 return None
 
@@ -890,11 +897,15 @@ class Backend:
                     self.scan_now, self.scan_started = p, time.time()
                 self.say(f"Scanning {Path(p).name}…")
                 code = self._run_scan(scan_process(p, core.OUT))
-                if code is None:                         # Apex started: stopped, goes on from there when it closes
+                if code is None:                         # a game started: stopped, goes on from there when it closes
                     with self.scan_lock:
                         self.scan_queue.insert(0, p)
                         self.scan_now = None
-                    self.say(f"Scan of {Path(p).name} paused while Apex runs: it goes on when Apex closes.")
+                    g = getattr(self, "_scan_held_by", "") or "Apex"
+                    if g == "Apex":
+                        self.say(f"Scan of {Path(p).name} paused while Apex runs: it goes on when Apex closes.")
+                    else:
+                        self.say(f"Scan of {Path(p).name} paused while a game runs ({g}): it goes on when it closes.")
                     told = True
                     continue
                 if code != 0:
@@ -936,6 +947,30 @@ class Backend:
                 self._apex = False
         return bool(getattr(self, "_apex", False))
 
+    def game_now(self) -> str:
+        """A game other than Apex that holds the heavy work: what the recorder saw at its last look, else a look
+        (one shared process snapshot, games.DETECTOR) at most every 10 s."""
+        a = self.auto
+        if a and a.s.enabled and getattr(a, "thread", None):
+            return getattr(a.rec, "game", "") or ""
+        if time.time() - getattr(self, "_game_at", 0) > 10:
+            self._game_at = time.time()
+            try:
+                from pcs_recorder import games
+                if a:
+                    games.configure(a.s)
+                self._game = games.other_game()
+            except Exception:
+                self._game = ""
+        return getattr(self, "_game", "") or ""
+
+    def games_info(self) -> dict:
+        """Settings → Games: the switches, the games found on this PC, the player's own lists."""
+        from pcs_recorder import games
+        if self.auto:
+            games.configure(self.auto.s)
+        return games.DETECTOR.public()
+
     def state(self) -> dict:
         a = self.auto
         rec = None
@@ -956,6 +991,7 @@ class Backend:
         up = getattr(a.rec, "youtube", None) if a else None
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""), "language": i18n.language(),
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
+                "game": self.game_now(),                   # another game holds the heavy work: its name, else ""
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "accountAsk": self.google_ask(),            # Home: sign in again so the hub knows your Google account
                 "role": core.SETTINGS.get("role", ""), "coach": getattr(self, "coach", False),
@@ -1161,7 +1197,8 @@ class Backend:
         return self._hubbackup
 
     def _backup_busy(self) -> str | None:
-        """Never while Apex runs, a recording or a scan is going on, or review talk records."""
+        """Never while a game runs (Apex or any other), a recording or a scan is going on, or review talk records.
+        Also holds the teammates' tracks and the comms transcripts."""
         a = self.auto
         if a and (a.rec.current is not None or a.rec.scan_proc is not None):
             return "the auto-recorder is busy"
@@ -1171,8 +1208,9 @@ class Backend:
         if t is not None and getattr(t, "active", False):
             return "review talk is recording"
         try:
-            if self._apex_running():
-                return "Apex is running"
+            g = self._game_running()
+            if g:
+                return f"{g} is running"
         except Exception:
             pass
         return None
@@ -1197,6 +1235,16 @@ class Backend:
     def _apex_running() -> bool:
         from pcs_recorder.core import apex_running
         return apex_running()
+
+    def _game_running(self) -> str:
+        """Apex ("Apex") or another game's name while the player wants heavy work paused for any game; "" = none.
+        Apex through `_apex_running` (tests replace it)."""
+        if self._apex_running():
+            return "Apex"
+        from pcs_recorder import games
+        if self.auto:
+            games.configure(self.auto.s)
+        return games.other_game()
 
     @property
     def talk(self):
@@ -1409,6 +1457,8 @@ class Backend:
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st
             st.save(a.s)
+            from pcs_recorder import games
+            games.configure(a.s)                             # Settings → Games: at once, not at the next tick
             if new_key or remove_key:
                 hub.set_key(new_key)
                 a.rec.next_upload = 0                        # results waiting for the hub: try with the new key
@@ -1485,9 +1535,9 @@ class Backend:
         if a and a.rec.current is not None:
             return "a game is being recorded"
         try:
-            from pcs_recorder.core import apex_running
-            if apex_running():
-                return "Apex is running. Close Apex to make a clip"
+            g = self._game_running()
+            if g:
+                return f"{g} is running. Close {g} to make a clip"
         except Exception:
             pass
         return None
@@ -1593,11 +1643,10 @@ class Backend:
 
     def minimaps_tick(self) -> int:
         """The hub's map pictures in the data folder, so scans can read the player's position from the HUD minimap
-        (pcs_minimap). Not while Apex runs; a picture already here is not downloaded again."""
+        (pcs_minimap). Not while a game runs; a picture already here is not downloaded again."""
         if not (self.auto and self.auto.s.hub_url):
             return 0
-        from pcs_recorder.core import apex_running
-        if apex_running():
+        if self._game_running():
             return 0
         from pcs_recorder import minimaps
         return minimaps.prefetch(self.auto.s.hub_url)
@@ -1831,6 +1880,8 @@ class Server:
                         return self._json(snap)
                     if path == "/api/clips/state":
                         return self._json(b.clipper.state())
+                    if path == "/api/games":                     # Settings → Games
+                        return self._json(b.games_info())
                     if path == "/api/watch/talk":
                         return self._json(b.talk_state())
                     if path.startswith("/api/library/") and path.endswith("/extras"):
