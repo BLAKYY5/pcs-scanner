@@ -294,11 +294,56 @@ def resolve(mp: str | None, text: str | None) -> str | None:
     return None
 
 
-def app_poi_names(hub_url: str = "", fetch=None) -> dict:
-    """{"names": {poi id: name}, "lang": "en"} for the app's page. POI names are game words: they stay as the game
-    writes them in English in every app language (coach's rule, 19 Nov 2026: "keep any game related terms in
-    English"), so the team hub's FR / KO names table is not asked here (the hub's Loot Book has its own switch)."""
-    return {"names": {pid: name for ps in pois().values() for pid, name in ps.items()}, "lang": "en"}
+CALLOUTS_TTL = 1800          # s between two looks at the team hub's POI callouts
+CALLOUTS_RETRY = 600         # s after a failed look (no hub, older hub, network)
+_CALLOUTS: dict = {"at": float("-inf"), "for": None, "map": {}}
+
+
+def hub_callouts(hub_url: str, fetch=None, now=None, ask: bool = True) -> dict:
+    """{poi id: callout} from the team hub's Loot Book POIs (`GET /api/db/pois`, the player's key): the team's own
+    short name for a place, shown on hover after the game's name (coach's decision 76, 20 Nov 2026). Only a non-empty
+    text `callout` counts; a hub without the field, out of reach or no hub = {} (nothing shown). Asked at most every
+    CALLOUTS_TTL s; ask=False (a game runs) = the last answer, no request. The callouts stay in memory: never written
+    to the app's files or the public repo."""
+    import time
+    now = time.time() if now is None else now
+    c = _CALLOUTS
+    if not hub_url:
+        return {}
+    if c["for"] == hub_url and (not ask or now - c["at"] < (CALLOUTS_TTL if c["map"] else CALLOUTS_RETRY)):
+        return dict(c["map"])
+    if not ask:
+        return {}
+    if fetch is None:
+        from . import hub
+        if not hub.get_key():
+            return {}
+        fetch = lambda url, path: hub.get_json(url, path, timeout=6)
+    out = {}
+    try:
+        docs = fetch(hub_url, "/api/db/pois")
+        for d in docs if isinstance(docs, list) else []:
+            if not isinstance(d, dict):
+                continue
+            data = d["data"] if isinstance(d.get("data"), dict) else d
+            pid = d.get("id") or data.get("id")
+            co = data.get("callout")
+            if isinstance(pid, str) and isinstance(co, str) and co.strip():
+                out[pid] = co.strip()[:40]
+    except Exception:
+        out = {}
+    c.update({"at": now, "for": hub_url, "map": out})
+    return dict(out)
+
+
+def app_poi_names(hub_url: str = "", fetch=None, ask: bool = True) -> dict:
+    """{"names": {poi id: name}, "callouts": {poi id: callout}, "lang": "en"} for the app's page. POI names are game
+    words: they stay as the game writes them in English in every app language (coach's rule, 19 Nov 2026: "keep any
+    game related terms in English"), so the team hub's FR / KO names table is not asked here (the hub's Loot Book has
+    its own switch). The main name is the game's (ALGS) name; the team's callout, when the hub has one, is only shown
+    on hover as "Name (callout)" (decision 76)."""
+    return {"names": {pid: name for ps in pois().values() for pid, name in ps.items()},
+            "callouts": hub_callouts(hub_url, fetch, ask=ask), "lang": "en"}
 
 
 def poi_label(mp: str | None, poi_id: str | None) -> str:

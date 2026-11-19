@@ -1096,9 +1096,14 @@ class Backend:
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
 
     def poi_names(self) -> dict:
-        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words)."""
+        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words), and
+        the team hub's callouts for the hover text (decision 76; the hub is not asked while a game runs)."""
         from pcs_recorder import eec
-        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "")
+        try:
+            calm = not self._game_running()
+        except Exception:
+            calm = False
+        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "", ask=calm)
 
     def squad_paths(self, q: dict) -> dict:
         """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
