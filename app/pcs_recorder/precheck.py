@@ -238,13 +238,13 @@ def disk_item(s, usage=shutil.disk_usage) -> dict:
 
 
 def apps_item(procs: list[tuple[str, str]], amd_replay: bool = False, gamebar_bg: bool = False) -> dict:
-    ours = str(obsmod.OBS_ROOT.resolve()).lower() if obsmod.OBS_ROOT else ""
+    ours = tuple({os.path.normcase(str(obsmod.OBS_ROOT)), os.path.normcase(os.path.realpath(obsmod.OBS_ROOT))})
     bad, maybe = [], []
     for name, exe in procs:
         n = (name or "").lower()
         if n in BLOCKERS and BLOCKERS[n] not in bad:
             bad.append(BLOCKERS[n])
-        elif n in MAYBE and not (ours and (exe or "").lower().startswith(ours)) and MAYBE[n] not in maybe:
+        elif n in MAYBE and not (exe and os.path.normcase(exe).startswith(ours)) and MAYBE[n] not in maybe:
             maybe.append(MAYBE[n])
     if amd_replay:
         maybe.append("AMD Instant Replay")
