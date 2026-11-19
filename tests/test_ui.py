@@ -840,7 +840,7 @@ def test_installer_finish_update_from_old_version():
         assert started[0][0] == ["--selftest", "out.txt"] and started[0][2] is True
     finally:
         pcs_setup.PAYLOAD, pcs_setup.LAUNCHER, pcs_install.app_root, pcs_install.run_app = saved
-    assert "installed 1.10.19" in Path(os.environ["LOCALAPPDATA"], "PCS Scanner", "update.log").read_text() or True
+    assert "installed 1.10.19" in Path(core.UPDATE_LOG).read_text()          # the test's data folder, not the PC's
 
 
 def test_update_relaunch_arguments():
