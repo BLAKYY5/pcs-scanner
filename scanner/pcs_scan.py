@@ -396,7 +396,7 @@ def keyframes(path, start=0.0, end=None):
     """Keyframes (about 1 per second) between start and end, as (time, RGB image). The images are read-only."""
     name, dec = pick_decoder(path)
     w, h = probe(path)
-    vf = 'showinfo' if (w, h) == (W, H) else f'scale={W}:{H},showinfo'
+    vf = HUD.sw_format(path, dec) + ('showinfo' if (w, h) == (W, H) else f'scale={W}:{H},showinfo')
     cmd = ['ffmpeg', '-hide_banner', '-nostats', '-v', 'info'] + dec + ['-skip_frame', 'nokey', '-copyts'] + \
           (['-ss', f'{start:.2f}'] if start > 0 else []) + \
           ['-i', path, '-fps_mode', 'passthrough', '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
@@ -762,6 +762,20 @@ def mode_seen(g, R, emblem, starts, gi):
     out['from'] = sorted(named)
     return out
 
+def change_reads(own, key, t0, t1):
+    """The own stats reads of one number inside [t0, t1) as change points: [[t, value], ...] with a read each time the
+    value differs from the read before, plus the last read (so the list ends where the reading ended). Small enough to
+    keep in the scan (`games[].own.damageReads`)."""
+    R = [(t, o[key]) for t, o in own or [] if t0 <= t < t1 and isinstance(o, dict) and o.get(key) is not None]
+    out = []
+    for t, v in R:
+        if not out or out[-1][1] != v:
+            out.append([round(t, 2), v])
+    if R and out[-1][0] != round(R[-1][0], 2):
+        out.append([round(R[-1][0], 2), R[-1][1]])
+    return out
+
+
 def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=None, emblem=None):
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
@@ -805,6 +819,9 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                         if f[3]:    # the read before it: the rise happened in between (the sound check looks there)
                             prev = [t_ for t_, o in own if 'damage' in o and g['tStart'] <= t_ < f[1]]
                             if prev: st['damagePrevReadAt'] = round(prev[-1], 2)
+            dr = change_reads(own, 'damage', g['tStart'], hi)
+            if dr and st: st['damageReads'] = dr                           # the hub splits damage per life (decision 35);
+            #   never alone: no number confirmed = no games[].own, as before
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
@@ -931,7 +948,7 @@ def main():
                 f_rp = pcs_ranked.game_feed(rp_lines, gm['tStart'] - 60, t1)
                 if f_rp: gm['rpFeed'] = f_rp
             except Exception as e: perf['rankedError'] = f'{type(e).__name__}: {e}'[:200]
-        try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
+        try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud, own_stats=own_reads)    # fights, ring damage
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]

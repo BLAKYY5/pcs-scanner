@@ -36,7 +36,7 @@ UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's o
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
               "crash_reports", "server_scan",
-              "mic_audio", "mic_device", "send_mic", "share_tracks", "transcript_consent", "share_asked",
+              "mic_audio", "mic_device", "send_mic", "share_tracks", "share_clips", "transcript_consent", "share_asked",
               "transcript_asked",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
@@ -1096,9 +1096,14 @@ class Backend:
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
 
     def poi_names(self) -> dict:
-        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words)."""
+        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words), and
+        the team hub's callouts for the hover text (decision 76; the hub is not asked while a game runs)."""
         from pcs_recorder import eec
-        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "")
+        try:
+            calm = not self._game_running()
+        except Exception:
+            calm = False
+        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "", ask=calm)
 
     def squad_paths(self, q: dict) -> dict:
         """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
@@ -1382,6 +1387,8 @@ class Backend:
                 a.s.share_asked = True                       # answered in Settings: the setup step stops asking
             if "transcript_consent" in body and a.s.transcript_consent != share_before[1]:
                 a.s.transcript_asked = True
+                if share_before[1] and not a.s.transcript_consent:
+                    a.s.transcripts_withdraw = True          # the hub deletes his transcripts once told (decision 21)
             if link_url and not str(a.s.hub_url or "").strip():
                 a.s.hub_url = link_url                       # the sign-in link gives the address too
             from pcs_recorder import settings as st
@@ -1425,6 +1432,8 @@ class Backend:
             if on:
                 a.s.comms_consent = a.s.mic_audio = a.s.send_mic = True
         elif choice == "transcripts":
+            if a.s.transcript_consent and not on:
+                a.s.transcripts_withdraw = True
             a.s.transcript_asked, a.s.transcript_consent = True, on
         else:
             raise ValueError("unknown choice")
@@ -1435,7 +1444,8 @@ class Backend:
         """The player's mic sharing answer to the hub, in the background (never during a game: the next tick)."""
         if not (self.auto and self.auto.s.hub_url) or self._backup_busy():
             return
-        threading.Thread(target=self.teamtracks.sync_sharing, daemon=True, name="share-sync").start()
+        tt = self.teamtracks
+        threading.Thread(target=lambda: (tt.sync_sharing(), tt.sync_transcripts()), daemon=True, name="share-sync").start()
 
     @property
     def teamtracks(self):
@@ -1472,8 +1482,10 @@ class Backend:
         return None
 
     def _clip_team(self, path: str, ids: list[str]) -> tuple[list, list[str]]:
-        """The teammates' mic tracks asked for that may go into a clip: downloaded, and the hub says right now that
-        the teammate still shares it. ([(file, parts, player)], [what was left out and why])"""
+        """The teammates' mic tracks asked for that may go into a clip: downloaded, and the hub says right now that the
+        teammate still shares it AND allows their voice in teammates' clips (`share_clips`: a separate yes, off by
+        default; coach, 20 Nov 2026). No answer, or an older hub without the field = left out.
+        ([(file, parts, player)], [what was left out and why])"""
         ids = [str(i) for i in ids or [] if re.fullmatch(r"\d{1,10}", str(i))]
         if not ids:
             return [], []
@@ -1486,7 +1498,11 @@ class Backend:
         try:
             r = hub.request(self.auto.s.hub_url, "GET", "/api/team-tracks?recording=" + quote(Path(path).stem), timeout=8)
             hub._check(r)
-            still = {str(t.get("scan_id")) for g in r.json().get("games") or [] for t in g.get("tracks") or []}
+            still = {}
+            for g in r.json().get("games") or []:
+                for t in g.get("tracks") or []:
+                    sid = str(t.get("scan_id"))
+                    still[sid] = still.get(sid, False) or t.get("share_clips") is True
         except Exception as e:
             import logging
             logging.getLogger("clips").info("teammates' tracks left out, hub not asked: %s", e)
@@ -1494,10 +1510,14 @@ class Backend:
         out, left = [], []
         for i, n in zip(ids, names):
             f = self.teamtracks.file(path, i) if i in have else None
-            if f and i in still:
-                out.append((str(f), have[i]["parts"], have[i]["player"]))
+            if not f:
+                left.append(f"{n}: not downloaded")
+            elif i not in still:
+                left.append(f"{n}: not shared any more")
+            elif not still[i]:
+                left.append(f"{n}: they haven't allowed their voice in clips")
             else:
-                left.append(f"{n}: not shared any more" if f else f"{n}: not downloaded")
+                out.append((str(f), have[i]["parts"], have[i]["player"]))
         return out, left
 
     def make_clip(self, body: dict) -> dict:

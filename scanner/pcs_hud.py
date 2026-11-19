@@ -5,6 +5,24 @@ from PIL import Image
 
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 DEC = []   # decoder options chosen by the scanner (GPU when available)
+_SWFMT = {}
+
+def sw_format(path, dec=None):
+    """'format=<pix_fmt>,' to put first in the -vf chain when the GPU decodes, '' on the CPU.
+    GPU decoders hand their frames over as NV12 (P010 for 10 bit), the CPU decoder as yuv420p. The decoded values are
+    the same (AV1, HEVC and H.264 decoding is exact: 0 different YUV frames, 20 Nov 2026), but ffmpeg turns NV12 into
+    RGB by another route than yuv420p: 84 % of the RGB values differed, by up to 51. Repacking the GPU's frames into
+    the CPU decoder's format first (lossless) gives the CPU's RGB byte for byte, so a scan no longer depends on which
+    decoder (or which GPU) read the recording."""
+    dec = DEC if dec is None else dec
+    if '-hwaccel' not in dec: return ''
+    if path not in _SWFMT:
+        try:
+            fmt = subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=pix_fmt',
+                                           '-of', 'csv=p=0', path], creationflags=0x08000000 if os.name == 'nt' else 0).decode().strip()
+        except Exception: fmt = ''
+        _SWFMT[path] = fmt if re.fullmatch(r'[a-z0-9_]+', fmt or '') else 'yuv420p'
+    return f'format={_SWFMT[path]},'
 _F = json.load(open(os.path.join(HERE, 'pcs_fonts.json')))
 RING_T = {k: np.array(v) for k, v in _F['ring'].items()}
 DBG_T = {k: np.array(v) for k, v in _F['dbg'].items() if k != '.'}
@@ -278,7 +296,7 @@ def _corner(path, a, b, W=2560, H=1440, cw=420, ch=570):
         if c is None: return
         src, ss = c[0], max(0, a) - c[1]
     cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{ss:.3f}', '-i', src, '-t', f'{b - a:.3f}',
-           '-vf', (f'scale={W}:{H},crop={cw}:{round(ch * 0.75)}:0:0,scale={cw}:{ch}:flags=neighbor' if STRETCH else f'scale={W}:{H},crop={cw}:{ch}:0:0'),
+           '-vf', sw_format(src) + (f'scale={W}:{H},crop={cw}:{round(ch * 0.75)}:0:0,scale={cw}:{ch}:flags=neighbor' if STRETCH else f'scale={W}:{H},crop={cw}:{ch}:0:0'),
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     raw = subprocess.run(cmd, capture_output=True, timeout=180).stdout
     n = cw * ch * 3
