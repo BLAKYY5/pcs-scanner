@@ -1936,6 +1936,44 @@ def test_legend_select_starts_a_game():
                 assert cells(s[0], o[0]) > 150, (other_mode, cells(s[0], o[0]))
 
 
+def test_scrim_drop_screen_read_under_a_banner():
+    """The scrim drop screen shows the map's name at the top left (custom lobbies: "WORLD'S EDGE (SEASON 17)"), which
+    the loading-banner reader reads as a banner with unknown words. The drop screen must still be read there: from
+    1.10.8 to 1.10.14 a banner read ended the keyframe, every scrim lost its drop screen and its scrim mode."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_scan as SCAN
+
+    def word(img, y0, y1, seed, n):                                  # made-up block letters starting at x = 194
+        r = np.random.default_rng(seed); h = y1 - y0
+        for k in range(n):
+            x = 194 + k * (h + 8)
+            img[y0:y1, x:x + h] = 255
+            for _ in range(2):
+                yy, xx = int(r.integers(0, h - h // 3)), int(r.integers(h // 4, h - h // 3))
+                img[y0 + yy:y0 + yy + h // 3, x + xx:x + h] = 60
+    img = np.full((1440, 2560, 3), 60, np.uint8)
+    word(img, 138, 198, 1, 6); word(img, 273, 298, 2, 9)
+    assert HUD.Banner.read(img), "the test frame must read as a banner"
+    banner_only = img.copy()
+    img[200:1000, 1600:2400] = (90, 40, 40)                          # marks the frame as "drop screen" for the stub below
+    spots = [{"poi": f"we-{k}", "inside": True, "x": 10.0 + k, "y": 20.0, "kind": "enemy"} for k in range(20)]
+    real = SCAN.read_dropscreen
+    SCAN.read_dropscreen = lambda a, loose=False: ({"map": "WE", "err": 0.02, "spots": spots}
+                                                   if (a[600, 2000] == (90, 40, 40)).all() else None)
+    try:
+        frames = [(100.0 + k, img) for k in range(4)] + [(104.0 + k, banner_only) for k in range(3)]
+        events, samples, _ = SCAN.scan_frames(frames, quiet=True)
+    finally:
+        SCAN.read_dropscreen = real
+    kinds = [e["kind"] for e in events]
+    assert kinds == ["banner", "drop"] * 4 + ["banner"] * 3, kinds              # a banner alone stays a banner
+    games = SCAN.assemble(events); SCAN.timeline(games, samples)
+    assert len(games) == 1 and games[0]["drop"] and games[0]["map"] == "WE", games
+    assert games[0]["mode"] == "scrim" and games[0]["modeSeen"]["from"] == ["drop"], games[0].get("modeSeen")
+
+
 def test_mode_from_playlist_emblem():
     """The playlist emblem at the top right (pubs: red "unranked" emblem, Wildcard: teal) gives a game its mode when
     nothing else does (games[].modeSeen); signs that disagree, or another playlist's emblem, leave it unlabelled.

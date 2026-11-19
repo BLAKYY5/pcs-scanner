@@ -443,6 +443,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
         # The readers take the uint8 frame and make int16 only the small areas they compute on: converting the whole
         # 1440p frame cost about 6 ms each time, up to three times per keyframe (results are identical).
+        # A banner read does not end the keyframe: the scrim drop screen shows the map's name in the same place at the
+        # top left (custom lobbies, e.g. "WORLD'S EDGE (SEASON 17)"), read as a banner with unknown words. Skipping the
+        # drop reader there lost every scrim's drop screen, so no scrim mode (1.10.8 to 1.10.14; found on Oct 2026 scrims).
+        if bn: d = None
         for st in ([] if d else cands):
             HUD.LOOSE = st
             d = read_dropscreen(view_drop(img) if st else img, st)
@@ -463,6 +467,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     except Exception: ic = None
                     if ic and (ic['care'] or ic['strongholds']): perf.setdefault('_icons', []).append((round(t, 2), d['map'], ic))
                 break
+        if bn and not d: d = bn     # a loading banner only: as before (no HUD reads on it)
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
