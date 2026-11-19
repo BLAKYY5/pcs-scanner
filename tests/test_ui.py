@@ -1822,7 +1822,9 @@ def test_setup_card_page():
                                       "Share mic tracks with my team", "Comms transcripts", "Join the team hub")]
     assert order == sorted(order), order
     assert "/api/hub/join" in js and "/api/setup/choice" in js
-    assert "Only if your team agreed that comms are recorded" in setup and "Coming later" in setup
+    assert "Only if your team agreed that comms are recorded" in setup and "TRANSCRIPT_HINT" in setup
+    hint = js[js.index("const TRANSCRIPT_HINT"):js.index("function transcriptState")]
+    assert "own mic" in hint and "Coming later" not in js
     done = js[js.index("function setupDone"):js.index("function choiceHTML")]
     assert "choicesDone(st)" in done and "st.rec" not in done           # auto-record off is a valid answer
     b = pcs_server.Backend(_Auto(str(TMP / "setuprecs")))
@@ -4238,6 +4240,28 @@ def test_team_tracks_in_review_page():
     assert '"/teamtrack/"' in srv_py and 'it["teamAudio"]' in srv_py
     build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "pcs_recorder.teamtracks" in build
+
+
+def test_comms_in_review_page():
+    """The review player shows the player's own comms transcript: a lane under the timeline, a Comms tab with a word
+    filter, click = seek; the library item carries it; Settings says where it stands."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "laneC" in js and "function drawComms" in js and "seek(+el.dataset.t)" in js[js.index("function drawComms"):]
+    assert "transcriptState()" in js
+    srv_py = (Path(pcs_server.WEB).parent / "pcs_server.py").read_text(encoding="utf-8")
+    assert 'it["comms"] = comms.transcript_of' in srv_py and '"transcripts": self.comms.public()' in srv_py
+    build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms" in build and "pcs_transcribe" in build and "PCS-Transcripts.zip" in build
+    app_py = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms, pcs_transcribe" in app_py and "b.comms_tick()" in app_py
+    from pcs_recorder import comms
+    rec = TMP / "commsrev" / "Apex Legends_2026.11.19-21.00.mp4"
+    (rec.parent / (rec.stem + ".scan")).mkdir(parents=True, exist_ok=True)
+    comms.comms_path(rec).write_text(json.dumps({"kind": "comms", "speaker": "me", "language": "fr", "segments": [
+        {"start": 12.5, "end": 14, "text": "full", "speaker": "me"}, {"start": "bad", "text": "x"}]}), encoding="utf-8")
+    t = comms.transcript_of(rec)
+    assert t["segments"] == [{"start": 12.5, "end": 14, "text": "full", "speaker": "me"}] and t["language"] == "fr"
+    assert comms.transcript_of(rec.with_name("none.mp4")) is None
 
 
 # ------------------------------------------------------------------ public hub: uploads in parts, https, reachability

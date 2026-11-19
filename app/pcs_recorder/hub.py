@@ -756,6 +756,26 @@ def _test(url: str) -> dict:
     return {"ok": True, "name": name, "role": role, "text": f"Connected as {name} ({role})"}
 
 
+_features: dict[str, tuple[float, frozenset]] = {}
+
+
+def has_feature(url: str, name: str, max_age: float = 600.0) -> bool:
+    """The hub's /api/me lists `name` in its "features" (hub 0.7.1+: "comms"). Asked at most every 10 min per
+    address; no answer, an older hub or any error = False (the caller then keeps the file and tries later)."""
+    if not url:
+        return False
+    hit = _features.get(url)
+    if hit and time.time() - hit[0] < max_age:
+        return name in hit[1]
+    try:
+        r = request(url, "GET", "/api/me", timeout=5)
+        feats = frozenset(str(x) for x in (r.json().get("features") or [])) if r.ok else frozenset()
+    except Exception:
+        return False                                  # not cached: asked again next time
+    _features[url] = (time.time(), feats)
+    return name in feats
+
+
 def is_old(url: str) -> bool:
     """A hub from before keys (no /api/ping). Unknown or unreachable = False."""
     if S.old == url:

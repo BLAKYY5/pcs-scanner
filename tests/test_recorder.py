@@ -4680,5 +4680,242 @@ def test_scanner_speedups_give_the_same_numbers():
         assert R.read_cards(a) is not None
 
 
+# ---------------------------------------------------------------- comms transcripts (pcs_recorder/comms.py)
+
+def _comms_setup(name, mic=True, consent=True):
+    """A scanned recording with an events.json, settings with the given answers, and a Comms job on it."""
+    import json
+    from pcs_recorder import comms
+    d = TMP / name
+    d.mkdir(parents=True, exist_ok=True)
+    rec = d / "Apex Legends_2026.11.19-20.00.mp4"
+    rec.write_bytes(b"x" * 100)
+    rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"] if mic else ["game"]}))
+    (d / (rec.stem + ".scan")).mkdir(exist_ok=True)
+    s = settings.Settings()
+    s.player, s.comms_consent, s.mic_audio, s.transcript_consent, s.hub_url = "tester", True, True, consent, "http://hub"
+    idx = {"k1": retention.Entry(path=str(rec), started=time.time() - 600, status="uploaded")}
+    sent = []
+    job = comms.Comms(lambda: s, lambda: idx, lambda: None, lambda files: sent.append([Path(f).name for f in files]))
+    job.st = {"recs": {}}
+    return comms, job, s, idx, rec, sent
+
+
+FAKE_WORKER = r'''
+import json, sys, time
+a = sys.argv[1:]
+out = a[a.index("--out") + 1]
+if a[0].endswith("sleep.mp4"):
+    time.sleep(60)
+print(json.dumps({"done": 10, "total": 20}), flush=True)
+json.dump({"v": 1, "kind": "comms", "speaker": a[a.index("--speaker") + 1], "audioSeconds": 20, "seconds": 1,
+           "language": "fr", "segments": [{"start": 1.5, "end": 3.0, "text": "il est one shot", "speaker":
+           a[a.index("--speaker") + 1], "p": -0.2}]}, open(out, "w"))
+print(json.dumps({"finished": True}), flush=True)
+'''
+
+
+def _fake_worker(comms, sleep=False):
+    w = TMP / "fake_worker.py"
+    w.write_text(FAKE_WORKER)
+    comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
+    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None: TMP
+
+
+def test_comms_only_with_the_players_yes():
+    """No transcript without the yes (or without the team's comms consent / the mic), and only recordings with a mic
+    track; the transcript never goes to Drive with the results."""
+    comms, job, s, idx, rec, _ = _comms_setup("comms-consent", consent=False)
+    assert not comms.eligible(s) and job.tick() is False and not job.running
+    s.transcript_consent = True
+    assert comms.eligible(s)
+    s.comms_consent = False
+    assert not comms.eligible(s)
+    s.comms_consent, s.mic_audio = True, False
+    assert not comms.eligible(s)
+    s.mic_audio = True
+    assert job.todo() == [("k1", str(rec))]
+    assert comms.mic_stream(rec) == 2
+    idx["k1"].status = "recorded"                      # not scanned yet: waits
+    assert job.todo() == []
+    idx["k1"].status = "scanned"
+    idx["k1"].started = time.time() - 5 * 86400        # too old
+    assert job.todo() == []
+    # the transcript and its kept parts stay out of the scan's results (Drive, re-sends)
+    from pcs_recorder.core import result_files
+    out = rec.with_suffix(".scan")
+    (out / (rec.stem + ".scan.json")).write_text("{}")
+    (out / (rec.stem + ".comms.json")).write_text("{}")
+    (out / (rec.stem + ".comms.partial.json")).write_text("{}")
+    assert [p.name for p in result_files(out)] == [rec.stem + ".scan.json"]
+
+
+def test_comms_transcribes_and_sends_to_hub():
+    comms, job, s, idx, rec, sent = _comms_setup("comms-run")
+    _fake_worker(comms)
+    out = job.transcribe(str(rec))
+    assert out == comms.comms_path(rec) and out.is_file()
+    d = comms.transcript_of(rec)
+    assert d["speaker"] == "tester" and d["segments"][0]["text"] == "il est one shot" and d["segments"][0]["start"] == 1.5
+    r = job.st["recs"][rec.stem]
+    assert r["status"] == "done" and r["segments"] == 1 and r["sent"]
+    assert sent == [[rec.stem + ".comms.json"]]
+    assert job.todo() == []                             # done once
+    # no mic track: nothing to transcribe, never asked again
+    comms2, job2, *_ , rec2, sent2 = _comms_setup("comms-nomic", mic=False)
+    assert job2.transcribe(str(rec2)) is None and job2.st["recs"][rec2.stem]["status"] == "no_mic" and job2.todo() == []
+    # said no after it was made: not sent
+    comms3, job3, s3, idx3, rec3, sent3 = _comms_setup("comms-no-after")
+    _fake_worker(comms3)
+    s3.hub_url = ""
+    job3.transcribe(str(rec3))
+    assert sent3 == [] and job3.unsent() == []
+    s3.hub_url, s3.transcript_consent = "http://hub", False
+    assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
+
+
+def test_comms_not_sent_to_a_hub_without_comms():
+    """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
+    can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-old-hub")
+    _fake_worker(comms)
+    ok = [False]
+    job.hub_ok = lambda: ok[0]
+    job.transcribe(str(rec))
+    assert sent == [] and job.st["recs"][rec.stem]["sendNote"] == comms.HUB_TOO_OLD
+    assert job.unsent() == [comms.comms_path(rec)]
+    ok[0] = True
+    assert job._send(comms.comms_path(rec)) is True and sent == [[rec.stem + ".comms.json"]]
+
+
+def test_hub_has_feature():
+    from pcs_recorder import hub
+    calls = []
+
+    class R:
+        def __init__(self, ok, body): self.ok, self._b = ok, body
+        def json(self): return self._b
+    answers = {"http://new": R(True, {"features": ["comms"]}), "http://old": R(True, {"name": "x"}),
+               "http://down": None}
+
+    def fake(url, method, path, **kw):
+        calls.append(url)
+        if answers[url] is None:
+            raise hub.HubError("no answer", "network")
+        return answers[url]
+    real, hub.request = hub.request, fake
+    try:
+        hub._features.clear()
+        assert hub.has_feature("http://new", "comms") and hub.has_feature("http://new", "comms")
+        assert calls.count("http://new") == 1                      # cached
+        assert not hub.has_feature("http://old", "comms") and not hub.has_feature("http://down", "comms")
+        assert not hub.has_feature("", "comms")
+    finally:
+        hub.request = real
+        hub._features.clear()
+
+
+def test_comms_stops_when_apex_starts():
+    """Apex starting stops the transcriber within seconds; the stop is not counted as a failed try."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-apex")
+    slow = rec.with_name("sleep.mp4")
+    rec.rename(slow)
+    rec.with_suffix(".events.json").rename(slow.with_suffix(".events.json"))
+    _fake_worker(comms, sleep=True)
+    comms.BUSY_EVERY_S = 0.2
+    t0 = time.time()
+    job.busy = lambda: "Apex is running" if time.time() - t0 > 1 else None
+    try:
+        job.transcribe(str(slow))
+        raise AssertionError("not stopped")
+    except comms.Busy:
+        pass
+    finally:
+        comms.BUSY_EVERY_S = 3
+    assert time.time() - t0 < 20 and job.proc is None
+    assert job.st["recs"]["sleep"]["tries"] == 0 and not comms.comms_path(slow).exists()
+
+
+def test_comms_downloads_are_checked():
+    """Model and component: https only, size and SHA-256 must match the pinned values, zip paths stay inside."""
+    import hashlib
+    import io
+    import zipfile
+    import requests
+    from pcs_recorder import comms
+    dest = TMP / "dl" / "model.bin"
+    try:
+        comms.fetch("http://huggingface.co/x", dest, "0" * 64, 1)
+        raise AssertionError("http accepted")
+    except comms.Unavailable:
+        pass
+    try:
+        comms.fetch("https://example.com/x", dest, "0" * 64, 1)
+        raise AssertionError("other host accepted")
+    except comms.Unavailable:
+        pass
+    body = b"model bytes"
+
+    class R:
+        url, history = "https://cdn.example/x", []
+        def raise_for_status(self): pass
+        def iter_content(self, n): yield body
+    orig = requests.Session.get
+    requests.Session.get = lambda self, *a, **k: R()
+    try:
+        try:
+            comms.fetch("https://huggingface.co/x", dest, "0" * 64, len(body))
+            raise AssertionError("wrong SHA-256 accepted")
+        except comms.Unavailable:
+            pass
+        assert not dest.exists() and not dest.with_name("model.bin.part").exists()
+        comms.fetch("https://huggingface.co/x", dest, hashlib.sha256(body).hexdigest(), len(body))
+        assert dest.read_bytes() == body
+    finally:
+        requests.Session.get = orig
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.txt", "x")
+    try:
+        comms.safe_extract(zipfile.ZipFile(buf), TMP / "zx")
+        raise AssertionError("path outside accepted")
+    except comms.Unavailable:
+        pass
+    assert not (TMP / "evil.txt").exists()
+    # nothing published yet: says so, downloads nothing
+    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+        try:
+            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            raise AssertionError("no component, yet it ran")
+        except comms.Unavailable as e:
+            assert "isn't published" in str(e)
+    # the pinned model is the turbo model's five files
+    assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
+    assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_transcribe_worker_parts_and_clean_text():
+    """The worker cuts long tracks at a quiet moment, fixes Apex words and drops Whisper's filler lines."""
+    import numpy as np
+    import pcs_transcribe as T
+    rate = T.RATE
+    pcm = (np.random.default_rng(1).normal(0, 3000, rate * 1500)).astype(np.int16)
+    pcm[rate * 590:rate * 591] = 0                     # a quiet second inside the last 30 s of part 1
+    ps = T.parts(pcm)
+    assert ps[0][0] == 0 and ps[-1][1] == len(pcm) and all(a[1] == b[0] for a, b in zip(ps, ps[1:]))
+    assert rate * 590 <= ps[0][1] <= rate * 591, ps[0][1] / rate
+    assert len(T.parts(pcm[:rate * 200])) == 1
+    assert T.fix_text("  le  Watson est a Northpad ") == "le Wattson est a North Pad"
+    assert not T.keep_segment("Sous-titrage ST' 501", -0.2, 0.1, [])
+    assert not T.keep_segment("Merci d'avoir regardé cette vidéo", -0.2, 0.1, [])
+    assert not T.keep_segment("euh", -1.5, 0.9, [])
+    assert not T.keep_segment("full", -0.2, 0.1, ["full", "full"])
+    assert T.keep_segment("il est one shot", -0.3, 0.1, ["full"])
+    from pcs_recorder import comms
+    assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
+    assert not comms.is_comms_file("a.scan.json")
+
+
 if __name__ == "__main__":
     sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))
