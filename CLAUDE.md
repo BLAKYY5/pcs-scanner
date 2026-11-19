@@ -365,9 +365,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   lines, unknownLines} and `rp` {start, last, lastAt, reads, laterLines?} from the counter: two reads in a row, never
   lower, and a change only with a green line seen from 20 s before to 5 s after (a red 8 misread as 6, -48 -> -46,
   has none). `laterLines` = green lines after the counter's last read (the player was dead / spectating: the total
-  misses them). Check (truths by eye; dev 17 Nov, held-out 18 Nov 22:28, split before tuning): green numbers 127 / 127
-  and 46 / 46 right of the lines given a value (about half the green lines; the rest were seen once or faded); victim
-  tier right on every kill line checked (54 dev, 20 held); counter's last value right in 17 / 17 and 8 / 8 games.
+  misses them). Check (truths by eye; dev 17 Nov, held-out 18 Nov 22:28, split before tuning): every green number
+  given was right (126 / 126 dev, 44 / 44 held); held-out kill lines with RP: 18 of the 26 on screen reported, all 18
+  right (number and victim tier; the killer colour was not checked one by one), the other 8 counted as `unknown`
+  lines or seen once / faded; counter's last value right in 17 / 17 and 8 / 8 games.
   Tiers never seen in our recordings (rookie, bronze, silver, master, predator) are not read. ~1.5 ms per keyframe.
 - **Ring circles** (`pcs_ring.py`): on the unzoomed full map the area outside the current ring is red-tinted with a
   dark line on the ring; the next ring is a see-through white disc (everything under it moved towards white by one
