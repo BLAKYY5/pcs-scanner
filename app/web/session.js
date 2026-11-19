@@ -57,17 +57,23 @@ async function watchCard(box) {
   const games = l.role === 'coach' ? (l.games || []).map(g => `<div class="wt-row"><div><b>${esc(gameTitle(g))}</b>
       <span class="faint">${g.videos.length} of ${new Set(g.players).size} views on YouTube: ${esc([...new Set(g.videos)].join(', '))}</span></div>
       <button class="btn small" data-start="${esc(g.gameKey)}">Start session</button></div>`).join('') : '';
+  const plans = l.role === 'coach' ? (l.plans || []).filter(p => p.moments).slice(0, 8).map(p => `<div class="wt-row"><div><b>${esc(p.title)}</b>
+      <span class="faint">${p.moments} moment${p.moments === 1 ? '' : 's'} in ${p.games} game${p.games === 1 ? '' : 's'}</span></div>
+      <button class="btn small" data-plan="${esc(p.id)}">Start with plan</button></div>`).join('') : '';
   box.innerHTML = `<section class="card section wt-card"><h2>Watch together</h2>
     <p class="muted">${l.role === 'coach' ? 'Watch a game with your players: you control it, they see the same moment from every player\'s view, and what you draw.' : 'Your coach plays a game for the squad: you see what he shows and draws.'}</p>
     ${running ? `<h3>Running now</h3>${running}` : `<p class="faint">No session running${l.role === 'coach' ? '' : '. Your coach starts one'}.</p>`}
+    ${plans ? `<h3>Session plans</h3>${plans}` : ''}
     ${l.role === 'coach' ? (games ? `<h3>Games with YouTube videos</h3>${games}` : '<p class="faint">No game with a YouTube video yet. Videos show here once a player\'s scrim block is on YouTube.</p>') : ''}
+    ${l.role === 'coach' ? '<p class="faint">Plan the moments to show on the team hub: Coach → Session plans.</p>' : ''}
   </section>`;
   $$('[data-join]', box).forEach(b => b.onclick = () => joinSession(b.dataset.join, b));
   $$('[data-start]', box).forEach(b => b.onclick = () => startSession(b.dataset.start, b));
+  $$('[data-plan]', box).forEach(b => b.onclick = () => startSession('', b, b.dataset.plan));
 }
-async function startSession(gameKey, btn) {
+async function startSession(gameKey, btn, plan) {
   if (btn) btn.disabled = true;
-  try { WT.local = null; applySnap(await api('/api/watch/start', {gameKey})); location.hash = '#watch'; }
+  try { WT.local = null; applySnap(await api('/api/watch/start', plan ? {gameKey, plan} : {gameKey})); location.hash = '#watch'; }
   catch (e) { toast(e.message, true); }
   if (btn) btn.disabled = false;
 }
@@ -119,6 +125,7 @@ async function renderWatch() {
   $('#main').innerHTML = `<div class="wt" id="wt">
     <div class="pagehead"><div><h1 id="wtTitle">Watch together</h1><p id="wtSub" class="muted"></p></div>
       <div class="toolbar"><span id="wtConn" class="pill"></span><button class="btn small ghost" id="wtLeave">Leave</button><button class="btn small danger" id="wtEnd" hidden>End session</button></div></div>
+    <div class="wt-plan" id="wtPlan" hidden></div>
     <div class="wt-own" id="wtOwn" hidden></div>
     <div class="wt-stage" id="wtStage"><canvas class="wt-ink" id="wtInk"></canvas><div class="wt-dot" id="wtDot" hidden></div></div>
     <div class="card wt-bar" id="wtControls"></div>
@@ -149,6 +156,7 @@ window.addEventListener('keydown', e => {
   else if (coach && (e.ctrlKey || e.metaKey) && (k === 'z' || k === 'Z')) draw({op: 'undo'});
   else if (coach && (k === 'b' || k === 'B')) addBookmark();
   else if (!coach && (k === 'f' || k === 'F')) sendFlag();
+  else if (coach && planItems(st).length && /^[nNpP]$/.test(k)) planStep(/^[nN]$/.test(k) ? 1 : -1);
   else if (!coach && k === 'Escape' && WT.local) backToCoach();
   else done = false;
   if (done) e.preventDefault();
@@ -180,6 +188,8 @@ function applySnap(s) {
     // drawings that left the screen because the moment moved on (play, seek, other view) fade out; a clear is at once
     const gone = (before.strokes || []).filter(x => !(st.strokes || []).some(y => y.id === x.id));
     const moved = st.playing && !before.playing || st.t !== before.t || st.focus !== before.focus || st.gameKey !== before.gameKey;
+    // the coach went to another moment of the plan: everyone there, also a player browsing on their own
+    if (planAt(st) !== planAt(before) && planAt(st) >= 0) { WT.local = null; WT.exact = false; }
     if (gone.length && moved && !WT.local) startFade(gone);
   }
   if (page !== 'watch') return;
@@ -200,6 +210,7 @@ function drawAll() {
   $('#wtLeave').textContent = isCoach() ? 'Close' : 'Leave';
   buildPlayers(st);
   if (!WT.loop) WT.loop = setInterval(syncTick, 250);       // (re)built players: keep them on the moment
+  drawPlan(st);
   drawOwn(st);
   drawControls(st);
   drawMembers(st);
@@ -306,6 +317,40 @@ function layout() {
   paint(); drawPointer();
 }
 
+/* ------------------------------------------------------------------ session plan: the coach's moments, in order */
+const planItems = st => st && st.plan && Array.isArray(st.plan.items) ? st.plan.items : [];
+const planAt = st => planItems(st).length && Number.isInteger(st.plan.at) ? st.plan.at : -1;
+function planStep(d) {
+  const st = WT.snap && WT.snap.state, n = planItems(st).length; if (!n) return;
+  const at = planAt(st), i = Math.min(n - 1, Math.max(0, at + d));
+  if (i !== at) control('item', {index: i});
+}
+function planLabel(it) {
+  return `${esc(it.label || 'Game')} · <span class="mono">${fmtG(Number(it.t) || 0)}</span>${it.player ? ` · ${esc(it.player)}'s view` : ''}`;
+}
+/* the bar above the views: the moment everyone is on; Previous / Next for the coach */
+function drawPlan(st) {
+  const box = $('#wtPlan'); if (!box) return;
+  const items = planItems(st), at = planAt(st), coach = isCoach();
+  const plans = coach && WT.list && WT.list.plans ? WT.list.plans.filter(p => p.moments) : [];
+  const sig = JSON.stringify([coach, st.plan && st.plan.id, at, items.length, plans.length]);
+  if (box.dataset.sig === sig) return;
+  box.dataset.sig = sig;
+  if (!items.length) {
+    box.hidden = !plans.length;
+    box.innerHTML = plans.length ? `<span class="faint">No session plan</span><select id="wtPlanPick" title="Use a session plan"><option value="">Use a plan…</option>${plans.map(p => `<option value="${esc(p.id)}">${esc(p.title)} (${p.moments})</option>`).join('')}</select>` : '';
+    const pick = $('#wtPlanPick'); if (pick) pick.onchange = () => { if (pick.value) control('plan', {plan: pick.value}); };
+    return;
+  }
+  box.hidden = false;
+  const it = items[at];
+  box.innerHTML = `<div class="wt-plan-now"><span class="pill ${at >= 0 ? 'info' : ''}">${at >= 0 ? `Moment ${at + 1} of ${items.length}` : `Plan · ${items.length} moments`}</span>
+      ${it ? `<b>${esc(it.note || 'No note')}</b><span class="faint">${planLabel(it)}</span>` : `<span class="faint">${esc(st.plan.title || 'Session plan')}${coach ? ': Next goes to the first moment' : ''}</span>`}</div>
+    ${coach ? `<div class="row wt-plan-nav"><button class="btn small" id="wtPrev" title="P" ${at <= 0 ? 'disabled' : ''}>Previous</button>
+      <button class="btn small brand" id="wtNext" title="N" ${at >= items.length - 1 ? 'disabled' : ''}>${at < 0 ? 'First moment' : 'Next'}</button></div>` : ''}`;
+  if (coach) { $('#wtPrev').onclick = () => planStep(-1); $('#wtNext').onclick = () => planStep(1); }
+}
+
 /* "Paused by you · Back to coach" */
 function drawOwn(st) {
   const box = $('#wtOwn'); if (!box) return;
@@ -321,7 +366,7 @@ function drawControls(st) {
   const box = $('#wtControls'); if (!box) return;
   const coach = isCoach(), focus = st.povs.find(p => p.player === st.focus), playing = viewPlaying(st);
   const games = coach && WT.list && WT.list.games ? WT.list.games : [];
-  const sig = JSON.stringify([coach, st.playing, playing, !!WT.local, st.speed, st.range, st.gameKey, games.length, WT.tool, WT.color, WT.muted, WT.blocked, WT.vol, st.focus]);
+  const sig = JSON.stringify([coach, st.playing, playing, !!WT.local, st.speed, st.range, st.gameKey, games.length, WT.tool, WT.color, WT.muted, WT.blocked, WT.vol, st.focus, planItems(st).length]);
   if (box.dataset.sig === sig) return updateTime();
   box.dataset.sig = sig;
   const steps = `<button class="btn small ghost" data-step="-10">−10 s</button><button class="btn small ghost" data-step="-5">−5 s</button>
@@ -349,7 +394,7 @@ function drawControls(st) {
       <input type="range" id="wtVol" min="0" max="100" value="${WT.vol}" title="Volume" class="wt-vol">
       ${coach && games.length ? `<select id="wtGame" title="Change game"><option value="">Change game…</option>${games.map(g => `<option value="${esc(g.gameKey)}" ${g.gameKey === st.gameKey ? 'disabled' : ''}>${esc(gameTitle(g))}</option>`).join('')}</select>` : ''}
     </div>
-    <small class="faint">${coach ? 'Click a small view to make it large. Draw on the large view: everyone sees it; drawings are kept as a coach note when play goes on. Your mouse shows as a dot for the others. Space = play / pause, arrows = 5 s (Shift: 10 s), , and . = one frame, B = bookmark.'
+    <small class="faint">${coach ? 'Click a small view to make it large. Draw on the large view: everyone sees it; drawings are kept as a coach note when play goes on. Your mouse shows as a dot for the others. Space = play / pause, arrows = 5 s (Shift: 10 s), , and . = one frame, B = bookmark' + (planItems(st).length ? ', N / P = next / previous moment.' : '.')
       : 'Space = pause / play your view, arrows = 5 s (Shift: 10 s), , and . = one frame, F = look at this, Esc = back to the coach.'}</small>`;
   const seek = $('#wtSeek');
   $('#wtPlay').onclick = () => coach ? control(WT.snap.state.playing ? 'pause' : 'play') : ownToggle();
@@ -400,15 +445,20 @@ function drawLists(st) {
   const box = $('#wtLists'); if (!box) return;
   const coach = isCoach();
   const flags = (st.flags || []).filter(f => f.gameKey === st.gameKey || coach);
-  const sig = JSON.stringify([coach, flags, st.bookmarks]);
+  const items = planItems(st), at = planAt(st), covered = (st.plan && st.plan.covered) || {};
+  const sig = JSON.stringify([coach, flags, st.bookmarks, st.plan && st.plan.id, at, Object.keys(covered)]);
   if (box.dataset.sig === sig) return;
   box.dataset.sig = sig;
-  const fl = coach && flags.length ? `<div class="wt-list"><h3>Look at this</h3>${flags.slice().reverse().map(f => `<div class="wt-item ${f.seen ? 'seen' : ''}">
+  const pl = items.length ? `<div class="wt-list wt-planlist"><h3>${esc(st.plan.title || 'Session plan')}</h3>${items.map((it, i) => `<div class="wt-item ${i === at ? 'now' : ''} ${covered[it.id] && i !== at ? 'wt-seen' : ''}">
+      <span class="wt-pn">${i + 1}</span><span class="wt-pt">${esc(it.note || 'No note')}<small class="faint">${planLabel(it)}</small></span>
+      ${i === at ? '<span class="pill info">Now</span>' : coach ? `<button class="btn small ghost" data-item="${i}">Go</button>` : ''}</div>`).join('')}</div>` : '';
+  const fl = coach && flags.length ? `<div class="wt-list"><h3>Look at this</h3>${flags.slice().reverse().map(f => `<div class="wt-item ${f.seen ? 'wt-seen' : ''}">
       <b>${esc(f.player)}</b> <span class="mono">${fmtF(f.t)}</span>
       <button class="btn small ${f.seen ? 'ghost' : 'brand'}" data-go="${esc(f.id)}">Go</button><button class="btn small ghost" data-drop="${esc(f.id)}" aria-label="Remove">×</button></div>`).join('')}</div>` : '';
   const bm = (st.bookmarks || []).length ? `<div class="wt-list"><h3>Bookmarks</h3>${st.bookmarks.map(b => `<div class="wt-item">
       <span class="mono">${fmtF(b.t)}</span> ${esc(b.text || '(no note)')}${coach ? ` <button class="btn small ghost" data-seek="${b.t}">Go</button>` : ''}</div>`).join('')}</div>` : '';
-  box.innerHTML = fl + bm;
+  box.innerHTML = pl + fl + bm;
+  $$('[data-item]', box).forEach(b => b.onclick = () => control('item', {index: +b.dataset.item}));
   $$('[data-go]', box).forEach(b => b.onclick = () => control('flag', {id: b.dataset.go}));
   $$('[data-drop]', box).forEach(b => b.onclick = () => control('unflag', {id: b.dataset.drop}));
   $$('[data-seek]', box).forEach(b => b.onclick = () => control('seek', {t: +b.dataset.seek}));

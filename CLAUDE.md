@@ -241,6 +241,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   and a "Review talk" switch (`web/review-extras.js`, `/api/library/<id>/extras`, audio downloaded once to
   `talk-cache/` and served at `/talk/<id>`): talk follows the video at the session's speed; talk while paused holds
   the video, plays, then goes on.
+  Session plan (hub `/api/coach/plans`, made on the hub's Coach → Session plans): the coach's ordered moments (game,
+  time after the jump, one-line note). Team tab: "Start with plan" (coach); in the session a bar above the views shows
+  "Moment n of m" with the note on every screen, the coach has Previous / Next (P / N) and Go per moment in the list
+  (control action `item`: the hub takes everyone to its game, time and view, paused; a player browsing on their own
+  comes back), and "Use a plan…" when the session has none. A hub without plans: no plans listed, nothing else
+  changes. When the session ends the hub keeps a summary (who was there and how long, length, moments covered /
+  skipped, bookmarks, flags, notes, drawings): the review player's "Watch together" box shows it under the session
+  bookmarks, with the plan's moments of that recording's games as buttons (skipped ones dashed).
 - **Review talk recording** (`pcs_recorder/talk.py`, coach's app only, only with `comms_consent`): the private OBS
   records the mic and voice-app tracks (the only per-program audio capture available; ffmpeg has none) into
   `talk/` (never the recordings folder), then the two tracks are copied out and the temporary video deleted. Never

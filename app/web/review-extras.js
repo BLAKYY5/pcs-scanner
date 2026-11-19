@@ -5,7 +5,9 @@
    Game time 0 = the jump; this recording's time = its jump (jumpAt) + game time. The talk's segments say which part
    of the audio goes with which game time: g0 < g1 = the session was playing (the audio follows the video, at the
    session's speed); g0 == g1 = the coach talked while paused there: the video pauses, the talk plays, then the
-   video goes on. */
+   video goes on.
+   Since session plans (hub with plans): each session's summary (when, how long, who was there, plan moments covered,
+   bookmarks, flags, notes, drawings) and the plan's moments of these games (covered or skipped), as buttons. */
 'use strict';
 
 const RX = {data: null, audios: [], on: false, timer: null, held: null, done: new Set(), lastT: 0};
@@ -21,20 +23,40 @@ async function reviewExtras(d, v) {
   let r;
   try { r = await api(`/api/library/${d.id}/extras`); } catch (e) { return; }
   if (page !== 'review' || pageArg !== d.id || !r.available) return;
-  const games = (r.games || []).filter(g => g.bookmarks.length || g.talk.length);
+  const games = (r.games || []).filter(g => g.bookmarks.length || g.talk.length || (g.sessions || []).length || (g.plan || []).length);
   if (!games.length) return;
   RX.data = {games, v};
   const marks = games.flatMap(g => g.bookmarks.map(b => ({...b, rt: g.jumpAt + b.t}))).sort((a, b) => a.rt - b.rt);
   const talk = games.some(g => g.talk.length);
+  const plan = games.flatMap(g => (g.plan || []).map(m => ({...m, rt: g.jumpAt + m.t}))).sort((a, b) => a.rt - b.rt);
+  const seen = new Set(), sessions = games.flatMap(g => g.sessions || []).filter(x => !seen.has(x.id) && seen.add(x.id))
+    .sort((a, b) => (b.started || 0) - (a.started || 0));
   box.hidden = false;
   box.innerHTML = `<div class="row between"><h3>Watch together</h3>
       ${talk ? `<label class="row rx-switch"><input type="checkbox" id="rxTalk"> <b>Review talk</b> <span class="faint">the coach's review over your video</span></label>` : ''}</div>
     <div class="rx-talkstate faint" id="rxState" hidden></div>
     ${marks.length ? `<div class="rx-marks"><span class="faint">Session bookmarks</span>${marks.map(b => `<button class="rx-mark" data-t="${b.rt}">
-      <span class="mono">${fmtT(b.rt)}</span> ${esc(b.text || 'Bookmark')}${b.focus ? ` <span class="faint">· ${esc(b.focus)}'s view</span>` : ''}</button>`).join('')}</div>` : ''}`;
+      <span class="mono">${fmtT(b.rt)}</span> ${esc(b.text || 'Bookmark')}${b.focus ? ` <span class="faint">· ${esc(b.focus)}'s view</span>` : ''}</button>`).join('')}</div>` : ''}
+    ${plan.length ? `<div class="rx-marks"><span class="faint">Session plan</span>${plan.map(m => `<button class="rx-mark ${m.covered ? '' : 'skipped'}" data-t="${m.rt}" title="${m.covered ? 'Watched in the session' : 'Skipped in the session'}">
+      <span class="mono">${fmtT(m.rt)}</span> ${esc(m.note || 'Moment')}${m.covered ? '' : ' <span class="faint">· skipped</span>'}</button>`).join('')}</div>` : ''}
+    ${sessions.length ? `<div class="rx-sessions">${sessions.map(sessionLine).join('')}</div>` : ''}`;
   $$('.rx-mark', box).forEach(b => b.onclick = () => { v.currentTime = +b.dataset.t; v.pause(); });
   const sw = $('#rxTalk');
   if (sw) sw.onchange = () => sw.checked ? startTalk() : stopTalk();
+}
+
+/* one line per session: when, how long, who was there, what it covered */
+function sessionLine(x) {
+  const mins = sec => sec == null ? '' : sec < 60 ? 'under 1 min' : `${Math.round(sec / 60)} min`;
+  const when = x.started ? new Date(x.started * 1000).toLocaleString(undefined, {weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}) : 'Session';
+  const bits = [];
+  if (x.length != null) bits.push(mins(x.length));
+  if (x.attendance && x.attendance.length) bits.push(x.attendance.map(a => `${esc(a.name)} ${mins(a.seconds)}`).join(', '));
+  if (x.plan) bits.push(`${x.plan.covered} of ${x.plan.total} planned moments${x.plan.skipped ? `, ${x.plan.skipped} skipped` : ''}`);
+  const n = (v, w) => v ? `${v} ${w}${v === 1 ? '' : 's'}` : '';
+  const counts = [n(x.bookmarks, 'bookmark'), n(x.flags, 'flag'), n(x.notes, 'note'), n(x.drawings, 'drawing')].filter(Boolean);
+  if (counts.length) bits.push(counts.join(' · '));
+  return `<div class="rx-session"><b>${esc(when)}</b> <span class="faint">${bits.join(' · ')}</span></div>`;
 }
 
 function talkTracks() {
