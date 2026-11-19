@@ -728,6 +728,32 @@ def test_update_finisher():
     assert core.relaunch_args(str(cur), False, False) == [str(cur)]
 
 
+def test_update_waits_for_any_game():
+    """Coach, 20 Nov 2026: app updates wait while any game runs, not only Apex (with "Pause heavy work while any game
+    runs" on, the default). The switch off: only Apex holds the update."""
+    from pcs_recorder import games
+    real = games.DETECTOR
+    procs = {9: "deadlock.exe"}
+    games.DETECTOR = games.Detector(procs=lambda: dict(procs), registry=lambda: {}, foreground=lambda: None)
+    b = pcs_server.Backend(_Auto(str(TMP / "updgame")))
+    b._apex_running = lambda: False
+    b.update = ("v9.9.9", "https://x/PCS-Scanner.exe", "https://x", 123)
+    try:
+        why = b.update_blocked()
+        assert why == "Deadlock is running. Update when you're done playing.", why
+        assert b.install_update() == why and b.update_state is None and not b.updating()
+        b._apex_running = lambda: True
+        assert b.update_blocked() == "Apex is running. Update after your games."
+        b._apex_running = lambda: False
+        b.auto.s.game_pause = False                          # the switch off: other games don't hold the update
+        assert b.update_blocked() is None
+        b.auto.s.game_pause = True
+        procs.clear(); games.DETECTOR._snap_at = float("-inf")
+        assert b.update_blocked() is None
+    finally:
+        games.DETECTOR = real
+
+
 def test_update_relaunch_arguments():
     """The window's Update button restarts with the window; the corner message's button (window not open) in the
     tray. The finisher is started with --show only in the first case."""

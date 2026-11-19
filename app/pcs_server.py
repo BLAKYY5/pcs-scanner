@@ -393,14 +393,17 @@ class Backend:
         return False
 
     def update_blocked(self) -> str | None:
-        """Never restart in the middle of a game, a recording, a scan or an upload."""
+        """Never restart in the middle of a game (Apex, or any other game while "Pause heavy work while any game
+        runs" is on: coach, 20 Nov 2026), a recording, a scan or an upload."""
         a = self.auto
         try:
-            from pcs_recorder.core import apex_running
-            if apex_running():
-                return "Apex is running. Update after your games."
+            g = self._game_running()
         except Exception:
-            pass
+            g = ""
+        if g == "Apex":
+            return "Apex is running. Update after your games."
+        if g:
+            return f"{g} is running. Update when you're done playing."
         if a and a.rec.current is not None:
             return "A recording is running. Update after your games."
         if (a and a.rec.scan_proc is not None) or self.scan_now:
