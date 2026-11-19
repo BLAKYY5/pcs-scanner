@@ -1180,7 +1180,7 @@ class Backend:
         if action in ("start", "join") and self._apex_running():
             raise RuntimeError("Close Apex to watch together")    # a review never shares the PC with a game
         if action == "start":
-            return w.start(body.get("gameKey") or "")
+            return w.start(body.get("gameKey") or "", body.get("plan") or None)
         if action == "join":
             return w.join(body.get("id") or "")
         if action == "control":

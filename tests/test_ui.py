@@ -2341,6 +2341,7 @@ class SessionHub:
         self.calls, self.ws_auth, self.socks, self.reports = [], [], [], []
         self.audio_gets, self.uploads, self.upload_code = [], [], 200
         self.ahead, self.state = clock_ahead, None
+        self.has_plans, self.extras_more = True, {}
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -2401,14 +2402,25 @@ class SessionHub:
                 if p == "/api/sessions" and self.command == "GET":
                     return self._send(200, {"sessions": [{"id": "s-1", "coach": "Blakey", "game": {"map": "SP"},
                                                           "members": ["Blakey"], "canJoin": True}] if hub.state else []})
+                if p == "/api/coach/plans":
+                    if not hub.has_plans:
+                        return self._send(404, {"detail": "Not Found"})
+                    if not coach:
+                        return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
+                    return self._send(200, {"plans": [{"id": "pl-1", "title": "Tuesday", "moments": 3, "games": 2},
+                                                      {"id": "pl-2", "title": "Empty", "moments": 0, "games": 0}, "junk"]})
                 if p == "/api/videos":
                     return self._send(200, {"games": [{"gameKey": "g-1", "map": "SP", "players": ["Moe"], "videos": ["Moe"]}]})
                 if p == "/api/sessions" and self.command == "POST":
                     if not coach:
                         return self._send(403, {"detail": "Your key can't do this. Coach only.", "error": "forbidden"})
-                    hub.state = {"id": "s-1", "coach": "Blakey", "gameKey": body["gameKey"], "povs": [], "focus": "Moe",
-                                 "playing": False, "t": 0, "at": 0, "speed": 1, "strokes": [], "members": {}, "rev": 0,
-                                 "range": [-150, 600]}
+                    hub.state = {"id": "s-1", "coach": "Blakey", "gameKey": body["gameKey"] or "g-1", "povs": [],
+                                 "focus": "Moe", "playing": False, "t": 0, "at": 0, "speed": 1, "strokes": [], "members": {},
+                                 "rev": 0, "range": [-150, 600]}
+                    if body.get("plan"):
+                        hub.state["plan"] = {"id": body["plan"], "title": "Tuesday", "at": 0, "covered": {"m-1": 1},
+                                             "items": [{"id": "m-1", "gameKey": "g-1", "t": 45, "note": "drop"},
+                                                       {"id": "m-2", "gameKey": "g-2", "t": 300, "note": "fight"}]}
                     return self._send(200, hub.state)
                 if p == "/api/sessions/s-1" and self.command == "GET":
                     return self._send(200, hub.state)
@@ -2422,7 +2434,8 @@ class SessionHub:
                     return self._send(200, {"recording": "x", "player": me[0], "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "bookmarks": [{"t": 75.0, "text": "Rotate here"}],
                          "talk": [{"id": "ta-0123456789ab", "track": "mic", "segments": [
-                             {"a0": 0, "a1": 10, "g0": 70, "g1": 80, "speed": 1, "gameKey": "g-1"}]}]}]})
+                             {"a0": 0, "a1": 10, "g0": 70, "g1": 80, "speed": 1, "gameKey": "g-1"}]}],
+                         **hub.extras_more}]})
                 if p.startswith("/api/session-audio/"):
                     data = b"TALK" * 1000
                     hub.audio_gets.append(p)
@@ -2639,6 +2652,91 @@ def test_watch_together_never_during_a_game():
     js = (Path(pcs_server.WEB) / "session.js").read_text(encoding="utf-8")
     assert "apex: 'Apex started, so you left the session. The others keep watching.'" in js
     assert "stopPlayers();" in js
+
+
+def test_watch_session_plan_through_the_app():
+    """Session plans: the coach's list (hub with plans; none from an older hub), a session started on a plan,
+    Next / Previous as control action `item`, another plan picked; afterwards the review player gets each session's
+    summary and the plan's moments, numbers checked."""
+    hub = _fresh_hub()
+    fake = SessionHub()
+    folder = TMP / "planrx"
+    folder.mkdir(exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    rec.write_bytes(b"x" * 100)
+    auto = _Auto(str(TMP / "planrecs"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    srv = pcs_server.Server(b)
+    srv.start()
+
+    def wait_for(cond, s=5):
+        end = time.time() + s
+        while time.time() < end:
+            if cond():
+                return True
+            time.sleep(0.05)
+        return False
+    try:
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert [(p["id"], p["moments"]) for p in r["plans"]] == [("pl-1", 3), ("pl-2", 0)]
+        code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "", "plan": "pl-1"})
+        assert code == 200 and snap["state"]["plan"]["at"] == 0 and snap["state"]["gameKey"] == "g-1"
+        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
+        assert wait_for(lambda: b.watch.connected)
+        call(srv, "/api/watch/control", {"action": "item", "index": 1, "junk": 2})
+        assert fake.calls[-1][1:3] == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
+        call(srv, "/api/watch/control", {"action": "plan", "plan": "pl-1"})
+        assert fake.calls[-1][2] == {"action": "plan", "plan": "pl-1"}
+        call(srv, "/api/watch/end", {})
+        # a plain start sends no plan (as before)
+        call(srv, "/api/watch/start", {"gameKey": "g-2"})
+        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "g-2"})
+        call(srv, "/api/watch/end", {})
+        # a hub without plans: the list still works, with none
+        fake.has_plans = False
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert r["available"] and r["plans"] == [] and r["games"]
+        # a player never asks for plans
+        hub.set_key(PLAYER_KEY)
+        n = len(fake.calls)
+        r = call(srv, "/api/watch/list?fresh=1")[1]
+        assert "plans" not in r and not any(c[1] == "/api/coach/plans" for c in fake.calls[n:])
+        # the review player: session summaries and the plan's moments of this recording's games
+        fake.extras_more = {
+            "sessions": [{"id": "s-9", "started": 1795000000.5, "length": 1830.4,
+                          "attendance": [{"name": "Blakey", "seconds": 1830}, {"name": "Moe<b>", "seconds": "x"}],
+                          "bookmarks": 2, "flags": 1, "notes": 1, "drawings": 3, "talk": 0,
+                          "plan": {"title": "Tuesday", "total": 3, "covered": 2, "skipped": 1}}, "junk"],
+            "plan": [{"t": 45, "note": "drop", "covered": True}, {"t": "x", "note": "bad time"},
+                     {"t": 300, "note": "fight", "covered": False, "player": "Moe"}]}
+        g = call(srv, f"/api/library/{vid}/extras")[1]["games"][0]
+        s0 = g["sessions"][0]
+        assert len(g["sessions"]) == 1 and s0["started"] == 1795000000.5 and s0["length"] == 1830
+        assert s0["attendance"] == [{"name": "Blakey", "seconds": 1830}, {"name": "Moe<b>", "seconds": None}]
+        assert s0["plan"] == {"title": "Tuesday", "total": 3, "covered": 2, "skipped": 1} and s0["drawings"] == 3
+        assert [(m["t"], m["note"], m["covered"]) for m in g["plan"]] == [(45.0, "drop", True), (300.0, "fight", False)]
+        # an older hub's extras (no sessions, no plan) still read
+        fake.extras_more = {}
+        g = call(srv, f"/api/library/{vid}/extras")[1]["games"][0]
+        assert g["sessions"] == [] and g["plan"] == [] and g["bookmarks"][0]["text"] == "Rotate here"
+    finally:
+        srv.stop()
+        fake.stop()
+        b.watch.leave()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+    web = Path(pcs_server.WEB)
+    js = (web / "session.js").read_text(encoding="utf-8")
+    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "Moment ${at + 1} of ${items.length}",
+                 "N / P = next / previous moment", "control('item', {index: i})", "Use a plan…"):
+        assert text in js, text
+    rx = (web / "review-extras.js").read_text(encoding="utf-8")
+    for text in ("Session plan", "planned moments", "skipped", "sessionLine"):
+        assert text in rx, text
 
 
 def test_watch_page_files():
