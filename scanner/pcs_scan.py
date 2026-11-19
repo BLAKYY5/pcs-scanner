@@ -820,7 +820,8 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                             prev = [t_ for t_, o in own if 'damage' in o and g['tStart'] <= t_ < f[1]]
                             if prev: st['damagePrevReadAt'] = round(prev[-1], 2)
             dr = change_reads(own, 'damage', g['tStart'], hi)
-            if dr: st['damageReads'] = dr                                  # the hub splits damage per life (decision 35)
+            if dr and st: st['damageReads'] = dr                           # the hub splits damage per life (decision 35);
+            #   never alone: no number confirmed = no games[].own, as before
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).
