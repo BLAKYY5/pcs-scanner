@@ -11,7 +11,9 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const MAPS = {WE: "World's Edge", SP: 'Storm Point', ED: 'E-District', OL: 'Olympus', BM: 'Broken Moon', KC: 'Kings Canyon'};
 const mapName = m => MAPS[m] || m || '?';
-const poiName = p => (p || '').replace(/^[a-z]{2}-/, '').split('-').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+/* POI ids (kept in scans) -> the game's names, in the player's language when the team hub has it (/api/pois) */
+let POI_NAMES = (() => { try { return JSON.parse(localStorage.getItem('pcs-poi-names') || '{}') || {}; } catch (e) { return {}; } })();
+const poiName = p => POI_NAMES[p] || (p || '').replace(/^[a-z]{2}-/, '').split('-').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
 
 async function api(path, body) {
   const r = await fetch(path, {method: body === undefined ? 'GET' : 'POST', headers: {'X-PCS-Token': TOKEN, 'Content-Type': 'application/json'},
@@ -1896,5 +1898,15 @@ async function loadQueue() {
   });
 }
 
-poll();
-route();
+/* POI names: before the first page is drawn (a local answer, at most 0.8 s), again once the app had time to ask the
+   team hub for the player's language, then every 30 min. Pages drawn later use the newest names. */
+function loadPoiNames() {
+  return api('/api/pois').then(d => {
+    if (!d || !d.names) return;
+    POI_NAMES = d.names;
+    try { localStorage.setItem('pcs-poi-names', JSON.stringify(d.names)); } catch (e) {}   // shown at once next time
+  }).catch(() => {});
+}
+Promise.race([loadPoiNames(), new Promise(r => setTimeout(r, 800))]).then(() => { poll(); route(); });
+setTimeout(loadPoiNames, 15000);
+setInterval(() => { if (!document.hidden) loadPoiNames(); }, 30 * 60 * 1000);

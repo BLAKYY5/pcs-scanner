@@ -1059,6 +1059,12 @@ class Backend:
         from pcs_recorder import minimaps
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
 
+    def poi_names(self) -> dict:
+        """POI names for the page: the game's names (pcs_maps.json), in the player's language when the team hub has
+        the names table (pcs_recorder.eec.app_poi_names)."""
+        from pcs_recorder import eec
+        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "")
+
     def squad_paths(self, q: dict) -> dict:
         """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
         from pcs_recorder import squadpaths
@@ -1717,6 +1723,8 @@ class Server:
                         return self._file(*pic) if pic else self._json({"error": "not found"}, 404)
                     if path.startswith("/api/minimap/"):
                         return self._json(b.minimap(path.split("/")[3]))
+                    if path == "/api/pois":                      # POI names (game names; hub language if any)
+                        return self._json(b.poi_names())
                     if path == "/api/squadpaths":                # teammates' paths on the map (minimap.js)
                         return self._json(b.squad_paths(q))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
