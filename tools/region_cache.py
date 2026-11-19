@@ -47,6 +47,7 @@ BOXES = {
     'heal':     (900, 1060, 1560, 2300),  # pcs_usage: the heal panel right of centre (icon, name, progress bar)
     'abil':     (1180, 1440, 600, 1440),  # pcs_usage: heal slot, tactical icon, ult icon + charge % (bottom centre)
     'minimap':  (56, 396, 56, 396),       # pcs_minimap: the HUD minimap a[66:386, 66:388] with a margin
+    'rank':     (0, 232, 2360, 2560),     # RankPanel: own rank badge, division and the game's RP (top right corner)
 }
 CODEC = 'webp-lossless'
 
