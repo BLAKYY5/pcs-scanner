@@ -3337,6 +3337,46 @@ def test_region_cache_round_trip():
         assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
 
 
+def test_repo_check_refuses_private_files():
+    """tools/repo_check.py (CI, before the tests): no game files, scan results, sign-in files or secrets in the
+    public repo; our own icons pass. Never prints the matched text."""
+    root = Path(__file__).resolve().parent.parent
+    if str(root / "tools") not in sys.path:
+        sys.path.insert(0, str(root / "tools"))
+    import repo_check as R
+    t = TMP / f"repo-{time.time_ns()}"
+    files = {
+        "app/ok.py": b"x = 1\nKEY = 'pcs_' + 'K' * 43   # built at run time: fine\n",
+        "app/assets/pcs.png": b"\x89PNG\r\n\x1a\n\0\0",
+        "scanner/pcs_weapons.npz": b"PK\x03\x04",
+        "client.json": b"{}",
+        "app/client_secret_123.json": b"{}",
+        "data/x.scan.json": b"{}",
+        "app/web/new.png": b"\x89PNG\r\n\x1a\n\0\0",
+        "app/leak.py": ("token = 'ya29." + "a" * 60 + "'\n").encode(),
+        "app/leak2.py": ("k = 'pcs_" + "Q" * 43 + "'\n").encode(),
+        "app/leak3.txt": ("-----BEGIN " + "RSA PRIVATE KEY-----\nabc\n").encode(),   # split: this file stays clean
+        "tools/big.json": b"[" + b"0," * 600000 + b"0]",
+        "app/fake.py": b"t = 'ya29.a0Abc_def-ghi'  # a short test fake: fine\n",
+    }
+    for rel, data in files.items():
+        p = t / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(data)
+    bad = dict(R.check(str(t), list(files)))
+    assert set(bad) == {"scanner/pcs_weapons.npz", "client.json", "app/client_secret_123.json", "data/x.scan.json",
+                        "app/web/new.png", "app/leak.py", "app/leak2.py", "app/leak3.txt", "tools/big.json"}, bad
+    assert bad["app/leak.py"] == "Google OAuth token" and bad["app/leak2.py"] == "hub key or invite code"
+    assert "aaaa" not in " ".join(bad.values())
+    # the real repo is clean (git ls-files when this is a checkout)
+    try:
+        tracked = R.tracked(str(root))
+    except Exception:
+        tracked = None
+    if tracked:
+        assert R.check(str(root), tracked) == []
+
+
 def test_checksets_event_scorers():
     """Developer tool: tools/checksets.py scores the event check sets (bans, fights, highlights, mode, own state,
     respawns, heals / abilities) on made-up scan.json files: found / missed / false, results right, per split."""

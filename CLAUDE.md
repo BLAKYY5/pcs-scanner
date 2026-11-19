@@ -734,6 +734,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
 
 ## Developer tools (`tools/`, not in the exe)
 
+- **Repo check** (`tools/repo_check.py`, first step of every CI build): fails on game files or anything taken from them
+  (`.npz` icon tables, paks, sound banks, textures, video / audio, pickles, archives, programs), scan results, sign-in
+  files (`client.json`, token files, the hub key file), private keys, text that looks like a real secret (Google, GitHub,
+  a full hub key / invite code), and any other binary or > 1 MB file not in its `ALLOWED_BINARY` list (our icons,
+  `rank_rp.npy`). Prints paths and kinds only. A new icon or derived-numbers file goes into that list on purpose.
+
 - **Region cache** (`tools/region_cache.py`): decodes a recording once with the scanner's own `keyframes()` and keeps,
   per keyframe, the small boxes the readers look at (`BOXES`: debug overlay, HUD minimap (`minimap`), top-left block for legend select /
   banner / ring clock, rest of the banner words, top-right counters, kill feed, squad cards + own bars `squad`, added
