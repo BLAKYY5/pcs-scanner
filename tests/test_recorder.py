@@ -1973,6 +1973,40 @@ def test_scrim_drop_screen_read_under_a_banner():
     assert len(games) == 1 and games[0]["drop"] and games[0]["map"] == "WE", games
     assert games[0]["mode"] == "scrim" and games[0]["modeSeen"]["from"] == ["drop"], games[0].get("modeSeen")
 
+    # Ranked's drop-point screen (17 Nov 2026 update) looks the same, titled "RANKED - DROPZONE": the banner reads
+    # mode ranked on it. It is kept as data (rankedDrop) and never starts a game or proves a scrim.
+    keep = HUD.BANNER_T
+    HUD.BANNER_T = {"mode": {"ranked": [HUD.Banner.read(banner_only)["modeSig"]]}, "map": {}}
+    SCAN.read_dropscreen = lambda a, loose=False: ({"map": "SP", "err": 0.02, "spots": spots}
+                                                   if (a[600, 2000] == (90, 40, 40)).all() else None)
+    try:
+        events, samples, _ = SCAN.scan_frames([(600.0 + k, img) for k in range(3)], quiet=True)
+    finally:
+        SCAN.read_dropscreen = real; HUD.BANNER_T = keep
+    assert [e["kind"] for e in events] == ["banner", "rankedDrop"] * 3, [e["kind"] for e in events]
+    assert all(e["data"]["ranked"] for e in events if e["kind"] == "rankedDrop")
+    sq = [{"slot": 1, "legend": "alpha", "self": True, "locked": True, "hue": 40}]
+    events += [{"t": 638.0 + 2 * k, "kind": "select", "data": {"squad": sq, "ranked": True}} for k in range(14)]
+    games = SCAN.assemble(events); SCAN.timeline(games, [])
+    assert len(games) == 1 and games[0]["drop"] is None and games[0]["tStart"] == 664.0, games
+    rd = games[0]["rankedDrop"]
+    assert (rd["tFirst"], rd["tLast"], rd["frames"], len(rd["spots"]), rd["ranked"]) == (600.0, 602.0, 3, 20, True), rd
+    assert games[0]["mode"] == "ranked" and games[0]["banner"]["mode"] == "ranked", games[0]["modeSeen"]
+
+    # any ranked sign beats a drop screen read without the RANKED title; Wildcard / pubs signs don't (as before)
+    def seen(**kw):
+        g = {"tStart": 100.0, "drop": {"map": "WE", "spots": spots}, **kw}
+        return g, SCAN.mode_seen(g, kw.pop("R", []), [], [100.0], 0)
+    g, m = seen()
+    assert m["mode"] == "scrim" and m["from"] == ["drop"] and "ranked" not in g["drop"], m
+    for kw in ({"select": {"ranked": True}}, {"banner": {"mode": "ranked"}}):
+        g, m = seen(**kw)
+        assert m["mode"] == "ranked" and "drop" not in m["from"] and g["drop"]["ranked"] is True, (kw, m)
+    g, m = seen(R=[1, 1, 1, 0])
+    assert m["mode"] == "ranked" and g["drop"]["ranked"] is True, m
+    g, m = seen(banner={"mode": "wildcard"})
+    assert m["mode"] == "scrim" and "ranked" not in g["drop"], m
+
 
 def test_mode_from_playlist_emblem():
     """The playlist emblem at the top right (pubs: red "unranked" emblem, Wildcard: teal) gives a game its mode when

@@ -101,7 +101,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   Per game, `games[].modeSeen` (`pcs_scan.mode_seen`) = {mode, from: the signs that named it (badge = RP panel share,
   drop, select = rank badges at legend select, banner = loading banner word, emblem), conflict, emblem (asset id),
   emblemReads}; `games[].mode` = its mode or `unknown`. Order kept from before: RP panel -> ranked, drop screen ->
-  scrim; then the other signs must agree. Two signs naming different modes, or the emblem of a playlist we can't
+  scrim; then the other signs must agree. Since the 17 Nov 2026 game update Ranked shows a drop-point screen laid out
+  like the scrim one, titled "RANKED - DROPZONE" where custom lobbies show the map's name: a drop screen read on a frame
+  whose banner says ranked is kept as `games[].rankedDrop` (data only: it starts no game, proves no scrim), and any
+  ranked sign (RP panel, rank badges at legend select, banner RANKED) beats a `drop` read (then `drop.ranked: true`).
+  A banner read never hides the drop screen (1.10.8 to 1.10.14 it did: no scrim was recognised). Two signs naming different modes, or the emblem of a playlist we can't
   name, = no mode (unlabelled), never a guess (an unnamed emblem is ignored next to ranked
   signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
