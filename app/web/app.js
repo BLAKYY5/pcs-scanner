@@ -254,6 +254,9 @@ function setupHTML() {
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
       ${drive ? li(st.google, false, 4, 'Google Drive', 'No team hub yet: your results go to your Drive, shared with the coach.',
         st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>') : ''}
+      ${r.enabled && r.check ? li(!!(!r.check.running && r.check.items && r.check.items.length && !r.check.red), !!r.check.running, total + 1,
+        'Recording check', 'Recorder, encoder, sound, disk space, other capture apps. Details below.',
+        `${checkSummary(r.check)}<button class="btn small" id="su-check" ${r.check.running ? 'disabled' : ''}>Check again</button>`) : ''}
     </ol></section>`;
 }
 function wireSetup() {
@@ -286,6 +289,33 @@ function wireSetup() {
   };
   const g = $('#su-google'); if (g) g.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
 }
+/* Recording check: one line per item (green / red / amber / grey), a "how to fix" line under each red or amber one */
+const CHECK_STATE = {ok: ['OK', 'good'], bad: ['Fix', 'bad'], warn: ['Check', 'warn'], wait: ['Later', ''], off: ['Off', '']};
+function checkSummary(c) {
+  if (c && c.running) return '<span class="pill info">Checking…</span>';
+  if (!c || !c.items || !c.items.length) return '<span class="pill">Not checked yet</span>';
+  return c.red ? `<span class="pill bad">${c.red} to fix</span>` : '<span class="pill good">Ready to record</span>';
+}
+function checkHTML(c) {
+  const items = (c && c.items) || [];
+  const when = c && c.at && !c.running ? 'Checked ' + new Date(c.at * 1000).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'}) : '';
+  return `<section class="card reccheck" id="reccheck"><div class="row between"><h2>Recording check</h2>
+      <span class="row">${checkSummary(c)}<span class="faint" style="font-size:12.5px">${esc(when)}</span>
+        <button class="btn small" id="rc-again" ${c && c.running ? 'disabled' : ''}>${c && c.running ? 'Checking…' : 'Check again'}</button></span></div>
+    ${c && c.running ? '<p class="muted rc-hint">Listening for a few seconds: say something into your mic.</p>' : ''}
+    <ul class="checks">${items.map(i => { const [word, cls] = CHECK_STATE[i.state] || ['?', ''];
+      return `<li class="ck ${esc(i.state)}"><i class="ckdot" aria-hidden="true"></i><div><b>${esc(i.label)}</b> <span class="pill ${cls}">${word}</span>
+        <span class="cktext">${esc(i.text)}</span>${i.fix && (i.state === 'bad' || i.state === 'warn') ? `<small class="fix">How to fix: ${esc(i.fix)}</small>` : ''}</div></li>`; }).join('') ||
+      '<li class="muted">Runs by itself once Auto-record is set up.</li>'}</ul></section>`;
+}
+function wireCheck() {
+  $$('#rc-again, #su-check').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await api('/api/reccheck', {}); if (S && S.recorder) S.recorder.check = r.check; toast('Checking: say something into your mic.'); }
+    catch (e) { toast(e.message, true); }
+    renderHome(null, true); schedulePoll(1500);
+  });
+}
 function renderHome(prev, force) {
   if (!S) { $('#main').innerHTML = '<div class="empty"><strong>Starting…</strong></div>'; return; }
   if (!force && prev && homeKey(prev) === homeKey(S)) return;
@@ -311,6 +341,7 @@ function renderHome(prev, force) {
         ${r ? switchHTML('t-boot', r.settings.start_with_windows, 'Start with Windows', 'Waits in the tray, nothing to remember') : ''}
       </div>
     </section>
+    ${r && r.enabled && r.check ? checkHTML(r.check) : ''}
     <div class="kpis">
       <div class="kpi"><span>Recordings</span><b>${r ? r.count : LIB.length}</b><small>kept ${r ? r.settings.keep_days + ' days' : '—'}</small></div>
       <div class="kpi"><span>Storage used</span><b>${r ? fmtGB(used) : '—'}</b><small>of ${r ? r.settings.max_gb + ' GB' : '—'}</small>
@@ -343,6 +374,7 @@ function renderHome(prev, force) {
     catch (e) { toast(e.message, true); tb.checked = !tb.checked; }
   };
   wireSetup();
+  wireCheck();
   const si = $('#signin'); if (si) si.onclick = e => { e.preventDefault(); api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   const ps = $('#psave'); if (ps) ps.onclick = async () => {
     const v = $('#pname').value.trim(); if (!v) return;

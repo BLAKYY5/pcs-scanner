@@ -875,6 +875,7 @@ class Backend:
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
                    "bitrateDefault": default_mbps(s.encoder), "bitrateAuto": bool(getattr(s, "bitrate_auto", True)),
                    "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
+                   "check": self.rec_check(),            # the recording check (Home, setup)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
@@ -894,6 +895,22 @@ class Backend:
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
+
+    # ------------------------------------------------------------- recording check
+    def rec_check(self) -> dict | None:
+        c = getattr(self.auto, "check", None) if self.auto else None
+        return c.public() if c is not None else None
+
+    def rec_check_again(self) -> dict:
+        """Home → Check again: the full check in the background (refused while the encoder test runs)."""
+        a = self.auto
+        c = getattr(a, "check", None) if a else None
+        if c is None:
+            raise RuntimeError("Auto-record isn't available in this build")
+        if getattr(a, "_setting_up", False):
+            raise RuntimeError("Wait for the recorder set-up to finish.")
+        c.start(manual=True)                              # may start OBS; closed again if it wasn't running
+        return c.public()
 
     # ------------------------------------------------------------- team hub
     def hub_state(self) -> dict:
@@ -1727,6 +1744,8 @@ class Server:
                         threading.Thread(target=retest, daemon=True).start()
                         b.say("Testing the graphics card's encoders again (a few seconds)…")
                         return self._json({"ok": True})
+                    if path == "/api/reccheck":                # Home → Recording check → Check again
+                        return self._json({"check": b.rec_check_again()})
                     if path == "/api/setup/choice":            # first-run setup: one choice, applied at once
                         b.setup_choice(str(body.get("choice") or ""), bool(body.get("on")))
                         return self._json(b.state())
