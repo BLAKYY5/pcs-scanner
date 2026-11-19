@@ -931,7 +931,7 @@ def main():
                 f_rp = pcs_ranked.game_feed(rp_lines, gm['tStart'] - 60, t1)
                 if f_rp: gm['rpFeed'] = f_rp
             except Exception as e: perf['rankedError'] = f'{type(e).__name__}: {e}'[:200]
-        try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
+        try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud, own_stats=own_reads)    # fights, ring damage
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]

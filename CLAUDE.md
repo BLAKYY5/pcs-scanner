@@ -578,13 +578,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
 - **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
   opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
-  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, feedLines [t]}] and
+  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, damageDealt, decidedBy,
+  feedLines [t]}] and
   `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
   damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
   lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
   has is not ours), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
   health lost; joined when < 25 s apart. Result: kills decide (the player's own death in the fight counts as a kill on
-  us), then a lead of 2 knocks; a squad wiped in it = lost. Third party: more than 3 enemy names, a name first seen
+  us), then any knock lead, then damage dealt (`damageDealt`: the own damage number's rise from before the fight to 3 s
+  after it, values read twice; None when not read) against `damageTaken` when they are `DAMAGE_LEAD` (100) or more
+  apart; a squad wiped in it = lost; else even (coach's decision 32, 20 Nov 2026). `decidedBy` = wiped | kills | knocks
+  | damage | "" (even). Third party: more than 3 enemy names, a name first seen
   >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
   median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
   29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,

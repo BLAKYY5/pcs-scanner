@@ -22,9 +22,11 @@ Fights (plan items 3 and 12). Evidence of a fight, per game:
   - gunfire: game sound well above the game's usual level (`pcs_audio` loudness), only to see shooting going on after
     the opponents died. Measured on 7 Nov: 10 dB windows are 29 % of fight time and 12 % elsewhere, so loudness alone
     neither finds fights nor their ends (as the audio cross-check found); it does not join or stretch fights.
-Evidence closer than FIGHT_GAP joins one fight. Result (`verdict`): kills decide
-(the player's own death in the fight counts as a kill on us); with as many kills each side, a lead of KNOCK_LEAD
-knocks; a squad wiped in it always lost; else even. Kill-feed names in a colour none of our squad has (a coloured
+Evidence closer than FIGHT_GAP joins one fight. Result (`verdict`, coach's decision 32, 20 Nov 2026: "a fight is
+neutral unless there is a knock on a side; a huge damage entry or taken also counts"): kills decide (the player's own
+death in the fight counts as a kill on us); with as many kills each side, any knock lead; with as many knocks, the
+player's damage dealt (`damageDealt`: their own damage number's rise during the fight) against damage taken
+(`damageTaken`) when they differ by DAMAGE_LEAD or more; a squad wiped in it always lost; else even. Kill-feed names in a colour none of our squad has (a coloured
 background behind a white name) are not ours. Third party: a new enemy name after the fight started (`new enemy`)
 once more than a squad's worth of names showed, an enemy we had not met knocking or killing one of us late in the
 fight, or shooting / hits still going on after every opponent we met died.
@@ -166,7 +168,10 @@ def ring_damage(g, own, storm):
 FIGHT_GAP = 25.0        # s between two pieces of evidence of one fight
 HIT_MIN = 5             # shield + health lost in one read to count as a hit
 POKE = 50               # a fight with no feed line and no knock needs this much damage taken
-KNOCK_LEAD = 2          # with as many kills each side, knocks ahead needed to call it won / lost
+KNOCK_LEAD = 1          # with as many kills each side, knocks ahead needed to call it won / lost (decision 32: any)
+DAMAGE_LEAD = 100       # with as many kills and knocks, damage dealt - damage taken this far apart decides (see verdict)
+DEALT_AFTER = 3.0       # s after a fight's last evidence its damage may still show on the number (read once a second)
+DEALT_MAX = 2000        # a rise larger than this in one fight is a misread, not damage
 RING_KNOCK = 8.0        # s after a stretch outside the ring a knock is still the ring's
 DEATH_AFTER = 25.0      # s after a fight's last evidence the player's death still belongs to it
 LOUD_DB = 10.0          # gunfire: a 0.5 s window this far above the game's median loudness
@@ -260,8 +265,37 @@ def _who(side, squad):
     return squad[k] if d[k] <= 20 else None
 
 
-def fights(g, lines, own, loud, step, ring_segs, t_end):
-    """One game's fights: [{t0, t1, opponents, ours, theirs, result, thirdParty, ...}]."""
+def damage_values(own_stats, t0, t1):
+    """The player's damage number inside [t0, t1): [[first t, last t, value]] of values read twice in a row, or None
+    when such values go down (a misread somewhere: no damage figures for the game). Before the number's first read, the
+    strip without it counts as 0 (the plate only shows once there is damage)."""
+    R = [(t, o.get('damage')) for t, o in own_stats or [] if t0 <= t < t1 and isinstance(o, dict) and o]
+    first = next((i for i, (t, v) in enumerate(R) if v is not None), None)
+    if first is None: return []
+    R = [(t, 0) for t, v in R[:first]] + [(t, v) for t, v in R[first:] if v is not None]
+    out = []
+    for i in range(1, len(R)):
+        if R[i][1] != R[i - 1][1]: continue
+        if out and out[-1][2] == R[i][1]: out[-1][1] = R[i][0]
+        else: out.append([R[i - 1][0], R[i][0], R[i][1]])
+    if any(b[2] < a[2] for a, b in zip(out, out[1:])): return None
+    return out
+
+
+def damage_dealt(values, a, b):
+    """The damage number's rise from just before a fight (the last value read by a) to its end (the last value read
+    by b + DEALT_AFTER), or None when the number wasn't read on both sides."""
+    if not values: return None
+    before = [v for t0, t1, v in values if t0 <= a]
+    after = [v for t0, t1, v in values if t0 <= b + DEALT_AFTER]
+    if not before or not after or after[-1] < before[-1]: return None
+    d = after[-1] - before[-1]
+    return d if d <= DEALT_MAX else None
+
+
+def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
+    """One game's fights: [{t0, t1, opponents, ours, theirs, result, thirdParty, ...}]. own_stats: the own stats
+    strip reads [(t, {damage, ...})] (pcs_hud.OwnStats) for damage dealt, or None."""
     t0g = g['tStart']; squad = _squad_hue(g)
     L = squad_lines(lines, t0g, t_end, squad)
     H = hits(own, ring_segs)
@@ -292,6 +326,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
     deaths = list(g.get('ownDeaths') or []); back = [r['t'] for r in g.get('respawns') or [] if r.get('who') == 'self']
     sq = [v for _, v in g.get('squadsLeft') or []]
     champion = bool(sq) and min(sq) == 1
+    dvals = damage_values(own_stats, t0g, t_end if t_end is not None else float('inf'))
     out = []
     for grp in groups:
         feed = [e for e in grp if e[1] not in ('hit', 'selfKnocked', 'selfDown')]
@@ -326,7 +361,8 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
             theirs['kills'] += 1
         wiped = any(a - 2 <= d <= b + 25 for d in deaths) and not any(r > b for r in back) \
             and t_end is not None and (g.get('tEndGame') or t_end) <= b + 40 and not champion
-        result = verdict(ours, theirs, wiped)
+        dealt = damage_dealt(dvals, a, b)
+        result = verdict(ours, theirs, wiped, dealt, int(dmg))
         third = None
         if late_new and (late_new[1] > SQUAD or not late_new[2]):
             third = {'t': late_new[0], 'why': 'new enemy'}
@@ -340,25 +376,39 @@ def fights(g, lines, own, loud, step, ring_segs, t_end):
             elif loud_between(t_done + 3, t_done + 15) >= LOUD_AFTER: third = {'t': round(t_done, 2), 'why': 'gunfire after opponents died'}
         f = {'t0': round(a, 2), 't1': round(b, 2), 'opponents': len(opp), 'opponentNames': [o['sig'] for o in opp],
              'ours': ours, 'theirs': theirs, 'result': result, 'thirdParty': third is not None,
-             'damageTaken': int(dmg), 'feedLines': [round(e[0], 2) for e in feed]}
+             'damageTaken': int(dmg), 'damageDealt': dealt, 'decidedBy': decided_by(ours, theirs, wiped, dealt, int(dmg)),
+             'feedLines': [round(e[0], 2) for e in feed]}
         if third: f['thirdPartyAt'] = third['t']; f['thirdPartyWhy'] = third['why']
         if wiped: f['wiped'] = True
         out.append(f)
     return out
 
 
-def verdict(ours, theirs, wiped=False):
-    """won / lost / even: kills decide (the player's own death counts as a kill on us); with as many kills each
-    side, a knock lead of KNOCK_LEAD; a wiped squad always lost."""
-    if wiped or theirs['kills'] > ours['kills']: return 'lost'
-    if ours['kills'] > theirs['kills']: return 'won'
-    d = ours['knocks'] - theirs['knocks']
-    return 'won' if d >= KNOCK_LEAD else 'lost' if d <= -KNOCK_LEAD else 'even'
+def decided_by(ours, theirs, wiped=False, dealt=None, taken=0):
+    """What decides a fight's result: 'wiped', 'kills', 'knocks', 'damage', or '' (even)."""
+    if wiped: return 'wiped'
+    if ours['kills'] != theirs['kills']: return 'kills'
+    if abs(ours['knocks'] - theirs['knocks']) >= KNOCK_LEAD: return 'knocks'
+    if dealt is not None and abs(dealt - (taken or 0)) >= DAMAGE_LEAD: return 'damage'
+    return ''
 
 
-def attach(games, feed_lines, bar_reads, storm_reads, loud=None, loud_step=0.05):
+def verdict(ours, theirs, wiped=False, dealt=None, taken=0):
+    """won / lost / even (coach's decision 32, 20 Nov 2026): kills decide (the player's own death counts as a kill on
+    us); with as many kills each side, any knock lead (KNOCK_LEAD); with as many knocks, damage dealt against damage
+    taken when they are DAMAGE_LEAD or more apart; a wiped squad always lost. None of that = even."""
+    how = decided_by(ours, theirs, wiped, dealt, taken)
+    if how == 'wiped': return 'lost'
+    if how == 'kills': return 'won' if ours['kills'] > theirs['kills'] else 'lost'
+    if how == 'knocks': return 'won' if ours['knocks'] > theirs['knocks'] else 'lost'
+    if how == 'damage': return 'won' if dealt > (taken or 0) else 'lost'
+    return 'even'
+
+
+def attach(games, feed_lines, bar_reads, storm_reads, loud=None, loud_step=0.05, own_stats=None):
     """Adds games[].fights and games[].ringDamage. bar_reads: [(t, own, mates, spec)] (pcs_bars), storm_reads:
-    [(t, (L, R, T, B))], loud: pcs_audio loudness (dBFS per loud_step s) or None."""
+    [(t, (L, R, T, B))], loud: pcs_audio loudness (dBFS per loud_step s) or None, own_stats: the own stats strip
+    reads [(t, {damage, ...})] for each fight's damage dealt, or None (damage then never decides)."""
     own_all = [(t, None if spec else o) for t, o, m, spec in bar_reads or []]
     for i, g in enumerate(games):
         t0 = g['tStart']; t1 = games[i + 1]['tStart'] if i + 1 < len(games) else float('inf')
@@ -368,7 +418,7 @@ def attach(games, feed_lines, bar_reads, storm_reads, loud=None, loud_step=0.05)
         except Exception as e: g['ringDamage'] = {'error': f'{type(e).__name__}: {e}'[:200]}
         segs = (g.get('ringDamage') or {}).get('segments') or []
         try:
-            g['fights'] = fights(g, feed_lines or [], own, loud, loud_step, segs, t1) \
+            g['fights'] = fights(g, feed_lines or [], own, loud, loud_step, segs, t1, own_stats) \
                 if any('event' in l for l in feed_lines or []) or own else []
         except Exception as e:
             g['fights'] = []; g['fightsError'] = f'{type(e).__name__}: {e}'[:200]
