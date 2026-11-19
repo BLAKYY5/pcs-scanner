@@ -544,13 +544,51 @@ def test_poi_names_and_aliases():
         assert eec.compare_drop("ZZ", "Fake Top", "zz-south")[0] == "different"
         assert eec.compare_drop("ZZ", "Glass", "zz-east")[0] == "near"              # unknown name: old rule
         assert eec.compare_drop("ZZ", "Somewhere", "zz-east")[0] is None
-        # POI names are game words: English in every app language; the hub is never asked for FR / KO names
+        # POI names are game words: English in every app language; the hub is never asked for FR / KO names, only for
+        # the team's callouts (decision 76: shown on hover after the game's name)
         calls = []
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
         d = eec.app_poi_names("http://hub.test:8420", lambda url, path: calls.append(path) or {"lang": "fr"})
         assert d["lang"] == "en" and d["names"]["zz-north"] == "Fake North" and d["names"]["zz-south"] == "The Fake Mill"
-        assert calls == [] and not hasattr(eec, "shown_names")
+        assert calls == ["/api/db/pois"] and d["callouts"] == {} and not hasattr(eec, "shown_names")
     finally:
         eec._POIS, eec._ALIASES = keep
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
+
+
+def test_poi_callouts_from_the_hub():
+    """Decision 76: the app's POI names stay the game's (ALGS) names; the team hub's `callout` of a Loot Book POI comes
+    with them for the hover text. No hub, an older hub without the field, or a hub out of reach = no callouts; asked at
+    most every 30 min (10 min after a failure); the page shows "Name (callout)" only on hover."""
+    from pcs_recorder import eec
+    eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
+    calls = []
+    docs = [{"id": "we-fragment-east", "data": {"map": "WE", "name": "Fragment East", "callout": " Frag "}},
+            {"id": "we-lava-siphon", "data": {"map": "WE", "name": "Lava Siphon"}},             # older hub: no field
+            {"id": "we-x", "data": {"callout": ""}}, {"id": "we-y", "data": {"callout": 7}}, "junk"]
+    fetch = lambda url, path: calls.append(path) or docs
+    try:
+        assert eec.hub_callouts("", fetch, now=1000) == {} and calls == []                  # no hub: never asked
+        got = eec.hub_callouts("http://hub.test:8420", fetch, now=1000)
+        assert got == {"we-fragment-east": "Frag"} and calls == ["/api/db/pois"], got
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=1000 + 1700) == got and len(calls) == 1
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=1000 + 1900) == got and len(calls) == 2
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=99999, ask=False) == got and len(calls) == 2   # game on
+        assert eec.hub_callouts("http://other.test:8420", fetch, now=99999, ask=False) == {} and len(calls) == 2
+        def down(url, path):
+            calls.append(path)
+            raise OSError("no answer")
+        eec._CALLOUTS["at"] = float("-inf")
+        assert eec.hub_callouts("http://hub.test:8420", down, now=5000) == {}                  # out of reach: nothing
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=5000 + 300) == {}           # retried after 10 min
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=5000 + 700) == got
+        d = eec.app_poi_names("http://hub.test:8420", fetch)
+        assert d["callouts"] == got and d["names"].get("we-fragment-east", "Fragment East") != "Frag"
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        assert "POI_CALLOUTS = d.callouts || {}" in js and "const poiTitle" in js
+        assert "localStorage.setItem('pcs-poi-names', JSON.stringify(d.names))" in js       # callouts never stored
+    finally:
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
 
 
 def test_maps_game_names():
