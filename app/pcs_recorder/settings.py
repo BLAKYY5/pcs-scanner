@@ -47,7 +47,7 @@ class Settings:
     enabled: bool = False                              # auto-record on/off (turned on from the app window)
     start_with_windows: bool = True                    # app starts in the tray when Windows starts
     player: str = ""                                   # same EEC name as in the app
-    hub_url: str = ""                                  # team hub, e.g. http://pcs-hub:8420 (empty = Drive only)
+    hub_url: str = ""                                  # team hub, e.g. http://pcs-hub:8420 (empty = results stay on this PC)
     folder: str = str(Path.home() / "Videos" / "PCS Recordings")
     keep_days: int = 7                                 # delete recordings older than this
     max_gb: int = 100                                  # the recorder's files never take more than this
