@@ -396,7 +396,7 @@ def keyframes(path, start=0.0, end=None):
     """Keyframes (about 1 per second) between start and end, as (time, RGB image). The images are read-only."""
     name, dec = pick_decoder(path)
     w, h = probe(path)
-    vf = 'showinfo' if (w, h) == (W, H) else f'scale={W}:{H},showinfo'
+    vf = HUD.sw_format(path, dec) + ('showinfo' if (w, h) == (W, H) else f'scale={W}:{H},showinfo')
     cmd = ['ffmpeg', '-hide_banner', '-nostats', '-v', 'info'] + dec + ['-skip_frame', 'nokey', '-copyts'] + \
           (['-ss', f'{start:.2f}'] if start > 0 else []) + \
           ['-i', path, '-fps_mode', 'passthrough', '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']

@@ -378,6 +378,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   would. Results land in the usual results folder and are sent as after a local scan. Any failure (worker off 409,
   other scanner version 409, old hub, failed job, > 3 h) = local scan at once. Checked identical to a local scan (all
   of scan.json / feed.json but perf, scannedAt) on 3 recordings, CPU and GPU decoding.
+- **GPU and CPU decoding give the same scan** (20 Nov 2026, `pcs_hud.sw_format`): AV1 / HEVC / H.264 decoding is exact,
+  so the GPU and the CPU decode the same YUV values (0 different frames, coach's RX 9070 XT d3d11va vs libdav1d). The
+  differences came after: a GPU decoder hands frames over as NV12, the CPU as yuv420p, and ffmpeg's NV12 -> RGB route
+  rounds differently (84 % of RGB values, up to 51 apart), which moved legend select, feed lines, care packages...
+  With a hardware decoder the scanner now puts `format=<the CPU decoder's pix_fmt>,` first in every `-vf` (keyframes
+  and the 60 fps corner reads): a lossless repack, then the CPU's own RGB route. Full scan of 15 Nov 17:09 (4 games,
+  1,832 feed lines): GPU = CPU on every field of scan.json and feed.json; before, 1,827 vs 1,832 lines, kills /
+  knocks per player and care packages differed. Same speed. So a scan no longer depends on the player's GPU, and
+  the team server may decode on its own GPU. 10-bit recordings (P010) are repacked the same way but were not tested.
 - **Leftover unpacked copies**: the onefile exe unpacks ~600 MB to `%TEMP%\_MEI*` per start (and per scan); a crash or
   forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
   are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:
