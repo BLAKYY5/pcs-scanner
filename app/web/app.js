@@ -1345,7 +1345,7 @@ function renderSettings() {
         <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Your results go here (Google Drive is then not used). Empty = Google Drive.</small></label>
         <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in or invite link your coach sent. Don't share it.</small></div>
       </div>
-      ${switchHTML('f-server_scan', !!s.server_scan, 'Scan on the team server', 'After a session your PC sends a light copy of the recording (about 0.7 GB an hour: keyframes and game sound, no voice) and the team server scans it. Your PC stays free. If the server can't, your PC scans as before.')}
+      ${switchHTML('f-server_scan', !!s.server_scan, 'Scan on the team server', 'After a session your PC sends a light copy of the recording to the team server, which scans it: about 0.7 GB an hour (one picture a second and the game sound, no voice). Your PC stays free. If the server is off or busy, your PC scans as before.')}
       ${switchHTML('f-crash_reports', s.crash_reports !== false, 'Send crash reports to the team hub', 'When recording, OBS or a scan fails: the error, app and Windows version, graphics card and the end of the app log, for your coach only. Keys, passwords, e-mails and your Windows name are removed. Only when you are on the hub.')}
       ${S.hubBackup ? hubBackupHTML(S.hubBackup) : ''}
     </section>
