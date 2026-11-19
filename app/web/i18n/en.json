@@ -198,6 +198,7 @@
  "Don't keep sessions shorter than (minutes)": "Don't keep sessions shorter than (minutes)",
  "Done": "Done",
  "Download the new version now? The app restarts by itself.": "Download the new version now? The app restarts by itself.",
+ "Downloading for transcripts (first time only): {pct} % of {gb} GB.": "Downloading for transcripts (first time only): {pct} % of {gb} GB.",
  "Downloading the update": "Downloading the update",
  "Draw on the picture.": "Draw on the picture.",
  "Drawing": "Drawing",

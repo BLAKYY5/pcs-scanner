@@ -198,6 +198,7 @@
  "Don't keep sessions shorter than (minutes)": "Ne pas garder les sessions de moins de (minutes)",
  "Done": "Terminé",
  "Download the new version now? The app restarts by itself.": "Télécharger la nouvelle version maintenant ? L'app redémarre toute seule.",
+ "Downloading for transcripts (first time only): {pct} % of {gb} GB.": "Téléchargement pour les transcriptions (la première fois seulement) : {pct} % de {gb} Go.",
  "Downloading the update": "Téléchargement de la mise à jour",
  "Draw on the picture.": "Dessine sur l'image.",
  "Drawing": "Dessin",

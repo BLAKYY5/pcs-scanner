@@ -5415,8 +5415,9 @@ def _fake_worker(comms, sleep=False):
     w = TMP / "fake_worker.py"
     w.write_text(FAKE_WORKER)
     comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
-    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
-    comms.get_model = lambda busy=None: TMP
+    comms.__dict__.setdefault("_real_get_model", comms.get_model)
+    comms.get_runtime = lambda busy=None, component=None, progress=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None, progress=None: TMP
 
 
 def test_comms_only_with_the_players_yes():
@@ -5579,16 +5580,120 @@ def test_comms_downloads_are_checked():
     except comms.Unavailable:
         pass
     assert not (TMP / "evil.txt").exists()
-    # nothing published yet: says so, downloads nothing
-    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+    # no component pinned (an older build): says so, downloads nothing
+    if comms.runtime_cmd() is None:
         try:
-            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            getattr(comms, "_real_get_runtime", comms.get_runtime)(component={})
             raise AssertionError("no component, yet it ran")
         except comms.Unavailable as e:
             assert "isn't published" in str(e)
     # the pinned model is the turbo model's five files
     assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
     assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_comms_component_pinned():
+    """The Transcripts component is pinned to one published zip of this repo: https, a release tag the app updater can
+    never take (not v..., a prerelease never "latest"), its SHA-256 and size; downloaded from github.com only."""
+    import io
+    import json
+    import re
+    import urllib.request
+    from pcs_recorder import comms
+    c = comms.COMPONENT
+    assert c and set(c) == {"url", "sha256", "size"}
+    m = re.fullmatch(r"https://github\.com/BLAKYY5/pcs-scanner/releases/download/([^/]+)/PCS-Transcripts\.zip", c["url"])
+    assert m and not m.group(1).startswith("v"), c["url"]          # a v tag would build and publish an app release
+    assert re.fullmatch(r"[0-9a-f]{64}", c["sha256"]) and isinstance(c["size"], int) and 10 << 20 < c["size"] < 200 << 20
+    assert comms._https_ok(c["url"], ("github.com",))
+    # the app's updater reads only the latest release and takes only a v<version> .exe: this release is never offered
+    import pcs_core
+    calls = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    rel = {"tag_name": "transcripts-1", "prerelease": True, "html_url": "https://github.com/x",
+           "assets": [{"name": "PCS-Transcripts.zip", "browser_download_url": c["url"], "size": c["size"]}]}
+    real = urllib.request.urlopen, dict(pcs_core.BUILD)
+    urllib.request.urlopen = lambda req, timeout=None: (calls.append(req.full_url), Resp(json.dumps(rel).encode()))[1]
+    try:
+        for b in ({"version": "1.11.0"}, {"version": "dev-5", "base": "1.11.0"}, {"version": "1.10.12"}):
+            pcs_core.BUILD.clear()
+            pcs_core.BUILD.update(b, repo="BLAKYY5/pcs-scanner")
+            assert pcs_core.check_update() is None, b
+    finally:
+        urllib.request.urlopen = real[0]
+        pcs_core.BUILD.clear()
+        pcs_core.BUILD.update(real[1])
+    assert calls and all(u.endswith("/repos/BLAKYY5/pcs-scanner/releases/latest") for u in calls)
+
+
+def test_comms_first_download_after_yes_with_progress():
+    """Said no: nothing is downloaded. Said yes: the first transcript downloads the component zip (github.com) and
+    then the model (Hugging Face), and Settings sees how far (bytes done of the total); nothing left half-way."""
+    import io
+    import shutil
+    import zipfile
+    from pcs_recorder import comms
+    comms_, job, s, idx, rec, sent = _comms_setup("comms-first-dl", consent=False)
+    saved = (comms.get_runtime, comms.get_model, comms.fetch, os.environ.pop("PCS_TRANSCRIBE_PY", None),
+             os.environ.pop("PCS_WHISPER_MODEL", None))
+    comms.get_runtime = getattr(comms, "_real_get_runtime", comms.get_runtime)
+    comms.get_model = getattr(comms, "_real_get_model", comms.get_model)
+    shutil.rmtree(comms.base_dir(), ignore_errors=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("pcs-transcribe/pcs-transcribe.exe", b"MZ fake")
+    got, seen = [], []
+
+    def fake_fetch(url, dest, sha256, size, busy=None, hosts=comms.MODEL_HOSTS, progress=None):
+        got.append((url, hosts))
+        if url == comms.COMPONENT["url"]:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(buf.getvalue())
+        if progress:
+            progress(size // 2)
+            seen.append(job.public()["download"])
+            progress(size - size // 2)
+    comms.fetch = fake_fetch
+    total = comms.COMPONENT["size"] + sum(size for _, size, _ in comms.MODEL_FILES)
+    try:
+        assert comms.missing_bytes() == total
+        # said no: the app's minute tick does nothing, nothing downloaded
+        assert job.tick() is False and got == [] and job.public()["download"] is None and not job.public()["on"]
+        # said yes: component first (github.com only), then the model's five files (Hugging Face)
+        s.transcript_consent = True
+        stop = [False]
+        job.busy = lambda: "test stop" if stop[0] else None
+        real_model = comms.get_model
+
+        def model_then_stop(busy=None, progress=None):
+            d = real_model(busy, progress=progress)
+            stop[0] = True                                    # stop before the (fake) transcriber would start
+            return d
+        comms.get_model = model_then_stop
+        try:
+            job.transcribe(str(rec))
+            raise AssertionError("should stop")
+        except comms.Busy:
+            pass
+        assert got[0] == (comms.COMPONENT["url"], ("github.com",))
+        assert [u for u, _ in got[1:]] == [comms.MODEL_URL + n for n, *_ in comms.MODEL_FILES]
+        assert all(h == comms.MODEL_HOSTS for _, h in got[1:])
+        assert seen[0] == {"done": comms.COMPONENT["size"] // 2, "total": total}
+        assert seen[-1]["done"] < total and all(a["done"] < b["done"] for a, b in zip(seen, seen[1:]))
+        assert comms.runtime_cmd() and job.public()["download"] is None and job.public()["available"]
+        assert job.st["recs"][rec.stem].get("tries", 0) == 0            # a stop before the transcriber is no try
+    finally:
+        comms.get_runtime, comms.get_model, comms.fetch = saved[:3]
+        for k, v in (("PCS_TRANSCRIBE_PY", saved[3]), ("PCS_WHISPER_MODEL", saved[4])):
+            if v is not None:
+                os.environ[k] = v
+        shutil.rmtree(comms.base_dir(), ignore_errors=True)
+    page = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+    assert "tr.download" in page and "syncTranscript()" in page
+    assert "t('Downloading for transcripts (first time only): {pct} % of {gb} GB.'" in page
 
 
 def test_transcribe_worker_parts_and_clean_text():

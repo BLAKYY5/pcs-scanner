@@ -158,7 +158,7 @@ async function poll() {
     const prev = S; S = await api('/api/state');
     renderTop();
     if (page === 'home') renderHome(prev);
-    if (page === 'settings') syncHubBackup();                          // last copy line only: the form stays as typed
+    if (page === 'settings') { syncHubBackup(); syncTranscript(); }    // those lines only: the form stays as typed
     if (page === 'recordings' && (!prev || JSON.stringify(prev.scans) !== JSON.stringify(S.scans) ||
         (prev.recorder && S.recorder && prev.recorder.status !== S.recorder.status))) loadLibrary();
   } catch (e) { S = null; renderTop(); }
@@ -409,10 +409,16 @@ const TRANSCRIPT_HINT = t('After a session, what you say on your own mic is turn
 function transcriptState() {
   const tr = S && S.transcripts;
   if (!tr || !tr.on) return '';
+  const dl = tr.running && !tr.current && tr.download && tr.download.total ? tr.download : null;   // first time: component + model
+  if (dl) return ' ' + t('Downloading for transcripts (first time only): {pct} % of {gb} GB.', {pct: Math.floor(100 * dl.done / dl.total), gb: (dl.total / 1e9).toFixed(1)});
   if (tr.running) return ' ' + (tr.current ? (tr.percent != null ? t('Now: {pct} % of the last session.', {pct: tr.percent}) : t('Now: the last session.')) : t('Getting ready (first time: a 1.6 GB download).'));
   if (tr.note) return ' ' + t('Not running: {note}.', {note: tx(tr.note)});
   if (!tr.available) return ' ' + t('Not available yet in this version.');
   return tr.done ? ' ' + (tr.done === 1 ? t('1 recording turned into text.') : t('{n} recordings turned into text.', {n: tr.done})) : '';
+}
+function syncTranscript() {                                           // Settings: the transcripts line follows the download
+  const el = $('#f-transcript_consent'), small = el && el.closest('label') && el.closest('label').querySelector('small');
+  if (small) small.textContent = TRANSCRIPT_HINT + transcriptState();
 }
 function switchHTML(id, on, label, hint) {
   return `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="track"></span><span><b>${esc(label)}</b><small>${esc(hint)}</small></span></label>`;

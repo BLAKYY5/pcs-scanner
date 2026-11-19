@@ -64,10 +64,15 @@ MODEL_FILES = (
 )
 MODEL_HOSTS = ("huggingface.co",)     # where the pinned address points; its downloads redirect to HF's file hosts (https)
 
-# The "Transcripts" component (pcs-transcribe.exe and its libraries, a zip made by build.yml). None until the coach
-# publishes one (a release asset of this repo, never marked "latest": the updater reads the latest release).
-# To pin: {"url": "https://github.com/<repo>/releases/download/<tag>/PCS-Transcripts.zip", "sha256": ..., "size": ...}
-COMPONENT: dict | None = None
+# The "Transcripts" component (pcs-transcribe.exe and its libraries, a zip made by build.yml), published as release
+# "transcripts-1" of this repo: a prerelease, never "latest" (the updater reads the latest release only), from the
+# green main build of 1.11.0 (run 44559028735). A new zip = a new release tag (never v...: that tag would build an app
+# release) and a new pin here; the old one stays published for the app versions that pin it.
+COMPONENT: dict | None = {
+    "url": "https://github.com/BLAKYY5/pcs-scanner/releases/download/transcripts-1/PCS-Transcripts.zip",
+    "sha256": "dcb201bbbfa52ba4a4b2d66490b2c7b09677ab4b671b5e2d7d2ffb86c581a3ec",
+    "size": 62863532,
+}
 COMPONENT_EXE = "pcs-transcribe.exe"
 
 
@@ -169,9 +174,11 @@ def _https_ok(url: str, hosts: tuple | None) -> bool:
     return hosts is None or host in hosts
 
 
-def fetch(url: str, dest: Path, sha256: str, size: int, busy=None, hosts: tuple | None = MODEL_HOSTS) -> None:
+def fetch(url: str, dest: Path, sha256: str, size: int, busy=None, hosts: tuple | None = MODEL_HOSTS,
+          progress=None) -> None:
     """Download over HTTPS (redirects: https only) to dest; written as .part, kept only when size and SHA-256 match.
-    `busy()` is asked every few seconds: a reason stops the download (Busy; the part is removed)."""
+    `busy()` is asked every few seconds: a reason stops the download (Busy; the part is removed). `progress(n)` gets
+    the bytes of each chunk written (the Settings line shows how far the first-time download is)."""
     import requests
     if not _https_ok(url, hosts):
         raise Unavailable("not an allowed download address")
@@ -196,6 +203,8 @@ def fetch(url: str, dest: Path, sha256: str, size: int, busy=None, hosts: tuple 
                     f.write(chunk)
                     h.update(chunk)
                     got += len(chunk)
+                    if progress:
+                        progress(len(chunk))
                     if busy and time.monotonic() - looked >= BUSY_EVERY_S:
                         looked = time.monotonic()
                         b = busy()
@@ -216,7 +225,18 @@ def model_ready(d: Path | None = None) -> bool:
     return all((d / n).is_file() and (d / n).stat().st_size == size for n, size, _ in MODEL_FILES)
 
 
-def get_model(busy=None) -> Path:
+def missing_bytes(component: dict | None = None) -> int:
+    """What the first transcript still has to download: the component zip (when not on this PC) + the model files
+    not there yet. 0 = nothing (or a developer's own model / Python)."""
+    comp = component if component is not None else COMPONENT
+    n = 0 if runtime_cmd() or not comp else int(comp.get("size") or 0)
+    if not os.environ.get("PCS_WHISPER_MODEL"):
+        d = model_dir()
+        n += sum(size for name, size, _ in MODEL_FILES if not ((d / name).is_file() and (d / name).stat().st_size == size))
+    return n
+
+
+def get_model(busy=None, progress=None) -> Path:
     d = model_dir()
     if model_ready(d):
         return d
@@ -225,7 +245,7 @@ def get_model(busy=None) -> Path:
         if f.is_file() and f.stat().st_size == size:
             continue
         log.info("downloading the transcript model: %s (%d MB)", name, size >> 20)
-        fetch(MODEL_URL + name, f, sha, size, busy)
+        fetch(MODEL_URL + name, f, sha, size, busy, progress=progress)
     return d
 
 
@@ -250,7 +270,7 @@ def safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     zf.extractall(dest)
 
 
-def get_runtime(busy=None, component: dict | None = None) -> list[str]:
+def get_runtime(busy=None, component: dict | None = None, progress=None) -> list[str]:
     cmd = runtime_cmd()
     if cmd:
         return cmd
@@ -258,7 +278,7 @@ def get_runtime(busy=None, component: dict | None = None) -> list[str]:
     if not comp:
         raise Unavailable("the Transcripts download isn't published yet")
     zpath = base_dir() / "PCS-Transcripts.zip"
-    fetch(comp["url"], zpath, comp["sha256"], int(comp["size"]), busy, hosts=("github.com",))
+    fetch(comp["url"], zpath, comp["sha256"], int(comp["size"]), busy, hosts=("github.com",), progress=progress)
     tmp = runtime_dir().with_name("runtime.new")
     shutil.rmtree(tmp, ignore_errors=True)
     try:
@@ -298,6 +318,7 @@ class Comms:
         self.proc: subprocess.Popen | None = None
         self.current: str | None = None
         self.progress: tuple[float, float] | None = None
+        self.download: list[int] | None = None           # [bytes done, bytes total] of the first-time download
         self.next_try = 0.0
         self.note = ""                                   # last reason it couldn't run (shown in Settings)
         self.st = self._load()
@@ -398,7 +419,7 @@ class Comms:
         finally:
             _background(False)
             with self.lock:
-                self.running, self.current, self.progress = False, None, None
+                self.running, self.current, self.progress, self.download = False, None, None, None
 
     def _check_busy(self) -> None:
         b = self.busy()
@@ -417,8 +438,17 @@ class Comms:
             rec.update(status="no_mic")
             self._save()
             return None
-        cmd = get_runtime(self.busy)
-        model = get_model(self.busy)
+        need = missing_bytes()
+        self.download = [0, need] if need else None
+
+        def got(n: int) -> None:
+            if self.download:
+                self.download[0] = min(self.download[0] + n, self.download[1])
+        try:
+            cmd = get_runtime(self.busy, progress=got)
+            model = get_model(self.busy, progress=got)
+        finally:
+            self.download = None
         self._check_busy()
         out = comms_path(path)
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -523,7 +553,8 @@ class Comms:
             prog = round(100 * self.progress[0] / self.progress[1])
         return {"on": eligible(s), "running": self.running, "current": self.current, "percent": prog, "done": done,
                 "note": self.note, "model": model_ready(), "runtime": runtime_cmd() is not None,
-                "available": runtime_cmd() is not None or bool(COMPONENT)}
+                "available": runtime_cmd() is not None or bool(COMPONENT),
+                "download": ({"done": self.download[0], "total": self.download[1]} if self.download else None)}
 
 
 def transcript_of(rec_path: str | Path) -> dict | None:
