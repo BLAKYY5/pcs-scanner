@@ -78,7 +78,7 @@ function renderTop() {
   else if (r.enabled) { cls += ' on'; text = t('Ready · waiting for Apex'); }
   if (S && S.scans.now) { cls = 'live on'; text = t('Scanning'); }
   pill.className = cls; pill.querySelector('span').textContent = text;
-  document.body.classList.toggle('quiet', !!(S && S.apex));          // Apex runs: no animation at all (app.css)
+  document.body.classList.toggle('quiet', gaming());                 // a game runs: no animation at all (app.css)
   const cb = $('#coachBadge'); if (cb) cb.hidden = !(S && S.coach);
   const u = $('#updateBtn'); u.hidden = !(S && S.update); if (S && S.update) u.textContent = t('Update to {tag}', {tag: S.update.tag});
   u.disabled = !!(S && S.updateState);
@@ -134,17 +134,18 @@ window.addEventListener('keydown', e => {
 }, true);
 function confirmBox(msg) { return window.confirm(msg); }
 
-/* The window stays quiet while it isn't seen and while Apex runs (it shares the graphics card with the game):
-   no polling at all when hidden (tray) or minimized, every 10 s while Apex runs unless the player is using the
-   window, every 2 s otherwise. Shown again = refreshed at once. */
+/* The window stays quiet while it isn't seen and while a game runs (Apex or another one: it shares the graphics
+   card with the game): no polling at all when hidden (tray) or minimized, every 10 s during a game unless the player
+   is using the window, every 2 s otherwise. Shown again = refreshed at once. */
+function gaming() { return !!(S && (S.apex || S.game)); }
 const POLL_MS = 2000, POLL_APEX_MS = 10000, ACTIVE_MS = 30000;
 let pollTimer = null, polling = false, lastInput = 0;
 ['pointerdown', 'keydown', 'wheel'].forEach(ev => document.addEventListener(ev, () => {
   const idle = Date.now() - lastInput > ACTIVE_MS; lastInput = Date.now();
-  if (idle && S && S.apex && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
+  if (idle && gaming() && !document.hidden) schedulePoll(0);       // back in the window during a game: fresh at once
 }, {capture: true, passive: true}));
 function pollDelay() { if (S && S.updateState && S.updateState.step !== 'failed') return 1000;   // the Updating screen moves
-  return S && S.apex && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
+  return gaming() && Date.now() - lastInput > ACTIVE_MS ? POLL_APEX_MS : POLL_MS; }
 function schedulePoll(ms) {
   clearTimeout(pollTimer); pollTimer = null;
   if (document.hidden || polling) return;                             // hidden: nothing runs until it's shown
@@ -195,7 +196,7 @@ function route() {
 window.addEventListener('hashchange', route);
 
 /* ------------------------------------------------------------------ home */
-function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub]); }
+function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub, s.game]); }
 
 /* First-run setup: the steps a new player needs, in order, each one click (or one paste). Shown on Home until the
    needed ones are done (name, auto-record, team hub or Google), or until hidden. Auto-record comes second: its
@@ -349,7 +350,7 @@ function renderHome(prev, force) {
   if (!r) { title = 'Scanner'; sub = t('Auto-record isn\'t available in this build. You can still add and scan recordings.'); }
   else if (r.recording) { state = 'rec'; title = t('Recording Apex'); sub = t('Recording stops when you close Apex. Then the scan starts (you can skip it).'); }
   else if (r.scanning || S.scans.now) { state = 'busy'; title = t('Scanning'); sub = t('{what} · it pauses by itself if you start Apex.', {what: S.scans.now ? S.scans.now : t('Your last session')}); }
-  else if (r.enabled) { state = 'on'; title = t('Ready'); sub = r.status === 'Waiting for Apex' ? t('Waiting for Apex. Recording starts by itself when the game opens.') : tx(r.status); }
+  else if (r.enabled) { state = 'on'; title = t('Ready'); sub = S.game ? gamePausedLine() : r.status === 'Waiting for Apex' ? t('Waiting for Apex. Recording starts by itself when the game opens.') : tx(r.status); }
   const used = r ? r.used : 0, max = r ? r.settings.max_gb * 1e9 : 1, pct = Math.min(100, used / max * 100);
   const recent = LIB.slice(0, 4);
   const setup = setupHTML();
@@ -1625,6 +1626,15 @@ function renderSettings() {
         <div class="field">${switchHTML('f-auto_scan', s.auto_scan, t('Scan automatically'), t('Starts after a countdown unless you press Skip'))}</div>
         <label class="field"><span>${t('Countdown (seconds)')}</span><input id="f-scan_delay_s" type="number" min="5" max="600" value="${s.scan_delay_s}"></label>
       </div></section>
+    <section class="card section"><h2>${t('Games')}</h2>
+      ${switchHTML('f-game_pause', s.game_pause !== false, t('Pause heavy work while any game runs'), t('Scans, audio tracks, transcripts, clips, downloads and uploads wait while you play, as they do for Apex. Only Apex is recorded.'))}
+      <p class="muted" id="gamesNow" style="margin:4px 0 0">${S.game ? esc(gamePausedLine()) : ''}</p>
+      <h3>${t('Games found on this PC')}</h3>
+      <div id="gamesList" class="gamelist"><span class="muted">${t('Looking…')}</span></div>
+      <div class="row" style="margin-top:8px"><input id="g-add" type="text" placeholder="${t('Program name, like Game.exe')}" spellcheck="false" style="width:240px"><button class="btn small" id="g-add-btn">${t('Add')}</button></div>
+      <small class="muted">${t('Add a game that isn\'t listed by its program name (Task Manager → Details). Remove = never counted as a game.')}</small>
+      ${switchHTML('f-game_fullscreen', !!s.game_fullscreen, t('Also count any full-screen program'), t('Off by default: a full-screen video would count too. Browsers and video players are never counted.'))}
+    </section>
     <section class="card section"><h2>${t('Highlights')}</h2>
       <p class="muted" style="margin:0 0 10px">${t('Key plays the scan finds for clips: your own knocks and kills close together. Shown in the review player with a star.')}</p>
       <div class="form">
@@ -1649,6 +1659,7 @@ function renderSettings() {
   wireHotkeys();
   wireHubKey();
   wireHubBackup();
+  wireGames(s);
   const ys = $('#f-ytsignin'); if (ys) ys.onclick = () => { api('/api/youtube/signin', {}); toast(t('Your browser opens: sign in and pick the team channel.')); };
   settingsBase = settingsSnap();
   // the microphone list arrives later: it joins the starting point unless something was changed meanwhile
@@ -1712,9 +1723,10 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'share_clips', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'share_clips', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
+    if (gamesEdit) { body.game_exes = gamesEdit.exes.slice(); body.game_ignore = gamesEdit.ignore.slice(); }
     const bd = $('#f-hub_backup_dir'); if (bd) { body.hub_backup_dir = bd.value.trim(); body.hub_backup_keep = parseInt($('#f-hub_backup_keep').value, 10); }
   }
   return body;
@@ -1723,6 +1735,49 @@ async function saveSettings() {
   const body = settingsBody();
   try { S = await api('/api/settings', body); if (body.hub_key) hubKeyEdit = false; toast(t('Settings saved.')); if (page === 'settings') renderSettings(); renderTop(); return true; }
   catch (e) { toast(t('Not saved: {why}', {why: tx(e.message)}), true); return false; }
+}
+
+/* ------------------------------------------------------------------ Settings → Games (heavy work waits during any game) */
+let gamesEdit = null;                    // {exes, ignore, info}: the lists as edited, saved with Save changes
+function gamePausedLine() { return t('Paused while a game runs ({game})', {game: S.game}); }
+function gamesListHTML() {
+  const g = gamesEdit, info = g.info || {games: [], builtIn: []};
+  const rows = info.games.filter(x => x.source !== 'yours' && !g.ignore.includes(x.exe))
+    .concat(g.exes.map(e => { const k = info.games.find(x => x.exe === e); return {exe: e, name: k ? k.name : e.replace(/\.exe$/i, ''), running: !!(k && k.running), source: 'yours'}; }))
+    .sort((a, b) => (a.source !== 'yours') - (b.source !== 'yours') || a.name.toLowerCase().localeCompare(b.name.toLowerCase()));
+  const src = {yours: t('Added by you'), 'built-in': t('Built in'), windows: t('Found by Windows')};
+  const list = rows.length ? rows.map(x => `<div class="gamerow"><span><b>${esc(x.name)}</b> <span class="faint mono">${esc(x.exe)}</span></span>
+      <span class="row">${x.running ? '<span class="pill info">' + t('Running') + '</span>' : ''}<span class="pill">${src[x.source] || ''}</span><button class="btn small ghost" data-g-remove="${esc(x.exe)}">${t('Remove')}</button></span></div>`).join('')
+    : `<span class="muted">${t('None found yet.')}</span>`;
+  const ign = g.ignore.length ? `<p class="muted" style="margin:8px 0 0">${t('Never counted:')} ${g.ignore.map(e => `<span class="chip">${esc(e)}</span> <button class="btn small ghost" data-g-back="${esc(e)}">${t('Add back')}</button>`).join(' ')}</p>` : '';
+  const built = info.builtIn && info.builtIn.length ? `<p class="faint" style="margin:8px 0 0">${t('Always counted when they run:')} ${esc(info.builtIn.join(', '))}</p>` : '';
+  return list + ign + built;
+}
+function drawGames() {
+  const box = $('#gamesList'); if (!box || !gamesEdit) return;
+  box.innerHTML = gamesListHTML();
+  $$('[data-g-remove]', box).forEach(b => b.onclick = () => {
+    const e = b.dataset.gRemove;
+    if (gamesEdit.exes.includes(e)) gamesEdit.exes = gamesEdit.exes.filter(x => x !== e);
+    else if (!gamesEdit.ignore.includes(e)) gamesEdit.ignore.push(e);
+    drawGames(); syncDirty();
+  });
+  $$('[data-g-back]', box).forEach(b => b.onclick = () => { gamesEdit.ignore = gamesEdit.ignore.filter(x => x !== b.dataset.gBack); drawGames(); syncDirty(); });
+}
+function wireGames(s) {
+  if (!$('#gamesList')) { gamesEdit = null; return; }
+  gamesEdit = {exes: (s.game_exes || []).slice(), ignore: (s.game_ignore || []).slice(), info: null};
+  const add = () => {
+    const el = $('#g-add'), v = el.value.trim().replace(/^.*[\\/]/, '').toLowerCase();
+    if (!/^[a-z0-9][a-z0-9 ._()+\-!]{0,79}\.exe$/.test(v) || /^r5apex/.test(v)) { toast(t('Type the game\'s program name, like Game.exe'), true); return; }
+    gamesEdit.ignore = gamesEdit.ignore.filter(x => x !== v);
+    if (!gamesEdit.exes.includes(v)) gamesEdit.exes.push(v);
+    el.value = ''; drawGames(); syncDirty();
+  };
+  $('#g-add-btn').onclick = add;
+  $('#g-add').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); add(); } };
+  api('/api/games').then(info => { if (gamesEdit) { gamesEdit.info = info; drawGames(); } })
+    .catch(() => { const box = $('#gamesList'); if (box) box.innerHTML = '<span class="muted">' + t('Couldn\'t read the list of games.') + '</span>'; });
 }
 
 /* ------------------------------------------------------------------ hub backup copy (Settings, coach's hub key only) */
