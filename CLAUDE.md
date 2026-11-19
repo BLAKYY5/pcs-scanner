@@ -31,17 +31,23 @@ writing this code: explain outcomes in plain words, not internals.
 scanner/pcs_scan.py     the video scanner (CLI + library). VERSION lives here: the app's version.
 scanner/pcs_hud.py      HUD reading helpers (ring clock, layout 16:9 / 4:3 stretched, glyphs)
 scanner/pcs_audio.py    sound cues on the game track (ring-moving alarm so far)
-scanner/pcs_maps.json, pcs_fonts.json, rank_rp.npy   reference data the scanner ships with
+scanner/pcs_ring.py, pcs_respawn.py, pcs_bars.py, pcs_mapicons.py, pcs_fights.py, pcs_usage.py, pcs_minimap.py,
+pcs_ranked.py           more readers (ring circles, respawns, own bars, care packages, fights, heals, minimap, RP)
+scanner/pcs_maps.json, pcs_fonts.json, pcs_banner.json, pcs_ranked.json, rank_rp.npy   reference data it ships with
 app/pcs_app.py          entry point: single instance, tray, window (pywebview), Tk toasts, updater finish
 app/pcs_core.py         paths, settings, Google Drive / YouTube sign-in, update check + install, run_scan
 app/pcs_server.py       localhost HTTP API + static web UI (token-protected), Backend class
 app/pcs_levels.py       loudness per track, fight and mic-peak detection for the review player
 app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket), core (Recorder),
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
-                        eec (results from export/hub), night (night uploads, shutdown), labels (session types)
-app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together) (no build step, no framework)
+                        eec (results from export/hub), night (night uploads, shutdown), labels (session types),
+                        hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
+                        hubbackup, stitch (team hub features, see below)
+app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
+                        review-extras.js (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
+tools/                  developer tools, not in the exe (region cache, check set, audio cross-check, mode emblems)
 .github/workflows/build.yml   Windows build, tests, PyInstaller onefile exe, selftest, release
 ```
 
@@ -126,8 +132,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   the same evening), the label comes from the scan alone, the reason is kept (`eec_rejected`, `label_why`). Nothing
   to compare = old behaviour. Display: EEC's drop wins, ours is shown next to it when different ("scan: ...").
 - **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
-  the old process, copies itself over the old exe and restarts. Versions ≤ 1.10.1 need one manual install.
-  Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
+  the old process, copies itself over the old exe and restarts. Every player is on 1.10.12 or newer (same updater):
+  their app takes the release's one `.exe` and starts it with `--finish-update <old exe> <old pid> [--show]`, so keep
+  the single `PCS-Scanner.exe` release file and that command line (`test_update_relaunch_arguments`). Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
   (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
   without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
   message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).
@@ -205,7 +212,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
 - **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
   No coach address or account name is built into the exe (a security review found one in `build.json`; removed
   18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
-  player types in Settings (`coach_email`, once per address: `shared_with`). Coach-only: importing recordings by hand.
+  player types in Settings (`coach_email`, once per address: `shared_with`; shown only without a hub, never decides
+  the role): it is how the coach reads the Drive results of players without a hub. Coach-only: importing recordings
+  by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file
