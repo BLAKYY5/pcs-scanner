@@ -875,6 +875,7 @@ class Backend:
                    "gbPerHour": round(s.gb_per_hour, 2), "encoder": s.encoder,
                    "bitrateDefault": default_mbps(s.encoder), "bitrateAuto": bool(getattr(s, "bitrate_auto", True)),
                    "settingUp": bool(getattr(a, "_setting_up", False)),   # first-time setup (OBS + encoder test)
+                   "check": self.rec_check(),            # the recording check (Home, setup)
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
@@ -894,6 +895,22 @@ class Backend:
                 "scans": {"now": Path(self.scan_now).name if self.scan_now else None, "queued": len(self.scan_queue),
                           "since": self.scan_started if self.scan_now else None},
                 "results": core.OUT}
+
+    # ------------------------------------------------------------- recording check
+    def rec_check(self) -> dict | None:
+        c = getattr(self.auto, "check", None) if self.auto else None
+        return c.public() if c is not None else None
+
+    def rec_check_again(self) -> dict:
+        """Home → Check again: the full check in the background (refused while the encoder test runs)."""
+        a = self.auto
+        c = getattr(a, "check", None) if a else None
+        if c is None:
+            raise RuntimeError("Auto-record isn't available in this build")
+        if getattr(a, "_setting_up", False):
+            raise RuntimeError("Wait for the recorder set-up to finish.")
+        c.start(manual=True)                              # may start OBS; closed again if it wasn't running
+        return c.public()
 
     # ------------------------------------------------------------- team hub
     def hub_state(self) -> dict:
@@ -1006,7 +1023,8 @@ class Backend:
         return notes.fetch(url, it["path"], item_id, player)
 
     def note_change(self, item_id: str, action: str, body: dict) -> dict:
-        """Coach: save / delete a note; anyone: mark notes as seen. Returns the recording's notes afterwards."""
+        """Coach: save / delete a note; anyone: mark notes as seen, "Got it" / reply under a note (`reply`), remove
+        an own reply (`unreply`). Returns the recording's notes afterwards."""
         from pcs_recorder import notes
         url, it = self._notes_target(item_id)
         if not url:
@@ -1016,6 +1034,10 @@ class Backend:
             notes.save(url, it["path"], player or "", body.get("note") or {})
         elif action == "delete":
             notes.delete(url, body.get("note_id"))
+        elif action == "reply":
+            notes.reply(url, body.get("note_id"), ack=bool(body.get("ack")), text=str(body.get("text") or ""))
+        elif action == "unreply":
+            notes.delete_reply(url, body.get("note_id"), body.get("reply_id"))
         elif action == "seen":
             for nid in (body.get("note_ids") or [])[:50]:
                 notes.seen(url, nid)
@@ -1648,7 +1670,8 @@ class Server:
                     if path == "/api/youtube/block":
                         return self._json(b.yt_block(body.get("id", ""), body.get("action", ""),
                                                      body.get("title"), body.get("privacy")))
-                    if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen"):
+                    if path in ("/api/notes/save", "/api/notes/delete", "/api/notes/seen", "/api/notes/reply",
+                                "/api/notes/unreply"):
                         return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
                     if path.startswith("/api/watch/"):
                         return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
@@ -1721,6 +1744,8 @@ class Server:
                         threading.Thread(target=retest, daemon=True).start()
                         b.say("Testing the graphics card's encoders again (a few seconds)…")
                         return self._json({"ok": True})
+                    if path == "/api/reccheck":                # Home → Recording check → Check again
+                        return self._json({"check": b.rec_check_again()})
                     if path == "/api/setup/choice":            # first-run setup: one choice, applied at once
                         b.setup_choice(str(body.get("choice") or ""), bool(body.get("on")))
                         return self._json(b.state())

@@ -254,6 +254,9 @@ function setupHTML() {
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
       ${drive ? li(st.google, false, 4, 'Google Drive', 'No team hub yet: your results go to your Drive, shared with the coach.',
         st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>') : ''}
+      ${r.enabled && r.check ? li(!!(!r.check.running && r.check.items && r.check.items.length && !r.check.red), !!r.check.running, total + 1,
+        'Recording check', 'Recorder, encoder, sound, disk space, other capture apps. Details below.',
+        `${checkSummary(r.check)}<button class="btn small" id="su-check" ${r.check.running ? 'disabled' : ''}>Check again</button>`) : ''}
     </ol></section>`;
 }
 function wireSetup() {
@@ -286,6 +289,33 @@ function wireSetup() {
   };
   const g = $('#su-google'); if (g) g.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
 }
+/* Recording check: one line per item (green / red / amber / grey), a "how to fix" line under each red or amber one */
+const CHECK_STATE = {ok: ['OK', 'good'], bad: ['Fix', 'bad'], warn: ['Check', 'warn'], wait: ['Later', ''], off: ['Off', '']};
+function checkSummary(c) {
+  if (c && c.running) return '<span class="pill info">Checking…</span>';
+  if (!c || !c.items || !c.items.length) return '<span class="pill">Not checked yet</span>';
+  return c.red ? `<span class="pill bad">${c.red} to fix</span>` : '<span class="pill good">Ready to record</span>';
+}
+function checkHTML(c) {
+  const items = (c && c.items) || [];
+  const when = c && c.at && !c.running ? 'Checked ' + new Date(c.at * 1000).toLocaleTimeString(undefined, {hour: '2-digit', minute: '2-digit'}) : '';
+  return `<section class="card reccheck" id="reccheck"><div class="row between"><h2>Recording check</h2>
+      <span class="row">${checkSummary(c)}<span class="faint" style="font-size:12.5px">${esc(when)}</span>
+        <button class="btn small" id="rc-again" ${c && c.running ? 'disabled' : ''}>${c && c.running ? 'Checking…' : 'Check again'}</button></span></div>
+    ${c && c.running ? '<p class="muted rc-hint">Listening for a few seconds: say something into your mic.</p>' : ''}
+    <ul class="checks">${items.map(i => { const [word, cls] = CHECK_STATE[i.state] || ['?', ''];
+      return `<li class="ck ${esc(i.state)}"><i class="ckdot" aria-hidden="true"></i><div><b>${esc(i.label)}</b> <span class="pill ${cls}">${word}</span>
+        <span class="cktext">${esc(i.text)}</span>${i.fix && (i.state === 'bad' || i.state === 'warn') ? `<small class="fix">How to fix: ${esc(i.fix)}</small>` : ''}</div></li>`; }).join('') ||
+      '<li class="muted">Runs by itself once Auto-record is set up.</li>'}</ul></section>`;
+}
+function wireCheck() {
+  $$('#rc-again, #su-check').forEach(b => b.onclick = async () => {
+    b.disabled = true;
+    try { const r = await api('/api/reccheck', {}); if (S && S.recorder) S.recorder.check = r.check; toast('Checking: say something into your mic.'); }
+    catch (e) { toast(e.message, true); }
+    renderHome(null, true); schedulePoll(1500);
+  });
+}
 function renderHome(prev, force) {
   if (!S) { $('#main').innerHTML = '<div class="empty"><strong>Starting…</strong></div>'; return; }
   if (!force && prev && homeKey(prev) === homeKey(S)) return;
@@ -311,6 +341,7 @@ function renderHome(prev, force) {
         ${r ? switchHTML('t-boot', r.settings.start_with_windows, 'Start with Windows', 'Waits in the tray, nothing to remember') : ''}
       </div>
     </section>
+    ${r && r.enabled && r.check ? checkHTML(r.check) : ''}
     <div class="kpis">
       <div class="kpi"><span>Recordings</span><b>${r ? r.count : LIB.length}</b><small>kept ${r ? r.settings.keep_days + ' days' : '—'}</small></div>
       <div class="kpi"><span>Storage used</span><b>${r ? fmtGB(used) : '—'}</b><small>of ${r ? r.settings.max_gb + ' GB' : '—'}</small>
@@ -343,6 +374,7 @@ function renderHome(prev, force) {
     catch (e) { toast(e.message, true); tb.checked = !tb.checked; }
   };
   wireSetup();
+  wireCheck();
   const si = $('#signin'); if (si) si.onclick = e => { e.preventDefault(); api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   const ps = $('#psave'); if (ps) ps.onclick = async () => {
     const v = $('#pname').value.trim(); if (!v) return;
@@ -1007,18 +1039,64 @@ function drawNotes(body) {
       n.drawings && n.drawings.length ? 'drawing' : '', `${Math.round(n.dur)} s`,
       coach && seen ? (seen.length ? 'Seen by ' + esc(seen.join(', ')) : 'Not seen yet') : ''].filter(Boolean).join(' · ');
     return `<div class="ev note ${RV.ed && RV.ed.id === n.id ? 'editing' : ''}" data-t="${n.t}" data-id="${esc(n.id)}"><time>${fmtT(n.t)}</time><i style="background:${(n.drawings && n.drawings[0] && n.drawings[0].color) || '#ffd60a'}"></i>
-      <span><b>${esc(n.text || 'Drawing')}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">Edit</button><button class="btn small danger" data-a="del">Delete</button></span>` : ''}</span></div>`;
+      <span><b>${esc(n.text || 'Drawing')}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">Edit</button><button class="btn small danger" data-a="del">Delete</button></span>` : ''}${repliesHTML(n, r, coach)}</span></div>`;
   }).join('') || `<div class="empty">${coach ? 'No notes yet. Pause where you want one and press New note.' : 'No coach notes on this recording.'}</div>`;
+  const focus = document.activeElement && document.activeElement.dataset && document.activeElement.dataset.reply;
   body.innerHTML = html;
   $$('.ev.note', body).forEach(el => el.onclick = e => {
     const n = notes.find(x => x.id === el.dataset.id), a = e.target.dataset && e.target.dataset.a;
     if (a === 'edit') return openEditor(n);
     if (a === 'del') return deleteNote(n);
+    if (a === 'ack') return sendReply(n, {ack: true}, e.target);
+    if (a === 'send') return sendReply(n, {text: $(`input[data-reply="${CSS.escape(n.id)}"]`, el).value}, e.target);
+    if (a === 'unreply') return removeReply(n, e.target.dataset.rid, e.target);
+    if (e.target.closest('.nreply')) return;            // typing a reply: the video stays where it is
     if (!RV.ed) seek(n.t);
     markSeen([n]);
   });
+  $$('input[data-reply]', body).forEach(inp => {          // a draft survives redraws (hub refresh, new notes)
+    inp.value = replyDrafts[inp.dataset.reply] || '';
+    inp.oninput = () => { replyDrafts[inp.dataset.reply] = inp.value; };
+    inp.onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const b = inp.parentNode.querySelector('[data-a="send"]'); if (b) b.click(); } };
+    if (focus && inp.dataset.reply === focus) inp.focus();
+  });
   const nn = $('#nNew', body); if (nn) nn.onclick = () => openEditor(null);
   const np = $('#nPlayer', body); if (np) np.onchange = () => { closeEditor(); loadNotes(RV.d.id, np.value); };
+}
+
+/* replies under a note (hub with replies): "Got it" in one click, or a short text; the coach answers back.
+   The list comes with the notes (cached for offline); sending needs the hub. */
+const replyDrafts = {};
+function repliesHTML(n, r, coach) {
+  if (!Array.isArray(n.replies)) return '';                 // a hub from before replies
+  const me = ((r.me && r.me.name) || '').toLowerCase();
+  const mine = x => x.by.toLowerCase() === me;
+  const list = n.replies.map(x => `<div class="nrep${x.role === 'coach' ? ' coach' : ''}"><b>${esc(mine(x) ? 'You' : x.by)}</b> ${x.kind === 'ack' ? '<span class="nack">Got it</span>' : `<span class="ntext">${esc(x.text)}</span>`}
+    <small>${esc(fmtWhen(x.at))}</small>${mine(x) && !r.offline ? ` <button class="nlink" data-a="unreply" data-rid="${esc(x.id)}" title="Remove your reply">Remove</button>` : ''}</div>`).join('');
+  if (r.offline) return list ? `<div class="nreplies">${list}</div><small class="faint">Replies need the team hub.</small>` : '';
+  const acked = n.replies.some(x => x.kind === 'ack' && mine(x));
+  return `${list ? `<div class="nreplies">${list}</div>` : ''}<div class="nreply">${coach || acked ? '' : '<button class="btn small brand" data-a="ack" title="Tell the coach you read it">Got it</button>'}<span class="nrow"><input type="text" data-reply="${esc(n.id)}" maxlength="500" placeholder="${coach ? 'Reply' : 'Reply to the coach'}" autocomplete="off"><button class="btn small" data-a="send">Send</button></span></div>`;
+}
+function fmtWhen(iso) {
+  const d = new Date(iso); if (isNaN(d)) return '';
+  return d.toLocaleString(undefined, {day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'});
+}
+async function sendReply(n, body, btn) {
+  if (!body.ack && !(body.text || '').trim()) return toast('Write a reply first.', true);
+  if (btn) btn.disabled = true;
+  try {
+    if (!body.ack) replyDrafts[n.id] = '';
+    setNotes(await api('/api/notes/reply', {id: RV.d.id, player: RV.notes.player, note_id: n.id, ...body}));
+    toast(body.ack ? 'Sent: Got it.' : 'Reply sent.');
+  } catch (e) {
+    if (!body.ack) replyDrafts[n.id] = body.text;
+    toast('Reply not sent: ' + e.message, true); if (btn) btn.disabled = false;
+  }
+}
+async function removeReply(n, rid, btn) {
+  if (btn) btn.disabled = true;
+  try { setNotes(await api('/api/notes/unreply', {id: RV.d.id, player: RV.notes.player, note_id: n.id, reply_id: rid})); }
+  catch (e) { toast(e.message, true); if (btn) btn.disabled = false; }
 }
 
 /* the drawing layer: a canvas exactly over the picture (the video keeps its shape inside its box) */

@@ -213,7 +213,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   answer), not the app's Coach role, decides who may write. Drawings are 0..1 coordinates of the video frame, drawn
   on a canvas fitted to the picture (`fitInk`), repainted only when the set of notes on screen changes. "Squad"
   notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
-  never. Last answer cached in `notes-cache/` for offline. Full screen is the player box (F / button), the video's
+  never. Last answer cached in `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
+  each note the player sends "Got it" (once) or a short reply (≤ 500 characters), the coach answers back (no Got it
+  for him); everyone who sees a note sees its replies (they come with the notes, so offline too); sending needs the
+  hub (`notes.reply`, `/api/notes/reply` / `unreply`, no queue). A hub without replies sends no `replies` field: no
+  reply box. A reply draft survives the list being redrawn. Full screen is the player box (F / button), the video's
   own full-screen button is hidden, or the drawings would not show.
 - **Watch together** (`pcs_recorder/watch.py`, `web/session.js` + `session.css`, hub 0.5 `/api/videos`, `/api/sessions`,
   contract in the hub's `AGENT.md`): the coach and the squad watch one game together, every player's view side by
