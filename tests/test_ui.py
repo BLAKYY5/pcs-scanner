@@ -153,6 +153,8 @@ def test_recording_date_and_game_data_for_review():
             "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
             "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
+            "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[600.0, "blue", 75, 100], [900.0, "knocked"],
+                                                                                [912.0, "white", 0, 30]], "mates": [[], []]},
             "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
             "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
             "ammoEvents": [{"t": 700.0, "kind": "lowAmmoFight", "mag": 12, "reserve": 8, "magFull": 28, "fightEnd": 720.0},
@@ -191,6 +193,10 @@ def test_recording_date_and_game_data_for_review():
         assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
         assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
+        # own shield / health (pcs_bars shieldTimeline): a thin lane, shown only when the scan has it, words through t()
+        assert g["shieldTimeline"]["self"][1] == [900.0, "knocked"] and o["shieldTimeline"] is None
+        assert "shieldRuns(d).length ? '<div class=\"lane shield\" id=\"laneH\">" in js and "t('Your shield · health')" in js
+        assert "drawShield();" in js and "t('shield {shield} ({tier}) · health {health}'" in js
         # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
         assert "knock: ['', t('Knocked')]" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
@@ -638,8 +644,11 @@ def test_no_google_drive_results():
     root = Path(__file__).resolve().parent.parent
     for f in ("pcs_core.py", "pcs_server.py", "pcs_app.py", "pcs_recorder/runtime.py", "pcs_recorder/core.py"):
         text = (root / "app" / f).read_text(encoding="utf-8")
+        if f == "pcs_core.py":                  # only to recognise and remove the old Drive sign-in file at start
+            assert text.count("google_token.json") == 1 and text.count("auth/drive") == 1, f
+            text = text.replace("google_token.json", "").replace("auth/drive", "")
         assert "auth/drive" not in text and "'drive', 'v3'" not in text and "drive_upload" not in text, f
-        assert "PCS Scans" not in text and "google_token.json" not in text, f
+        assert "PCS Scans" not in text and "google_token.json" not in text and "Drive only" not in text, f
     privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
     assert "not used any more" in privacy and "never to Google Drive" in privacy
 
@@ -896,6 +905,51 @@ def test_sign_in_tokens_encrypted():
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
+def test_old_drive_signin_removed():
+    """At start the old Drive sign-in (google_token.json, drive.file only) is removed: only that file, only while
+    every permission in it is a Drive one. A YouTube or account sign-in in it, a file without permissions, one that
+    can't be read here, and youtube_token.json are left alone."""
+    base = {"token": "ya29.old", "refresh_token": "1//rt-old", "client_id": "cid", "client_secret": "cs",
+            "token_uri": "https://oauth2.googleapis.com/token"}
+    drive = ["https://www.googleapis.com/auth/drive.file"]
+    f = Path(core.OLD_DRIVE_TOKEN_F)
+    assert f.name == "google_token.json" and f.parent == Path(core.YT_TOKEN_F).parent
+    yt = Path(core.YT_TOKEN_F)
+    yt_before = yt.read_bytes() if yt.exists() else None
+    try:
+        assert core.remove_old_drive_signin() is False                         # no file: nothing to do
+        # the old kind, in clear (1.9 and older) and encrypted (1.10.x): removed
+        f.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        core.write_token(str(f), json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        f.write_text(json.dumps({**base, "scopes": " ".join(drive)}))         # scopes as one string
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        # anything else in that file stays
+        for info in ({**base, "scopes": core.YT_SCOPES},                        # YouTube
+                     {**base, "scopes": drive + core.YT_SCOPES},                # Drive and YouTube
+                     {**base, "scopes": drive + ["openid", "email"]},           # an account sign-in
+                     {**base, "scopes": []}, base):                             # no permissions written
+            f.write_text(json.dumps(info))
+            assert core.remove_old_drive_signin() is False and f.exists(), info
+            f.unlink()
+        for raw in (json.dumps({"dpapi": "AAAA"}), "not json"):               # another user's, damaged
+            f.write_text(raw)
+            assert core.remove_old_drive_signin() is False and f.exists()
+            f.unlink()
+        # youtube_token.json is never removed, even holding a Drive-only sign-in
+        yt.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin(str(yt)) is False and yt.exists()
+        assert core.remove_old_drive_signin() is False and yt.exists()
+        # the app calls it once at start
+        src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+        assert "core.remove_old_drive_signin()" in src
+    finally:
+        f.unlink(missing_ok=True)
+        if yt_before is None: yt.unlink(missing_ok=True)
+        else: yt.write_bytes(yt_before)
+
+
 def test_request_body_limit():
     """The page sends small JSON only: a huge request body is refused before it is read."""
     b = pcs_server.Backend()
@@ -953,6 +1007,13 @@ def test_hub_notes_cleaned_for_the_page():
     assert [d["color"] for d in n["drawings"]] == ["#ffd60a", "#ffd60a"]
     assert n["drawings"][0]["pts"] == [[0.1, 0.2], [0.0, 1.0]]
     assert notes.num(float("nan")) == 0.0 and notes.num("12.5") == 12.5 and notes.num(None, 3.0) == 3.0
+    # the 2D replay range: two numbers in order, or none at all
+    assert notes.clean_note({"t": 1, "replayFrom": "-20", "replayTo": 40})["replayFrom"] == -20.0
+    for bad in ({"replayFrom": 10}, {"replayFrom": 50, "replayTo": 40}, {"replayFrom": "x", "replayTo": 4},
+                {"replayFrom": None, "replayTo": None}):
+        n = notes.clean_note({"t": 1, **bad})
+        assert "replayFrom" not in n and "replayTo" not in n, bad
+    assert "replayFrom" in notes.FIELDS and "replayTo" in notes.FIELDS
 
 
 def test_no_password_in_app_log():
@@ -2115,6 +2176,9 @@ def test_coach_notes():
         r = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "Rotate now"}})[1]
         assert r["notes"][0]["text"] == "Rotate now" and r["notes"][0]["version"] == 2
         assert fake.calls[-2][0] == "PUT" and fake.calls[-2][2] == {"if_version": "1"}
+        # a 2D replay range (hub 0.6, seconds after the jump) goes with the note; null / null clears it
+        call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**r["notes"][0], "replayFrom": 30.5, "replayTo": 60}})
+        assert fake.calls[-2][0] == "PUT" and fake.calls[-2][3]["replayFrom"] == 30.5 and fake.calls[-2][3]["replayTo"] == 60
         code, r, _ = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "stale"}})
         assert code == 500 and "409" in r["error"] and "reload" in r["error"], r                # someone changed it
         # a recording the hub doesn't know: said so, and saving is refused with the hub's words

@@ -210,8 +210,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
   Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent
   yet: no team hub", one Activity line, no pop-up) and are sent once the player joins; Home and Settings show
-  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) and an old `google_token.json` are left
-  alone and never read; `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) are left
+  alone and never read; the old Drive sign-in `google_token.json` is removed at start when every permission in it is a
+  Drive one (`core.remove_old_drive_signin`, coach's decision 26, 20 Nov 2026; anything else in it stays); `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
@@ -253,7 +254,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   answer), not the app's Coach role, decides who may write. Drawings are 0..1 coordinates of the video frame, drawn
   on a canvas fitted to the picture (`fitInk`), repainted only when the set of notes on screen changes. "Squad"
   notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
-  never. Last answer cached in `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
+  never. A note may carry the hub's 2D replay range (`replayFrom` / `replayTo`, hub 0.6, seconds after the jump of
+  the note's game): the coach's editor sets it as seconds before / after the note (decision 38). Last answer cached in
+  `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
   each note the player sends "Got it" (once) or a short reply (≤ 500 characters), the coach answers back (no Got it
   for him); everyone who sees a note sees its replies (they come with the notes, so offline too); sending needs the
   hub (`notes.reply`, `/api/notes/reply` / `unreply`, no queue). A hub without replies sends no `replies` field: no
@@ -574,7 +577,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   17 cards): 16 found (a card at 2 % health is not found by read_cards), tier 16 / 16, shield and health ±5 15 / 16
   (a striped segment being recharged counts as filled). GPU vs CPU decoding (15 Nov 880-1700 s, 7 Nov 3000-3800 s):
   own state and tier the same on all 1620 keyframes, values within 2 on 1617 (3 health reads 3-7 apart on a damaged
-  bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review player shows own knocks like respawns (a grey tick with a
+  bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review
+  player draws the own `shieldTimeline` as a thin lane under the kill feed (decision 36: shield in the armour colour
+  out of 125 on top, health below, dark red while knocked; hover = the values). The review player shows own knocks like respawns (a grey tick with a
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
 - **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
   opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
