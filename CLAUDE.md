@@ -705,6 +705,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   The POS reader itself misreads now and then (a minus sign lost, 9 read as 8, a dropped digit): the minimap was
   right in every case looked at; those POS rows were the "errors".
   Cost: ~1 ms per read at scan time (0.3 ms per keyframe), matching ~3-8 ms per read after the chunks are done.
+- **Ring console reveals**: `pcs_hud.ring_reveal` finds the feed line "<name> revealed the next ring on map" (a squad
+  member used a ring console: the squad knows the next ring early) by the shape of the words after the name
+  (`pcs_banner.json` `ringReveal`, grey cells from our own recordings; English text only). Feed lines get `ringReveal`
+  (score), games get `ringIntel` [{t}] (recording time; [] = none seen). A line is checked when first saved and on
+  its next 4 captures (it is often saved while fading in). Check set field `ringReveal` (reader `ringreveal`).
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
   Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a

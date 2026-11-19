@@ -937,6 +937,9 @@ def main():
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_highlights.attach(games, feed_lines, own_reads, bar_reads, pcs_highlights.parse_rules(A.highlights))   # key plays
         except Exception as e: perf['highlightsError'] = f'{type(e).__name__}: {e}'[:200]
+        for i, gm in enumerate(games):       # ring console reveals in the feed: the squad knew the next ring early
+            try: gm['ringIntel'] = HUD.ring_intel(feed_lines, gm['tStart'] - 60, games[i + 1]['tStart'] if i + 1 < len(games) else float('inf'))
+            except Exception as e: perf['ringIntelError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_bans.attach(games, perf.pop('_bans', []), HUD.STRETCH)    # legends banned before each game (Ranked Diamond+)
         except Exception as e: perf['bansError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines or rp_lines:

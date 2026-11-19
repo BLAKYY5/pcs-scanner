@@ -578,6 +578,7 @@ class Feed:
     'marker' (arrow / skull / rank), 'headshot' (gold skull: the kill's last bullet was a headshot), and 'killer' /
     'victim' = {'side': 'squad' or 'other'} with the squad colour ('hue', 'color') for our own squad's names."""
     X0, X1, Y0, Y1 = 1820, 2470, 260, 640
+    REVEAL_LOOKS = 4          # later captures of a line without a weapon checked again for the ring console words
     def __init__(self, weapons=None): self.recent = []; self.lines = []; self.weapons = weapons if weapons is not None else Weapons()
     @staticmethod
     def _text(p):
@@ -608,11 +609,22 @@ class Feed:
             if len(cols) < 20 or cols[-1] < mm.shape[1] - 60 or not self._texty(mm): continue   # right-aligned text only
             x0 = max(0, cols[0] - 6); w = mm.shape[1] - x0
             sig = np.array(Image.fromarray((mm[:, x0:] * 255).astype(np.uint8)).resize((64, 6), Image.BILINEAR)) > 50
-            dup = False
+            dup = None
             for r in self.recent:
-                if abs(r[2] - w) < 14 and (r[1] ^ sig).mean() < 0.14: r[0] = t; dup = True; break
-            if dup: continue
-            self.recent.append([t, sig, w])
+                if abs(r[2] - w) < 14 and (r[1] ^ sig).mean() < 0.14: r[0] = t; dup = r; break
+            if dup is not None:
+                # the line was saved when first seen, often while it fades in: look again for the ring console words
+                # on the next few captures of a line that showed no weapon
+                ln = dup[3] if len(dup) > 3 else None
+                if ln is not None and 'weapon' not in ln and 'ringReveal' not in ln and dup[4] < self.REVEAL_LOOKS:
+                    dup[4] += 1
+                    try:
+                        c2 = Image.fromarray(reg[max(0, y0 - 5):y1 + 5, x0:].astype(np.uint8))
+                        s = ring_reveal(np.asarray(c2.resize((max(1, c2.width * 2 // 3), max(1, c2.height * 2 // 3)), Image.LANCZOS)))
+                        if s >= RING_REVEAL_MIN: ln['ringReveal'] = round(s, 2)
+                    except Exception: pass
+                continue
+            rec = [t, sig, w]; self.recent.append(rec)
             crop = Image.fromarray(reg[max(0, y0 - 5):y1 + 5, x0:].astype(np.uint8))
             crop = crop.resize((max(1, crop.width * 2 // 3), max(1, crop.height * 2 // 3)), Image.LANCZOS)
             b = io.BytesIO(); crop.save(b, 'JPEG', quality=80)
@@ -633,7 +645,68 @@ class Feed:
                             if kp.get(key): line[key] = kp[key]
                     except Exception: pass
             except Exception: pass
+            if 'weapon' not in line:
+                try:
+                    s = ring_reveal(np.asarray(crop))
+                    if s >= RING_REVEAL_MIN: line['ringReveal'] = round(s, 2)
+                except Exception: pass
+            rec += [line, 0]
             self.lines.append(line)
+
+
+# ---------- ring console: "<name> revealed the next ring on map" in the feed ----------
+# When a squad member uses a ring console (controller legends, Season 31) the game writes that line in the feed of the
+# whole squad (and only of that squad): the squad knows the next ring before everyone else. The line is the name, then
+# fixed words. They are found by their look: the feed line (at the size of its saved picture, 2/3 of the screen's)
+# turned into "white letter" strength, cut to the text band, compared at every position with the shape of the words
+# "the next ring on map" (pcs_banner.json 'ringReveal': grey cells 0..f, the mean of 7 such lines of our own
+# recordings, 7 and 17 Nov 2026). English game text only (the coach's game; another language = not found).
+# Measured on 10,170 feed lines of 20 of our recordings (read with Windows' text recognition as the truth): every
+# reveal found at least once except 1 of 12 (a single faded capture), no other line above 0.44 (the threshold is 0.55;
+# "revealed enemies on the map", the recon beacon's line, scores at most 0.43).
+RING_REVEAL_H = 14
+def _ring_reveal_template():
+    t = BANNER_T.get('ringReveal') or {}
+    try: return np.array([[int(c, 16) for c in row] for row in t['cells']], np.float32) / 15
+    except Exception: return None
+RING_REVEAL_MIN = 0.55        # best correlation for a reveal line (other lines: at most 0.44 on our recordings)
+
+def _reveal_band(a):
+    """White-letter strength (0..1) of a feed line picture (RGB), RING_REVEAL_H rows around the middle of its text."""
+    a = a.astype(np.float32); mn = a.min(2); mx = a.max(2)
+    w = np.clip((mn - 120) / 100, 0, 1) * np.clip(1 - (mx - mn) / 90, 0, 1)
+    rows = (w > 0.5).sum(1)
+    if rows.max() < 5: return None
+    ys = np.nonzero(rows >= max(3, rows.max() * 0.25))[0]
+    y0 = int(round((ys[0] + ys[-1]) / 2)) - RING_REVEAL_H // 2
+    out = np.zeros((RING_REVEAL_H, w.shape[1]), np.float32)
+    for i in range(RING_REVEAL_H):
+        if 0 <= y0 + i < w.shape[0]: out[i] = w[y0 + i]
+    return out
+
+_RR = []
+def ring_reveal(a):
+    """Best normalised correlation (-1..1) of the words "the next ring on map" along a feed line picture (RGB, the size
+    of the saved line picture). 0 when the line is too short or the shape table is missing."""
+    if not _RR: _RR.append(_ring_reveal_template())
+    T = _RR[0]
+    b = _reveal_band(np.asarray(a))
+    if T is None or b is None or b.shape[1] < T.shape[1]: return 0.0
+    tw = T.shape[1]; Tz = T - T.mean(); tn = float(np.sqrt((Tz * Tz).sum()))
+    P = np.lib.stride_tricks.sliding_window_view(b, (RING_REVEAL_H, tw))[0]          # positions x rows x cols
+    Pm = P.mean((1, 2), keepdims=True); Pz = P - Pm
+    pn = np.sqrt((Pz * Pz).sum((1, 2)))
+    s = (Pz * Tz).sum((1, 2)) / np.maximum(pn * tn, 1e-6)
+    s[pn < 1e-3] = 0
+    return float(s.max())
+
+def ring_intel(lines, t0, t1, same_s=20.0):
+    """The ring console reveals of one game (feed lines between t0 and t1): [{'t'}], one per reveal (the same line
+    captured again within same_s counts once)."""
+    out = []
+    for l in sorted((l for l in lines if 'ringReveal' in l and t0 <= l['t'] < t1), key=lambda l: l['t']):
+        if not out or l['t'] - out[-1]['t'] > same_s: out.append({'t': l['t']})
+    return out
 
 
 # ---------- legend select screen: start of a game + each squad member's legend ----------
