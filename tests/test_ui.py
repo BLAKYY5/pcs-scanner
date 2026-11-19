@@ -2781,18 +2781,20 @@ def test_watch_session_plan_through_the_app():
         hub.set_key(GOOD_KEY)
         r = call(srv, "/api/watch/list?fresh=1")[1]
         assert [(p["id"], p["moments"]) for p in r["plans"]] == [("pl-1", 3), ("pl-2", 0)]
+        def last(path):                    # the session's websocket connects in its own thread: skip its calls
+            return next((c[1:3] for c in reversed(fake.calls) if c[0] == "POST" and c[1] == path), None)
         code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "", "plan": "pl-1"})
         assert code == 200 and snap["state"]["plan"]["at"] == 0 and snap["state"]["gameKey"] == "g-1"
-        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
+        assert last("/api/sessions") == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
         assert wait_for(lambda: b.watch.connected)
         call(srv, "/api/watch/control", {"action": "item", "index": 1, "junk": 2})
-        assert fake.calls[-1][1:3] == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
+        assert last("/api/sessions/s-1/control") == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
         call(srv, "/api/watch/control", {"action": "plan", "plan": "pl-1"})
-        assert fake.calls[-1][2] == {"action": "plan", "plan": "pl-1"}
+        assert last("/api/sessions/s-1/control")[1] == {"action": "plan", "plan": "pl-1"}
         call(srv, "/api/watch/end", {})
         # a plain start sends no plan (as before)
         call(srv, "/api/watch/start", {"gameKey": "g-2"})
-        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "g-2"})
+        assert last("/api/sessions") == ("/api/sessions", {"gameKey": "g-2"})
         call(srv, "/api/watch/end", {})
         # a hub without plans: the list still works, with none
         fake.has_plans = False
@@ -3484,10 +3486,14 @@ class _Page:
             self.prof = Path(tempfile.mkdtemp(dir=TMP))
             self.proc = subprocess.Popen([str(edge), "--headless=new", "--remote-debugging-port=0", "--no-first-run",
                                           f"--user-data-dir={self.prof}", "--window-size=1320,860", "about:blank"])
-            port_f, end = self.prof / "DevToolsActivePort", time.time() + 30
-            while not (port_f.exists() and port_f.read_text().strip()) and time.time() < end:
-                time.sleep(0.2)
-            port = int(port_f.read_text().split()[0])
+            port_f, end, port = self.prof / "DevToolsActivePort", time.time() + 60, 0
+            while not port:
+                try:                               # Edge holds the file while it writes it: Permission denied
+                    port = int(port_f.read_text().split()[0])
+                except (OSError, ValueError, IndexError):
+                    if time.time() > end:
+                        raise
+                    time.sleep(0.2)
         end = time.time() + 20
         while True:
             try:
@@ -3498,10 +3504,12 @@ class _Page:
                 if time.time() > end:
                     raise
                 time.sleep(0.3)
-        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
-        self.n = 0
-        self.send("Page.navigate", {"url": url})
-        end = time.time() + 20
+        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=60, suppress_origin=True)
+        self.n = 1
+        # not waiting for Page.navigate's own answer (slow on a busy runner: "timed out"): the loop below waits for
+        # the page itself, and send() skips answers that aren't its own
+        self.ws.send(json.dumps({"id": self.n, "method": "Page.navigate", "params": {"url": url}}))
+        end = time.time() + 45
         while self.js("typeof PCS_POLL") != "object":
             if time.time() > end:
                 raise AssertionError("the page didn't load")
@@ -3528,6 +3536,10 @@ class _Page:
             self.ws.close()
         finally:
             if self.proc:
+                if os.name == "nt":                # Edge's own child processes too, or they keep the runner busy
+                    import subprocess
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=30)
                 self.proc.kill()
                 self.proc.wait(10)
 

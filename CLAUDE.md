@@ -752,6 +752,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   `tools/checkset_example.json`; the real set references private recordings and lives in the handoff folder.
   Build a new reader against it, and add a truth only when the value was read on an extracted frame. Truths carry a
   `split` (`dev` / `held`, whole games, decided before tuning): tune on `--split dev`, report `--split held` too.
+- **Event check sets** (`tools/checksets.py`): bans, fights (+ ring stretches, red scenery), highlights, mode per game,
+  own knocks and bars, respawns, heals / abilities, scored on full scans (`<rec>.scan.json` from `pcs_scan.py --out`),
+  not the region cache: `recordings <folder>` lists what to scan, `score <folder> --scans DIR [--split] [--json]`
+  gives found / missed / false and results right per split (`--misses` lists them). Only the scan contract is read.
 
 ## Conventions
 
