@@ -811,6 +811,7 @@ async function renderReview(id) {
             <div class="lane games" id="laneG"><span class="lane-label">${t('Games')}</span></div>
             <div class="lane" id="laneE"><span class="lane-label">${t('Start · jump · landing · rings')}</span></div>
             <div class="lane" id="laneF"><span class="lane-label">${t('Kill feed')}</span></div>
+            ${shieldRuns(d).length ? '<div class="lane shield" id="laneH"><span class="lane-label">' + t('Your shield · health') + '</span></div>' : ''}
             <div class="lane sound" id="laneS"><span class="lane-label">${t('Sound')} · <span id="soundState">${t('analysing…')}</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">' + t('Your marks · muted sound') + '</span></div>' : ''}
             <div class="lane" id="laneN" hidden><span class="lane-label">${t('Coach notes')}</span></div>
@@ -1126,6 +1127,23 @@ const TOOLS = [['pen', t('Pen')], ['arrow', t('Arrow')], ['circle', t('Circle')]
 const isCoachKey = () => !!(RV && RV.notes && RV.notes.me && RV.notes.me.role === 'coach');
 const noteTitle = n => n.text ? n.text.split('\n')[0].slice(0, 80) : t('Drawing');
 
+/* 2D replay range of a note (hub 0.6 replayFrom / replayTo, the hub's /replay/?note=<id>): game time = seconds after
+   the jump of the game the note is in (the hub's rule: the last game started by then, 30 s of slack; jump as the hub
+   imports it: landing exitAtExact, else exitAt). The coach sets it as seconds before / after the note's moment. */
+function noteJump(at) {
+  let g = null;
+  ((RV && RV.d.games) || []).forEach(x => { if (typeof x.tStart === 'number' && x.tStart - 30 <= at) g = x; });
+  const L = (g && g.landing) || {}, j = L.exitAtExact || L.exitAt;
+  return typeof j === 'number' ? j : null;
+}
+function noteReplay(e) {      // fields to send: a range, null / null to clear one, or nothing
+  const r = e.replay;
+  if (r && r.on && e.jump != null) {
+    const a = Math.max(-60, Math.round((e.t - r.before - e.jump) * 10) / 10), b = Math.round((e.t + r.after - e.jump) * 10) / 10;
+    if (b > a) return {replayFrom: a, replayTo: Math.min(b, a + 1800)};
+  }
+  return r && r.had && e.jump != null ? {replayFrom: null, replayTo: null} : {};   // no jump here: the hub's range stays
+}
 async function loadNotes(id, player) {
   clearTimeout(loadNotes.h);
   let r;
@@ -1159,6 +1177,7 @@ function drawNotes(body) {
     const mine = !n.from, seen = n.seenBy ? Object.keys(n.seenBy) : null;
     const sub = [n.from ? t('From {player}\'s recording', {player: esc(n.from.player)}) : (n.scope === 'squad' ? t('Squad') : (coach ? t('This recording') : '')),
       n.drawings && n.drawings.length ? t('drawing') : '', `${Math.round(n.dur)} s`,
+      n.replayFrom != null ? t('2D replay {from}–{to} after the jump', {from: fmtT(Math.max(0, n.replayFrom)), to: fmtT(Math.max(0, n.replayTo))}) : '',
       coach && seen ? (seen.length ? t('Seen by {names}', {names: esc(seen.join(', '))}) : t('Not seen yet')) : ''].filter(Boolean).join(' · ');
     return `<div class="ev note ${RV.ed && RV.ed.id === n.id ? 'editing' : ''}" data-t="${n.t}" data-id="${esc(n.id)}"><time>${fmtT(n.t)}</time><i style="background:${(n.drawings && n.drawings[0] && n.drawings[0].color) || '#ffd60a'}"></i>
       <span><b>${esc(n.text || t('Drawing'))}</b><small>${sub}</small>${coach && mine && !r.offline ? `<span class="row nacts"><button class="btn small" data-a="edit">${t('Edit')}</button><button class="btn small danger" data-a="del">${t('Delete')}</button></span>` : ''}${repliesHTML(n, r, coach)}</span></div>`;
@@ -1326,6 +1345,11 @@ function openEditor(n) {
   RV.ed = {id: n ? n.id : null, version: n ? n.version : null, t: n ? n.t : Math.round(v.currentTime * 100) / 100,
            dur: n ? n.dur : 5, text: n ? n.text : '', scope: n ? n.scope : 'recording',
            drawings: n ? JSON.parse(JSON.stringify(n.drawings || [])) : [], tool: last.tool, color: last.color, cur: null};
+  RV.ed.jump = noteJump(RV.ed.t);
+  const had = n && n.replayFrom != null && RV.ed.jump != null;
+  RV.ed.replay = {on: had, had: !!(n && n.replayFrom != null),
+                  before: had ? Math.max(0, Math.round(RV.ed.t - RV.ed.jump - n.replayFrom)) : 10,
+                  after: had ? Math.max(1, Math.round(n.replayTo + RV.ed.jump - RV.ed.t)) : 20};
   $('#player').classList.add('drawing');
   $('#cnote').hidden = true;
   drawEditor(); fitInk(); drawSide();
@@ -1349,6 +1373,8 @@ function drawEditor() {
     <textarea id="edText" rows="2" maxlength="2000" placeholder="${t('Note for the player (optional with a drawing)')}">${esc(e.text)}</textarea>
     <div class="row" style="gap:10px">
       <div class="seg" id="edScope"><button data-s="recording" class="${e.scope === 'recording' ? 'on' : ''}">${t('This recording')}</button><button data-s="squad" class="${e.scope === 'squad' ? 'on' : ''}">${t('Squad')}</button></div>
+      ${e.jump != null ? `<label class="row" style="gap:6px"><input type="checkbox" id="edRp" ${e.replay.on ? 'checked' : ''}> ${t('2D replay on the hub')}</label>
+      <label class="row" style="gap:6px">${t('from')} <input type="number" id="edRpB" min="0" max="900" step="1" value="${e.replay.before}" ${e.replay.on ? '' : 'disabled'} style="width:64px;padding:5px 8px"> ${t('s before to')} <input type="number" id="edRpA" min="1" max="900" step="1" value="${e.replay.after}" ${e.replay.on ? '' : 'disabled'} style="width:64px;padding:5px 8px"> ${t('s after')}</label>` : ''}
       <label class="row" style="gap:6px">${t('Shows for')} <input type="number" id="edDur" min="1" max="120" step="1" value="${Math.round(e.dur)}" style="width:70px;padding:5px 8px"> s</label>
       <span style="flex:1"></span>
       <button class="btn small ghost" id="edCancel">${t('Cancel')}</button><button class="btn small brand" id="edSave">${t('Save')}</button></div>
@@ -1359,6 +1385,11 @@ function drawEditor() {
   $$('#edScope button', bar).forEach(b => b.onclick = () => { e.scope = b.dataset.s; drawEditor(); });
   $('#edText', bar).oninput = x => e.text = x.target.value;
   $('#edDur', bar).oninput = x => e.dur = Math.max(1, Math.min(120, +x.target.value || 5));
+  if ($('#edRp', bar)) {
+    $('#edRp', bar).onchange = x => { e.replay.on = x.target.checked; drawEditor(); };
+    $('#edRpB', bar).oninput = x => e.replay.before = Math.max(0, Math.min(900, Math.round(+x.target.value || 0)));
+    $('#edRpA', bar).oninput = x => e.replay.after = Math.max(1, Math.min(900, Math.round(+x.target.value || 1)));
+  }
   $('#edUndo', bar).onclick = inkUndo;
   $('#edClear', bar).onclick = () => { e.drawings = []; paintInk(); };
   $('#edCancel', bar).onclick = closeEditor;
@@ -1370,7 +1401,7 @@ async function saveNote() {
   const btn = $('#edSave'); btn.disabled = true;
   try {
     const r = await api('/api/notes/save', {id: RV.d.id, player: RV.notes.player,
-      note: {id: e.id, version: e.version, t: e.t, dur: e.dur, text: e.text.trim(), scope: e.scope, drawings: e.drawings.map(({kind, color, pts}) => ({kind, color, pts}))}});
+      note: {id: e.id, version: e.version, t: e.t, dur: e.dur, text: e.text.trim(), scope: e.scope, drawings: e.drawings.map(({kind, color, pts}) => ({kind, color, pts})), ...noteReplay(e)}});
     closeEditor(); setNotes(r); toast(t('Note saved. Your players see it in their review.'));
   } catch (x) { btn.disabled = false; toast(x.message, true); }
 }
@@ -1393,7 +1424,48 @@ async function loadLevels(id) {
   RV.ev.sort((a, b) => a.t - b.t);
   drawSound(); drawSide();
 }
+/* The player's own shield and health over each game (scanner pcs_bars `shieldTimeline.self`: [t, tier, shield,
+   health] kept when it changed, [t, 'knocked']): a thin strip, shield on top in the armour's colour (out of 125, the
+   most a shield holds), health below (out of 100), dark red while knocked. A value holds until the next row, the
+   player's death or the game's end. Drawn with the sound lane (same redraws: resize, theatre, video length known). */
+const TIERC = {white: '#c6c4c8', blue: '#288cf0', purple: '#af2deb', red: '#e8343a', gold: '#e8c040'};
+function shieldRuns(d) {
+  const out = [];
+  ((d && d.games) || []).forEach(g => {
+    const rows = ((g.shieldTimeline || {}).self || []).filter(r => Array.isArray(r) && typeof r[0] === 'number');
+    const end = typeof g.tEndGame === 'number' ? g.tEndGame : null, deaths = (g.ownDeaths || []).filter(x => typeof x === 'number');
+    rows.forEach((r, i) => {
+      let t1 = i + 1 < rows.length ? rows[i + 1][0] : (end != null ? end : r[0]);
+      const dead = deaths.find(x => x > r[0] && x < t1); if (dead != null) t1 = dead;
+      if (t1 > r[0]) out.push(r[1] === 'knocked' ? {t0: r[0], t1, knocked: true} : {t0: r[0], t1, tier: r[1], shield: +r[2] || 0, health: +r[3] || 0});
+    });
+  });
+  return out;
+}
+function drawShield() {
+  const lane = $('#laneH'); if (!lane || !RV) return;
+  const runs = shieldRuns(RV.d), D = dur(), w = lane.clientWidth, h = lane.clientHeight;
+  $$('canvas', lane).forEach(x => x.remove());
+  if (!w || !h || !D) return;
+  const cv = document.createElement('canvas'); cv.width = w * 2; cv.height = h * 2; cv.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;pointer-events:none';
+  const c = cv.getContext('2d'), H = cv.height, half = H / 2, X = s => s / D * cv.width;
+  runs.forEach(r => {
+    const x0 = X(r.t0), wd = Math.max(1, X(r.t1) - x0);
+    if (r.knocked) { c.fillStyle = 'rgba(170,40,40,.75)'; c.fillRect(x0, 0, wd, H); return; }
+    const s = Math.min(1, r.shield / 125) * (half - 1), hp = Math.min(1, r.health / 100) * (half - 1);
+    c.fillStyle = TIERC[r.tier] || '#8a877f'; c.fillRect(x0, half - 1 - s, wd, s);
+    c.fillStyle = 'rgba(232,227,218,.85)'; c.fillRect(x0, H - hp, wd, hp);
+  });
+  lane.appendChild(cv);
+  lane.onmousemove = e => {            // tooltip: the value at the pointer
+    const b = lane.getBoundingClientRect(), at = Math.max(0, Math.min(1, (e.clientX - b.left) / b.width)) * D;
+    const r = runs.find(x => x.t0 <= at && at < x.t1);
+    lane.title = !r ? '' : r.knocked ? `${fmtT(at)} · ${t('knocked')}` :
+      `${fmtT(at)} · ${t('shield {shield} ({tier}) · health {health}', {shield: r.shield, tier: ({white: t('white'), blue: t('blue'), purple: t('purple'), red: t('red'), gold: t('gold')})[r.tier] || '?', health: r.health})}`;
+  };
+}
 function drawSound() {
+  drawShield();
   const lane = $('#laneS'), lv = RV && RV.levels; if (!lane || !lv) return;
   const D = dur(), w = lane.clientWidth, h = lane.clientHeight;
   $$('canvas, .fight, .mk.call', lane).forEach(x => x.remove());
