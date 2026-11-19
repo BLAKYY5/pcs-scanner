@@ -29,6 +29,7 @@ def selftest(out):
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401
         import pcs_recorder.tracks   # noqa: F401
+        import pcs_recorder.games   # noqa: F401
         import pcs_recorder.minimaps, pcs_recorder.squadpaths, pcs_recorder.weaponicons   # noqa: F401
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
@@ -360,6 +361,8 @@ def main():
             show_running_instance()                        # the running one shows its window instead
         return
     core.cleanup_staged()
+    try: core.remove_old_drive_signin()                    # the old Drive sign-in file of 1.10.x: not used any more
+    except Exception: logging.exception('old Drive sign-in')
     if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
         threading.Thread(target=core.clean_old_unpacked, daemon=True, name='clean-temp').start()
     try:

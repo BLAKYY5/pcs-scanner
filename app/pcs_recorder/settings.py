@@ -65,8 +65,10 @@ class Settings:
     server_scan: bool = False                          # scan on the team server (serverscan.py), this PC if it can't
     share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
     share_asked: bool = False                          # the player answered the mic sharing question (setup step)
+    share_clips: bool = False                          # my voice may go into teammates' clips (a separate yes, 20 Nov 2026)
     transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes
     transcript_asked: bool = False                     # the player answered the transcripts question (setup step)
+    transcripts_withdraw: bool = False                 # said no after yes: the hub must still be told (decision 21)
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"
     hk_mute_mic: str = "ctrl+alt+3"
@@ -98,6 +100,11 @@ class Settings:
     obs_password: str = field(default_factory=lambda: secrets.token_urlsafe(16))
     obs_password_new: bool = False                     # replaced once after versions <= 1.10.10 logged it (obs.py)
     encoder: str = ""                                  # found by the first-run encoder test
+    # Settings → Games (coach's request, 19 Nov 2026): heavy work waits while any game runs, not only Apex
+    game_pause: bool = True                            # pause heavy work while any game runs (Apex always pauses it)
+    game_fullscreen: bool = False                      # also count a full-screen program in front (videos would too)
+    game_exes: list = field(default_factory=list)      # the player's own games, by program name ("game.exe")
+    game_ignore: list = field(default_factory=list)    # programs found as games that are not ("Remove")
 
     def clamp(self) -> "Settings":
         self.keep_days = max(1, min(MAX_KEEP_DAYS, int(self.keep_days)))
@@ -127,6 +134,10 @@ class Settings:
             self.capture = "window"
         self.voice_app = self.voice_app if self.voice_app in VOICE_APPS else "discord"
         self.voice_exe = valid_exe(self.voice_exe) or ""
+        from .games import exe_list
+        self.game_pause, self.game_fullscreen = bool(self.game_pause), bool(self.game_fullscreen)
+        self.game_exes = exe_list(self.game_exes)
+        self.game_ignore = [e for e in exe_list(self.game_ignore) if e not in self.game_exes]
         return self
 
     def clamp_highlights(self) -> None:          # same ranges as pcs_highlights.rules

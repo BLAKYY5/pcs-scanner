@@ -14,6 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from pcs_recorder import retention, settings  # noqa: E402
 from pcs_recorder.core import Recorder  # noqa: E402
 
+from pcs_recorder import games as _games  # noqa: E402
+# Tests never read this PC's programs or Windows' game list: no game runs unless a test says so (a game the
+# developer plays while the tests run must not change their results).
+_games.DETECTOR.procs, _games.DETECTOR.registry, _games.DETECTOR.foreground = (lambda: {}), (lambda: {}), (lambda: None)
+
 GB = 1024 ** 3
 UNIT = 1024 ** 2      # tests use MB-sized files (Windows has no sparse files) and scale the limit to match
 
@@ -2280,6 +2285,8 @@ def test_squads_left_counter():
     own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
     games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
     SCAN.timeline(games, [], own=own)
+    dr = games[0]["own"].pop("damageReads")                # change points of the damage reads + the last read (decision 35)
+    assert dr == [[float(t), 100 + t] for t in range(10, 20)] + [[40, 400], [42, 400]], dr
     assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
                                "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
     own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
@@ -2288,6 +2295,12 @@ def test_squads_left_counter():
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
     assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
+    assert o["damageReads"][-2:] == [[40, 400], [43, 455]], o["damageReads"]
+    # change points: one entry per new value, the last read added when the value didn't change
+    assert SCAN.change_reads([(1, {"damage": 0}), (2, {"damage": 0}), (3, {}), (4, {"damage": 50}), (5, {"damage": 50}),
+                              (6, {"damage": 50}), (9, {"damage": 80})], "damage", 0, 100) == [[1, 0], [4, 50], [9, 80]]
+    assert SCAN.change_reads([(1, {"damage": 7}), (2, {"damage": 7})], "damage", 0, 100) == [[1, 7], [2, 7]]
+    assert SCAN.change_reads([(1, {"damage": 7})], "damage", 5, 100) == [] and SCAN.change_reads(None, "damage", 0, 9) == []
 
 
 def test_game_end_time():
@@ -2785,7 +2798,7 @@ def test_fights_and_ring_damage():
     assert f1['opponents'] == 2 and not f1['thirdParty'] and f1['t0'] <= 100 <= 112 <= f1['t1'] < 130, f1
     assert f2['theirs'] == {'knocks': 1, 'kills': 1} and f2['result'] == 'lost', f2                     # he died in it
     assert F.verdict({'knocks': 3, 'kills': 0}, {'knocks': 1, 'kills': 0}) == 'won'
-    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'even'
+    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'won'      # any knock lead (decision 32)
     assert F.verdict({'knocks': 2, 'kills': 2}, {'knocks': 0, 'kills': 0}, wiped=True) == 'lost'
     # third party: a fourth enemy name in one fight
     sigs = ['0' * 36, 'f' * 36, '0f' * 18, 'f0' * 18]
@@ -2799,6 +2812,51 @@ def test_fights_and_ring_damage():
     F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
     f = g[0]['fights'][0]
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
+def test_fights_even_rule_decision_32():
+    """Coach's decision 32 (20 Nov 2026): a fight is even unless a side knocks; kills first, then any knock lead, then a
+    large damage difference (damage dealt = the own damage number's rise during the fight, against damage taken). No
+    knock and no large difference = even. The damage number read once, misread (going down) or not read = no figure."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_fights as F
+    z = {'knocks': 0, 'kills': 0}
+    k = lambda n, m=0: {'knocks': n, 'kills': m}
+    assert F.KNOCK_LEAD == 1 and F.DAMAGE_LEAD == 100
+    assert F.verdict(k(0, 1), k(3, 0)) == 'won' and F.decided_by(k(0, 1), k(3, 0)) == 'kills'     # kills first
+    assert F.verdict(k(0), k(1), dealt=400, taken=0) == 'lost'                                  # then any knock
+    assert F.verdict(k(2), k(1)) == 'won' and F.decided_by(k(2), k(1)) == 'knocks'
+    assert F.verdict(z, z, dealt=180, taken=60) == 'won' and F.decided_by(z, z, dealt=180, taken=60) == 'damage'
+    assert F.verdict(z, z, dealt=20, taken=150) == 'lost'
+    assert F.verdict(k(1), k(1), dealt=0, taken=100) == 'lost'                                  # exactly the lead
+    assert F.verdict(z, z, dealt=150, taken=60) == 'even' and F.decided_by(z, z, dealt=150, taken=60) == ''
+    assert F.verdict(z, z, dealt=None, taken=500) == 'even'                                     # no figure: no damage rule
+    assert F.verdict(k(3, 1), z, wiped=True) == 'lost' and F.decided_by(k(3, 1), z, wiped=True) == 'wiped'
+    # damage dealt from the own stats strip: values read twice; the plate missing before the first read = 0
+    reads = [(float(t), {'kills': 0}) for t in range(100, 104)] + [(float(t), {'damage': 0 if t < 110 else 75 if t < 120 else 230})
+                                                         for t in range(104, 140)]
+    vals = F.damage_values(reads, 90, 200)
+    assert [v for _, _, v in vals] == [0, 75, 230], vals
+    assert F.damage_dealt(vals, 108, 125) == 230 and F.damage_dealt(vals, 112, 115) == 0
+    assert F.damage_dealt(vals, 112, 117) == 155                                                # DEALT_AFTER: 3 s later
+    assert F.damage_dealt(vals, 50, 60) is None and F.damage_dealt([], 100, 110) is None
+    assert F.damage_values(reads + [(140.0, {'damage': 99}), (141.0, {'damage': 99})], 90, 200) is None   # went down
+    # through attach: a fight with hits only (no feed line, no knock) and a big damage lead = won; small = even
+    A = lambda t, s, h: (float(t), {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': h}, [], False)
+    bars = [A(t, 75, 100) for t in range(100, 110)] + [A(110, 15, 100), A(111, 15, 100)] + \
+           [A(t, 75, 100) for t in range(112, 130)]
+    g = [{'tStart': 0.0, 'tEndGame': 900.0}]
+    own = [(float(t), {'damage': 10 if t < 111 else 250}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageTaken'] == 60 and f['damageDealt'] == 240 and f['result'] == 'won' and f['decidedBy'] == 'damage', f
+    own = [(float(t), {'damage': 10 if t < 111 else 90}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageDealt'] == 80 and f['result'] == 'even' and f['decidedBy'] == '', f
+    F.attach(g, [], bars, [])                                                                    # no strip reads
+    f, = g[0]['fights']
+    assert f['damageDealt'] is None and f['result'] == 'even', f
 
 
 def _usage_frame(item=None, bar=(40, 140, 240), p=0.4, tac=None, ult=None):
@@ -3241,6 +3299,104 @@ def test_region_cache_round_trip():
         assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
 
 
+def test_checksets_event_scorers():
+    """Developer tool: tools/checksets.py scores the event check sets (bans, fights, highlights, mode, own state,
+    respawns, heals / abilities) on made-up scan.json files: found / missed / false, results right, per split."""
+    import json as _json
+    root = Path(__file__).resolve().parent.parent
+    if str(root / "tools") not in sys.path:
+        sys.path.insert(0, str(root / "tools"))
+    import checksets as C
+    folder, scans = TMP / f"cs-{time.time_ns()}", TMP / f"cs-scans-{time.time_ns()}"
+    folder.mkdir()
+    scans.mkdir()
+
+    def w(name, d):
+        (folder / name).write_text(_json.dumps(d), encoding="utf-8")
+
+    w("checkset-bans.json", {
+        "games": [{"recording": "A", "game": 0, "selectAt": 100, "bans": ["crypto", "vantage"], "split": "dev"},
+                  {"recording": "A", "game": 1, "selectAt": 900, "bans": ["seer", "wraith"], "split": "held"}],
+        "negatives": ["B (no ban shown)"]})
+    w("checkset-fights.json", {
+        "fights": [{"rec": "A", "t0": 300, "t1": 320, "result": "won", "thirdParty": False, "split": "dev"},
+                   {"rec": "A", "t0": 500, "t1": 510, "result": "lost", "thirdParty": True, "split": "dev"},
+                   {"rec": "A", "t0": 700, "t1": 705, "result": "even", "split": "held"}],
+        "notFights": [{"rec": "A", "t": 600, "split": "dev"}],
+        "ring": [{"rec": "A", "t0": 400, "t1": 420, "outside": True, "split": "dev"},
+                 {"rec": "A", "t": [450, 800], "outside": False, "split": "dev"}]})
+    w("checkset-highlights.json", {
+        "_about": "x",
+        "A": {"split": "dev", "highlights": [{"t0": 300, "t1": 310, "kind": "multi+wipe"},
+                                             {"t0": 1000, "t1": 1001, "kind": "double"}],
+              "borderline": [{"t0": 1200, "t1": 1206}]}})
+    w("checkset-mode.json", {"truths": {"A.mp4": {"split": "dev", "modes": ["ranked", "pubs"]},
+                                        "B.mp4": {"split": "held", "modes": [None]}}})
+    w("checkset-own-state.json", {
+        "scope": {"A.mp4": [0, 2000]},
+        "knocks": [{"recording": "A.mp4", "t": 330, "end": 340, "outcome": "revived", "split": "dev"},
+                   {"recording": "A.mp4", "t": 520, "end": 530, "outcome": "died", "split": "dev"}],
+        "bars": [{"recording": "A.mp4", "t": 250, "who": "self", "state": "alive", "tier": "blue", "shield": 72,
+                  "health": 100, "split": "dev"},
+                 {"recording": "A.mp4", "t": 335, "who": "self", "state": "knocked", "split": "dev"},
+                 {"recording": "A.mp4", "t": 250, "who": "mate", "slot": 2, "state": "alive", "tier": "white",
+                  "shield": 50, "health": 60, "split": "dev"}]})
+    w("checkset-respawn-ring.json", {"respawns": [{"recording": "A.mp4", "t": 610, "tol": 6, "who": "self", "split": "dev"},
+                                                  {"recording": "A.mp4", "t": 640, "tol": 6, "who": "teammate", "split": "dev"}]})
+    w("checkset-usage.json", {
+        "windows": [{"recording": "A.mp4", "from": 200, "to": 400, "what": "heals+tactical", "split": "dev"}],
+        "heals": [{"recording": "A.mp4", "t": 210, "item": "cell", "done": True, "split": "dev"},
+                  {"recording": "A.mp4", "t": 230, "item": "battery", "done": False, "split": "dev"}],
+        "abilities": [{"recording": "A.mp4", "t": 260, "kind": "tactical", "split": "dev"}]})
+    g0 = {"tStart": 120, "mode": "ranked", "select": {"tFirst": 95, "tLast": 110},
+          "bans": [{"legend": "crypto"}, {"legend": "vantage"}],
+          "fights": [{"t0": 298, "t1": 322, "result": "won", "thirdParty": False},
+                     {"t0": 505, "t1": 512, "result": "even", "thirdParty": True},
+                     {"t0": 598, "t1": 601, "result": "lost"}],
+          "ringDamage": {"segments": [{"t0": 405, "t1": 415}, {"t0": 798, "t1": 802}]},
+          "highlights": [{"t0": 305, "t1": 309, "kind": "multi", "tags": ["multi", "wipe"]},
+                         {"t0": 1203, "t1": 1204, "kind": "double", "tags": ["double"]},
+                         {"t0": 1500, "t1": 1501, "kind": "double", "tags": ["double"]}],
+          "ownKnocks": [{"t": 331, "end": 340, "outcome": "revived"}, {"t": 900, "end": 905, "outcome": "died"}],
+          "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[200, "blue", 75, 100], [331, "knocked"]],
+                             "mates": [[[200, "white", 50, 98]], [[200, "white", 50, 62]]]},
+          "respawns": [{"t": 613, "who": "self"}, {"t": 700, "who": "teammate"}],
+          "heals": [{"t": 211, "item": "cell", "done": True}, {"t": 231, "item": "cell", "done": True},
+                    {"t": 300, "item": "syringe", "done": True}],
+          "abilities": [{"t": 261, "kind": "tactical"}, {"t": 350, "kind": "tactical"}]}
+    g1 = {"tStart": 930, "mode": None, "select": {"tFirst": 880, "tLast": 905}, "bans": [{"legend": "seer"}]}
+    (scans / "A.scan.json").write_text(_json.dumps({"games": [g0, g1]}), encoding="utf-8")
+    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": None}]}), encoding="utf-8")
+    assert C.recordings(str(folder)) == ["A", "B"]
+    res, misses, missing = C.score_all(str(folder), str(scans))
+    assert missing == []
+    b = res["bans"]["all"]
+    assert (b["games"], b["gamesRight"], b["legendsFound"], b["legends"], b["negativeFalse"]) == (2, 1, 3, 4, 0), b
+    f = res["fights"]
+    assert f["dev"]["found"] == 2 and f["dev"]["resultRight"] == 1 and f["dev"]["thirdPartyRight"] == 2, f
+    assert f["held"]["fights"] == 1 and f["held"].get("found", 0) == 0
+    assert f["dev"]["notFightsFalse"] == 1 and f["dev"]["ringFound"] == 1 and f["dev"]["redSceneryFalse"] == 1
+    h = res["highlights"]["dev"]
+    assert (h["highlights"], h["found"], h["kindRight"], h["borderline"], h["false"]) == (2, 1, 1, 1, 1), h
+    m = res["mode"]
+    assert m["dev"]["games"] == 2 and m["dev"]["right"] == 1 and m["held"]["notGamesRight"] == 1, m
+    o = res["ownState"]["dev"]
+    assert (o["knocks"], o["found"], o["outcomeRight"], o["false"]) == (2, 1, 1, 1), o
+    assert o["bars"] == 3 and o["barsRead"] == 3 and o["barsRight"] == 3, o     # within 5: shield 75 / 72, health 62 / 60
+    r = res["respawns"]["dev"]
+    assert (r["respawns"], r["found"], r["selfFound"], r.get("teammateFound", 0)) == (2, 1, 1, 0), r
+    u = res["usage"]["dev"]
+    assert (u["heals"], u["healsFound"], u["itemRight"], u["doneRight"], u["healsFalse"]) == (2, 2, 1, 1, 1), u
+    assert (u["tacticals"], u["tacticalsFound"], u["tacticalsFalse"]) == (1, 1, 1) and "ults" not in u, u
+    assert any(x["what"] == "fight result" for x in misses["fights"])
+    # a missing scan counts its truths as unread, never as false ones
+    (scans / "A.scan.json").unlink()
+    res, _, missing = C.score_all(str(folder), str(scans), split="dev")
+    assert missing == ["A"] and res["fights"]["dev"]["missed"] == 2 and "false" not in res["highlights"]["dev"]
+    assert C.main(["score", str(folder), "--scans", str(scans), "--json", str(folder / "out.json")]) == 0
+    assert _json.loads((folder / "out.json").read_text(encoding="utf-8"))["format"] == "pcs-checksets-score/1"
+
+
 def test_check_set_scoring():
     """Developer tool: the check set scorer counts truths, reads and correct reads per field, at the nearest
     keyframe and within 3 s."""
@@ -3423,6 +3579,51 @@ def test_hub_retried_when_only_drive_took_it():
     assert r2.hub_state("k0")["hub"] == "sent"
     r2._retry_hub()
     assert len(hub.hub_calls) == 3
+
+
+def test_hub_requests_say_the_app_version():
+    """Every hub request carries `X-PCS-App: <version>` (the coach's health page: who runs an old app); an odd
+    or unknown version is not sent. Never the key in it."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import pcs_core
+    from pcs_recorder import hub
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen.append(self.headers.get("X-PCS-App"))
+            data = _json.dumps({"name": "Moe", "role": "player"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    real = dict(pcs_core.BUILD)
+    try:
+        hub.set_key("pcs_" + "K" * 43)
+        hub.reset()
+        for version, sent in (("1.12.0", "1.12.0"), ("dev-291", "dev-291"), ("1.0 <x>", None), ("", None),
+                              ("x" * 40, None)):
+            pcs_core.BUILD["version"] = version
+            assert hub.app_version() == (sent or "")
+            assert hub.request(url, "GET", "/api/me").json()["name"] == "Moe"
+            assert seen[-1] == sent, (version, seen)
+        assert all("pcs_" not in (v or "") for v in seen)
+    finally:
+        pcs_core.BUILD.clear()
+        pcs_core.BUILD.update(real)
+        hub.set_key(None)
+        hub.reset()
+        srv.shutdown()
 
 
 def test_hub_key_refused_then_fixed():
@@ -5392,6 +5593,10 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    # the clip's thread removes the .part just after it says "Stopped" (clips.Clipper._run's finally): wait for it
+    end = time.time() + 10
+    while list((folder / "Clips").glob("*.part")) and time.time() < end:
+        time.sleep(0.05)
     assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
     # Apex running: refused at once
     try:
@@ -5747,6 +5952,220 @@ def test_transcribe_worker_parts_and_clean_text():
     from pcs_recorder import comms
     assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
     assert not comms.is_comms_file("a.scan.json")
+
+
+def _fake_detector(procs, registry=None, fg=None, clock=None):
+    from pcs_recorder import games
+    calls = {"procs": 0, "registry": 0}
+
+    def p():
+        calls["procs"] += 1
+        return dict(procs)
+
+    def r():
+        calls["registry"] += 1
+        return dict(registry or {})
+    d = games.Detector(procs=p, registry=r, foreground=lambda: fg, clock=clock or (lambda: 0.0))
+    return d, calls
+
+
+def test_games_detection():
+    """Any game, not only Apex: the built-in list, Windows' game list (launchers and Java left out), the player's own
+    programs, the player's "not a game" list, the full-screen fallback (off by default). One process snapshot per
+    2 s for every caller, Windows' list read again only after hours."""
+    from pcs_recorder import games
+    clock = {"t": 100.0}
+    reg = {"deadlock.exe": r"C:\Steam\Deadlock\game\bin\win64\deadlock.exe",
+           "javaw.exe": r"C:\Badlion\javaw.exe", "df_launcher.exe": r"D:\Delta Force\Launcher\df_launcher.exe",
+           "peak.exe": r"D:\SteamLibrary\steamapps\common\PEAK\PEAK.exe",
+           "r5apex_dx12.exe": r"C:\Steam\Apex Legends\r5apex_dx12.exe"}
+    procs = {4: "system", 100: "explorer.exe", 200: "chrome.exe"}
+    d, calls = _fake_detector(procs, reg, clock=lambda: clock["t"])
+    assert d.other() == "" and not d.apex() and d.holding() == ""
+    procs[300] = "deadlock.exe"; clock["t"] += 3
+    assert d.other() == "Deadlock" and d.holding() == "Deadlock" and d.last == "Deadlock"
+    n = calls["procs"]
+    for _ in range(5):
+        d.other(); d.apex()                                    # within 2 s: the same snapshot, no new read
+    assert calls["procs"] == n
+    del procs[300]; procs[301] = "discovery-d.exe"; clock["t"] += 3      # The Finals (built in)
+    assert d.other() == "The Finals"
+    del procs[301]; procs[302] = "javaw.exe"; procs[303] = "df_launcher.exe"; clock["t"] += 3
+    assert d.other() == "", "Java and launchers in Windows' list are no game"
+    procs[304] = "PEAK.exe".lower(); clock["t"] += 3           # only in Windows' list
+    assert d.other() == "PEAK"
+    d.ignore = ["peak.exe"]; assert d.other() == ""            # Remove = never a game
+    procs[305] = "mygame.exe"; clock["t"] += 3
+    assert d.other() == ""
+    d.extra = ["mygame.exe"]; assert d.other() == "mygame"     # Add
+    d.pause = False; assert d.other() == "" and d.last == ""   # the switch off: no other game counts
+    d.pause, d.extra = True, []
+    procs[1] = "r5apex_dx12.exe"; clock["t"] += 3
+    assert d.apex() and d.other() == "" and d.holding() == games.APEX    # Apex is never "another game"
+    del procs[1]
+    # full-screen fallback: off by default; never a browser or video player; on = the program in front counts
+    procs[400] = "vlc.exe"; procs[401] = "indie.exe"; clock["t"] += 3
+    d.foreground = lambda: 401
+    assert d.other() == ""
+    d.fullscreen = True
+    assert d.other() == "indie"
+    d.foreground = lambda: 400
+    assert d.other() == ""
+    d.foreground = lambda: 200                                 # chrome in front, full screen (a video)
+    assert d.other() == ""
+    # Windows' list: read once, again after REGISTRY_S
+    assert calls["registry"] == 1
+    clock["t"] += games.REGISTRY_S + 1; d.other()
+    assert calls["registry"] == 2
+    # a failing read is no game, never an error
+    d2 = games.Detector(procs=lambda: 1 / 0, registry=lambda: 1 / 0, foreground=lambda: None)
+    assert d2.other() == "" and not d2.apex()
+    # program names: file names only, lower case, Apex refused
+    assert games.valid_exe("Deadlock.exe") == "deadlock.exe" and games.valid_exe(r"C:\x\Game.exe") == "game.exe"
+    assert games.valid_exe("r5apex.exe") is None and games.valid_exe("notepad") is None and games.valid_exe("a;b.exe") is None
+    assert games.pretty("Marvel-Win64-Shipping.exe") == "Marvel Rivals"
+    assert games.pretty("Strange-Win64-Shipping.exe") == "Strange"
+    pub = d.public()
+    assert "Deadlock" in pub["builtIn"] and any(g["exe"] == "deadlock.exe" for g in pub["games"]), pub
+    assert {"exe": "peak.exe", "name": "PEAK"} in pub["ignored"]
+
+
+def test_games_process_snapshot_real():
+    """The real Windows process snapshot reads names only (no process opened) and finds this test's own Python."""
+    from pcs_recorder import games
+    if sys.platform != "win32":
+        return
+    names = games.process_names()
+    me = names.get(os.getpid(), "")
+    assert me.endswith(".exe") and "python" in me, me
+    assert isinstance(games.registry_games(), dict)
+
+
+def test_games_settings_old_file_loads():
+    """Settings saved before Games existed load with the defaults: pause on, full-screen off, empty lists; saved
+    lists are cleaned (names only, no repeats, Apex never)."""
+    import json
+    before = settings.SETTINGS_FILE.read_text(encoding="utf-8") if settings.SETTINGS_FILE.exists() else None
+    try:
+        settings.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        settings.SETTINGS_FILE.write_text(json.dumps({"enabled": True, "keep_days": 5}), encoding="utf-8")
+        s = settings.load()
+        assert s.game_pause is True and s.game_fullscreen is False and s.game_exes == [] and s.game_ignore == []
+        assert s.keep_days == 5
+        s.game_exes = ["Foo.exe", "foo.exe", "C:/x/bar.exe", "r5apex.exe", "nope"]
+        s.game_ignore = ["foo.exe", "Peak.exe"]
+        settings.save(s)
+        s2 = settings.load()
+        assert s2.game_exes == ["foo.exe", "bar.exe"] and s2.game_ignore == ["peak.exe"], (s2.game_exes, s2.game_ignore)
+    finally:
+        if before is None:
+            settings.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            settings.SETTINGS_FILE.write_text(before, encoding="utf-8")
+
+
+def test_other_game_holds_heavy_work_apex_still_records():
+    """Deadlock running: nothing is recorded (only Apex is), the scan prompt doesn't show, the scan waits, nothing
+    is uploaded; a running scan is stopped and goes on once the game closes. Apex is still recorded."""
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"vids-{time.time_ns()}")
+    s.enabled = True
+    apex, other = {"on": False}, {"g": ""}
+    hub, ui = FakeHub(), FakeUI(True)
+    obs = FakeOBS(s.folder_path)
+    r = Recorder(s, obs, hub, ui, fake_scan, is_apex_running=lambda: apex["on"], other_game=lambda: other["g"])
+    r._final_file = lambda p, wait_s=0: p
+    lines = []
+    ui.activity = lines.append
+    other["g"] = "Deadlock"; r.tick()
+    assert not obs.rec and r.current is None, "only Apex is recorded"
+    assert r.game == "Deadlock" and r.hold and "Paused while a game runs (Deadlock)" in lines, lines
+    other["g"] = ""; apex["on"] = True; r.tick()
+    assert obs.rec and r.status == "Recording Apex", "Apex still records"
+    apex["on"] = False; other["g"] = "Deadlock"; r.tick()      # Apex closed, Deadlock opened: no prompt, scan waits
+    assert not obs.rec and ui.asked == 0 and r.scan_proc is None and len(r.queue) == 1, (ui.asked, r.queue)
+    key = r.queue[0]
+    assert r.idx[key].status == "waiting"
+    for _ in range(3):
+        r.tick()
+    assert r.scan_proc is None and hub.uploads == [] and not any(n[0].startswith("Scanning") for n in ui.notes)
+    other["g"] = ""; r.tick()                                  # Deadlock closed: the scan starts
+    assert r.scan_proc is not None and r.scan_key == key and not r.hold
+    time.sleep(0.8)
+    other["g"] = "The Finals"; r.tick()                       # another game starts mid-scan: stopped, first in line
+    assert r.scan_proc is None and r.queue == [key] and r.status == "Paused while a game runs (The Finals)", r.status
+    assert r.idx[key].status == "waiting" and hub.uploads == []
+    other["g"] = ""
+    for _ in range(120):
+        r.tick(); time.sleep(0.5)
+        if hub.uploads:
+            break
+    assert len(hub.uploads) == 1 and r.idx[key].status == "uploaded", (hub.uploads, vars(r.idx[key]))
+
+
+def test_recorder_default_other_game_and_holding():
+    """The app's Recorder asks games.other_game; a test's fake Apex alone never sees a real game. holding() is what
+    the hub upload thread and YouTube ask between parts."""
+    from pcs_recorder import core, games
+    s = settings.Settings(folder=str(TMP / "hold"))
+    r = Recorder(s, FakeOBS(Path(s.folder)), FakeHub(), FakeUI(), fake_scan)
+    assert r.other_game is games.other_game
+    r2 = Recorder(s, FakeOBS(Path(s.folder)), FakeHub(), FakeUI(), fake_scan, is_apex_running=lambda: False)
+    assert r2.other_game() == "" and r2.holding() == ""
+    r2.other_game = lambda: "Valorant"
+    assert r2.holding() == "Valorant"
+    r2.is_apex_running = lambda: True
+    assert r2.holding() == "Apex"
+    # core.game_running: Apex first, then the shared detector
+    real = games.DETECTOR
+    games.DETECTOR, calls = _fake_detector({7: "cs2.exe"})
+    try:
+        assert core.game_running() == "Counter-Strike 2" and not core.apex_running()
+        games.DETECTOR.pause = False
+        assert core.game_running() == ""
+        games.DETECTOR, _ = _fake_detector({7: "r5apex.exe"})
+        assert core.game_running() == "Apex" and core.apex_running()
+    finally:
+        games.DETECTOR = real
+
+
+def test_youtube_and_tracks_wait_for_any_game():
+    """YouTube uploads and the review track cuts wait for any game, not only Apex."""
+    from pcs_recorder import youtube, tracks
+    up = youtube.Uploader.__new__(youtube.Uploader)
+    up.is_apex_running = lambda: "Deadlock"
+    assert up._game() == "Deadlock"
+    up.is_apex_running = lambda: True
+    assert up._game() == "Apex"
+    up.is_apex_running = lambda: ""
+    assert up._game() == ""
+    c = tracks.Cutter(is_apex_running=lambda: "Overwatch")
+    assert c._apex() is True
+    c = tracks.Cutter(is_apex_running=None)                   # default: core.game_running (no game in tests)
+    assert c._apex() is False
+
+
+def test_corner_messages_hidden_during_other_game():
+    """While another game runs, a corner message is only written to Activity: nothing appears on the screen."""
+    from pcs_recorder import games, runtime
+    shown, logged = [], []
+
+    class Root:
+        def after(self, ms, fn):
+            pass
+    ui = runtime.UI(Root(), logged.append)
+    ui.on_main = shown.append
+    real = games.DETECTOR.last
+    try:
+        games.DETECTOR.last = "Deadlock"
+        ui.notify("Scan finished", "2 games")
+        assert shown == [] and logged == ["[Auto-record] Scan finished: 2 games"], (shown, logged)
+        games.DETECTOR.last = ""
+        ui.notify("Scan finished", "2 games")
+        assert len(shown) == 1
+    finally:
+        games.DETECTOR.last = real
 
 
 if __name__ == "__main__":

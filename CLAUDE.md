@@ -42,7 +42,8 @@ app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types),
                         hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
-                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord)
+                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord),
+                        games (which game runs: Apex or any other)
 app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
 app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
                         review-extras.js, clip.js/.css (no build step, no framework)
@@ -210,8 +211,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
   Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent
   yet: no team hub", one Activity line, no pop-up) and are sent once the player joins; Home and Settings show
-  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) and an old `google_token.json` are left
-  alone and never read; `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) are left
+  alone and never read; the old Drive sign-in `google_token.json` is removed at start when every permission in it is a
+  Drive one (`core.remove_old_drive_signin`, coach's decision 26, 20 Nov 2026; anything else in it stays); `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
@@ -239,6 +241,21 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   review asks for a track that isn't there: `/audio/<id>/<n>` answers 503 "preparing" at once and the page asks again
   (a 3 h recording takes minutes to cut: the coach once heard no game sound because the request waited for it).
   Written as `.part.m4a`, renamed when complete; stale `.part` files removed at start.
+- **Any game pauses heavy work** (`pcs_recorder/games.py`, coach's request 19 Nov 2026: "pause any intensive or
+  demanding processes" while he plays e.g. Deadlock or The Finals). Only Apex is recorded, and Watch together and review
+  talk still only care about Apex. Everything else that says "never while Apex runs" in these notes now waits for any
+  game (`core.game_running()`: "Apex", another game's name, or ""): the recorder's scans (stopped, resumed from chunks),
+  joins, the scan prompt (queued instead: nothing on screen), hub and YouTube uploads (`Recorder.holding()` between
+  parts), night uploads / shutdown, track cutting (`tracks.Cutter`), scans by hand, clips, the hub backup copy,
+  teammates' tracks and transcripts (`_backup_busy`), map downloads; corner messages become Activity lines while
+  another game runs (`UI.notify`). What counts as a game: the player's "never counted" list wins, then the player's own
+  programs, the built-in `KNOWN` exe names, Windows' own game list (`HKCU\System\GameConfigStore\Children`
+  `MatchedExeFullPath`, re-read every 6 h, Java / launchers / clients left out), and, off by default, a full-screen
+  window in front that isn't a browser or video player. One process snapshot (`CreateToolhelp32Snapshot`: names only,
+  no process opened, ~4 ms on the coach's PC) serves every caller for 2 s (`games.DETECTOR`); `core.apex_running` uses
+  it too. Settings → Games: "Pause heavy work while any game runs" (`game_pause`, on), the games found, Add / Remove
+  (`game_exes`, `game_ignore`), "Also count any full-screen program" (`game_fullscreen`, off). Home and Activity show
+  "Paused while a game runs (<name>)"; the window goes quiet (`S.game`) as for Apex. Tests replace the detector's reads.
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).
@@ -253,7 +270,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   answer), not the app's Coach role, decides who may write. Drawings are 0..1 coordinates of the video frame, drawn
   on a canvas fitted to the picture (`fitInk`), repainted only when the set of notes on screen changes. "Squad"
   notes show on teammates' recordings of the same game (`gameKey`) at the same time after the jump; drawings
-  never. Last answer cached in `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
+  never. A note may carry the hub's 2D replay range (`replayFrom` / `replayTo`, hub 0.6, seconds after the jump of
+  the note's game): the coach's editor sets it as seconds before / after the note (decision 38). Last answer cached in
+  `notes-cache/` for offline. Replies (hub with `/api/annotations/<id>/replies`): under
   each note the player sends "Got it" (once) or a short reply (≤ 500 characters), the coach answers back (no Got it
   for him); everyone who sees a note sees its replies (they come with the notes, so offline too); sending needs the
   hub (`notes.reply`, `/api/notes/reply` / `unreply`, no queue). A hub without replies sends no `replies` field: no
@@ -305,8 +324,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   coach notes, session bookmarks) with 3-30 s before / after; the range shows on the timeline. Sound: the recording's
   own tracks except the voice-app track (it holds teammates' voices without their own consent; the server refuses it
   too), plus downloaded teammates' mic tracks, each at its offset per game: only when the player shares their own
-  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment (a teammate who said no
-  since the download, or a hub out of reach = left out, listed under the clip). Coach notes on screen in the range
+  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment with `share_clips: true`
+  (the teammate's own "Allow my voice in teammates' clips", setting `share_clips`, off by default, sent with
+  `PUT /api/me/sharing`: sharing the mic does not cover clips, coach 20 Nov 2026). A teammate who said no since the
+  download, no clips answer, an older hub without the field, or a hub out of reach = left out, listed under the clip. Coach notes on screen in the range
   (text + drawings, as the player shows them) are drawn with Pillow on transparent PNGs at the clip's size and laid
   over for their time. Discord = under 10 MB (aimed at 9.0 MB: AMF overshot by 6 %; bitrate from the length, 1080 /
   720 / 540 / 480 and 30 fps as it drops, at most ~3 min with sound; encoded again lower if still over 10 MB); Full
@@ -475,7 +496,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   plate behind them) and dark shapes on bright plates, and each number is found next to its icon (damage digits end at
   x = 2336). Digits are compared as grey 12 x 18 cells, each at its own contrast, with the shapes in `pcs_banner.json`
   (`strip`: per size 'S' 17 px, 'B' 22 px, 'K' knocks; 'X' = not a digit); a doubtful digit = no number. Kills need
-  the skull icon left of them. `games[].own` = for each number the value of the last two reads of the game, which must
+  the skull icon left of them. `games[].own` (+ `damageReads` = [[t, value], ...]: the damage reads as change points plus the last read, for the
+  hub's damage per life, decision 35) = for each number the value of the last two reads of the game, which must
   agree (+ `...At`, `...LastRead`); none when values read twice went down, or when the number stopped being read
   > 10 s before the strip did. Damage often grows in the last second of a game (final fight), read once: by the
   coach's decision (16 Nov 2026) that last read counts when it is above every earlier read of the game and at most
@@ -583,17 +605,23 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   17 cards): 16 found (a card at 2 % health is not found by read_cards), tier 16 / 16, shield and health ±5 15 / 16
   (a striped segment being recharged counts as filled). GPU vs CPU decoding (15 Nov 880-1700 s, 7 Nov 3000-3800 s):
   own state and tier the same on all 1620 keyframes, values within 2 on 1617 (3 health reads 3-7 apart on a damaged
-  bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review player shows own knocks like respawns (a grey tick with a
+  bar); teammates 1552 of 1620 (mostly a card found by one decoder only, or health at a damage flash). The review
+  player draws the own `shieldTimeline` as a thin lane under the kill feed (decision 36: shield in the armour colour
+  out of 125 on top, health below, dark red while knocked; hover = the values). The review player shows own knocks like respawns (a grey tick with a
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
 - **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
   opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
-  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, feedLines [t]}] and
+  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, damageDealt, decidedBy,
+  feedLines [t]}] and
   `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
   damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
   lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
   has is not ours), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
   health lost; joined when < 25 s apart. Result: kills decide (the player's own death in the fight counts as a kill on
-  us), then a lead of 2 knocks; a squad wiped in it = lost. Third party: more than 3 enemy names, a name first seen
+  us), then any knock lead, then damage dealt (`damageDealt`: the own damage number's rise from before the fight to 3 s
+  after it, values read twice; None when not read) against `damageTaken` when they are `DAMAGE_LEAD` (100) or more
+  apart; a squad wiped in it = lost; else even (coach's decision 32, 20 Nov 2026). `decidedBy` = wiped | kills | knocks
+  | damage | "" (even). Third party: more than 3 enemy names, a name first seen
   >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
   median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
   29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
@@ -727,6 +755,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   `tools/checkset_example.json`; the real set references private recordings and lives in the handoff folder.
   Build a new reader against it, and add a truth only when the value was read on an extracted frame. Truths carry a
   `split` (`dev` / `held`, whole games, decided before tuning): tune on `--split dev`, report `--split held` too.
+- **Event check sets** (`tools/checksets.py`): bans, fights (+ ring stretches, red scenery), highlights, mode per game,
+  own knocks and bars, respawns, heals / abilities, scored on full scans (`<rec>.scan.json` from `pcs_scan.py --out`),
+  not the region cache: `recordings <folder>` lists what to scan, `score <folder> --scans DIR [--split] [--json]`
+  gives found / missed / false and results right per split (`--misses` lists them). Only the scan contract is read.
 
 ## Conventions
 

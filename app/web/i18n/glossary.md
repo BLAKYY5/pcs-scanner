@@ -4,7 +4,7 @@ The app's text is translated (one table per language in this folder), but the wo
 the game writes them in English, in every language. The team plays with English, French and Korean game clients and
 talks about the game with these words. Write the sentence around them in your language and leave them as they are:
 
-> French: "Combat commencé avec peu de munitions", but "Tu t'es fait knock", "third party à 12:40", "Ring 2 se ferme".
+> French: "Combat commencé avec peu de munitions", but "Tu t'es fait knock", "third party à 12:40", "Ring 2 se ferme", "Ton shield · health".
 
 | Kind | Keep as is |
 | --- | --- |
@@ -17,6 +17,7 @@ talks about the game with these words. Write the sentence around them in your la
 | Respawn | banner, beacon, respawn, dropship |
 | Modes | Ranked, Pubs, Wildcard, Scrims, Scrim |
 | Ranked | RP, tier names (Rookie, Bronze, Silver, Gold, Platinum, Diamond, Master, Predator) |
+| Shield and health | shield, health, and the armour colours white, blue, purple, red, gold (coach, 20 Nov 2026) |
 | Items and abilities | Shield cell, Shield battery, Syringe, Med kit, Phoenix kit, heal(s), Ultimate, Tactical |
 | HUD words | squads left, kill feed, legend select, and any other word the game shows on screen |
 | Team words | Coach, IGL, Fragger, Anchor, Support, Sub, Loot Book, EEC, POV |

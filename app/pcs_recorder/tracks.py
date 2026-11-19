@@ -109,7 +109,7 @@ class Cutter:
     def _apex(self) -> bool:
         f = self.is_apex_running
         if f is None:
-            from .core import apex_running as f
+            from .core import game_running as f         # Apex or any other game (games.py)
         try:
             return bool(f())
         except Exception:
