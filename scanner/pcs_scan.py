@@ -594,12 +594,14 @@ class Resume:
 def _segment_k(args):
     return args[0], _segment(args[1])
 
-def scan_video(path, snap=None, workers=0, chunks=0, resume=None):
+def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     """Split the recording into chunks and scan them in parallel; merge the results in time order.
     workers: processes at the same time (default WORKERS); chunks: pieces (default: as before, see default_chunks);
-    resume: a folder for finished chunks (Resume), so a stopped scan goes on from there."""
+    resume: a folder for finished chunks (Resume), so a stopped scan goes on from there; total: the recording's length
+    when `path` is a copy whose own length differs by a few ms (the team server's keyframes-only copy): the chunks are
+    then cut where they are on the player's PC."""
     import multiprocessing as mp
-    total = duration(path); dec = pick_decoder(path)
+    total = total or duration(path); dec = pick_decoder(path)
     chunks = chunks or default_chunks(total)
     workers = max(1, min(workers or WORKERS, chunks))
     edges = [total * k / chunks for k in range(chunks + 1)]; edges[-1] = total + 5
@@ -783,8 +785,13 @@ def main():
     ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
     ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
+    # scan on the team server: the file is a keyframes-only copy of the recording (pcs_recorder.serverscan)
+    ap.add_argument('--duration', type=float, default=0, help=argparse.SUPPRESS)      # the recording's own length
+    ap.add_argument('--clips', default='', help=argparse.SUPPRESS)    # folder of 60 fps clips; missing ones -> .needs.json
+    ap.add_argument('--keep-chunks', action='store_true', help=argparse.SUPPRESS)    # keep .partial for a second pass
     A = ap.parse_args(); os.makedirs(A.out, exist_ok=True)
     global USE_HW, LAYOUT; USE_HW = not A.cpu; LAYOUT = {'auto': None, '16:9': False, '4:3': True}[A.layout]
+    if A.clips: HUD.CLIPS = A.clips
     jobs = [(f, 'video') for f in A.files] + [(f, 'image') for f in A.image]
     if not jobs: ap.print_help(); return
     for path, kind in jobs:
@@ -798,7 +805,7 @@ def main():
         else:
             resume = os.path.join(A.out, name + '.partial')       # finished chunks, until the scan is complete
             if A.fresh: Resume(resume, path, [], ('', []), snap).clear()
-            events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume)
+            events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume, A.duration or None)
         t_tl = time.time()
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
@@ -872,7 +879,9 @@ def main():
         if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)
-        if kind == 'video': Resume(resume, path, [], ('', []), snap).clear()     # complete: the kept chunks go
+        if kind == 'video' and not A.keep_chunks: Resume(resume, path, [], ('', []), snap).clear()     # complete: the kept chunks go
+        if HUD.CLIPS is not None:       # team server: the 60 fps windows no clip covered (the app cuts and sends them)
+            json.dump({'windows': sorted(HUD.NEEDS)}, open(os.path.join(A.out, name + '.needs.json'), 'w'))
         print(f'  -> {len(games)} game(s): ' + '; '.join(f"{g['map']} drop={'yes' if g['drop'] else 'no'} harvesters={len(g['harvesters'])} ring phases={len(g.get('ring', []))} landing={'yes' if g.get('landing') else 'no'}" for g in games))
         print(f'  saved {op}')
         if perf.get('frames'):

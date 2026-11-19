@@ -62,6 +62,7 @@ class Settings:
     mic_device: str = "default"                        # microphone for track 3 (OBS device id; "default" = Windows' own)
     send_mic: bool = True                              # mic track goes to the team with the scan results
     crash_reports: bool = True                         # send crash reports to the team hub (only when on the hub)
+    server_scan: bool = False                          # scan on the team server (serverscan.py), this PC if it can't
     share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
     share_asked: bool = False                          # the player answered the mic sharing question (setup step)
     transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes

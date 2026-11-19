@@ -4024,6 +4024,233 @@ def test_ranked_rp_and_badges():
     assert R.last_twice([5, 5, None, 7, 7, 8]) == (7, 2) and R.last_twice([5, None, 5]) == (None, 0)
 
 
+# ------------------------------------------------------------------ scan on the team server (serverscan.py)
+
+def _ss_video(folder: Path, secs: int = 6) -> Path:
+    """A small mp4 with a keyframe every second (30 fps) and one audio track, like a recording."""
+    import subprocess
+    v = folder / "Apex Legends_2026.11.15-17.09.mp4"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc=s=320x180:r=30:d={secs}",
+                    "-f", "lavfi", "-i", f"sine=440:d={secs}", "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4",
+                    "-g", "30", "-bf", "0", "-q:v", "4", "-c:a", "aac", "-shortest", str(v)], check=True)
+    return v
+
+
+def test_server_scan_light_copy_and_clips_give_the_same_frames():
+    """The light copy holds only keyframes (same times); a clip cut for a window gives the scanner's 60 fps reader
+    exactly the frames the whole recording gives."""
+    import shutil
+    import subprocess
+    if shutil.which("ffmpeg") is None:
+        print("  (no ffmpeg: skipped)")
+        return
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_hud
+    from pcs_recorder import serverscan
+    folder = TMP / f"ss-{time.time_ns()}"
+    folder.mkdir()
+    v = _ss_video(folder)
+    light = folder / "light" / v.name
+    light.parent.mkdir()
+    subprocess.run(serverscan.light_cmd(str(v), light), check=True)
+    pk = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+                                  "packet=pts_time,flags", "-of", "csv=p=0", str(light)]).decode().split()
+    assert [p.split(",")[1].startswith("K") for p in pk] == [True] * len(pk) and len(pk) == 6, pk
+    assert [round(float(p.split(",")[0]), 2) for p in pk] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]
+    aud = subprocess.check_output(["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=index",
+                                   "-of", "csv=p=0", str(light)]).decode().split()
+    assert len(aud) == 1
+    clips = folder / "clips"
+    clips.mkdir()
+    subprocess.run(serverscan.clip_cmd(str(v), 2.0, 3.05, clips / "clip000.mp4"), check=True)
+    whole = [(round(t, 3), f.copy()) for t, f in pcs_hud._corner(str(v), 2.0, 3.05)]
+    old = pcs_hud.CLIPS, list(pcs_hud.NEEDS), pcs_hud._clip_list
+    try:
+        pcs_hud.CLIPS, pcs_hud._clip_list = str(clips), None
+        pcs_hud.NEEDS[:] = []
+        fromclip = [(round(t, 3), f.copy()) for t, f in pcs_hud._corner(str(light), 2.0, 3.05)]
+        assert pcs_hud.NEEDS == []
+        missing = list(pcs_hud._corner(str(light), 4.0, 4.5))          # no clip for this window: asked for
+        assert missing == [] and pcs_hud.NEEDS == [[4.0, 4.5]]
+    finally:
+        pcs_hud.CLIPS, pcs_hud._clip_list = old[0], old[2]
+        pcs_hud.NEEDS[:] = old[1]
+    assert len(whole) == len(fromclip) > 20, (len(whole), len(fromclip))
+    assert all(a[0] == b[0] and np.array_equal(a[1], b[1]) for a, b in zip(whole, fromclip))
+
+
+class _FakeHubForScan:
+    """The hub's scan-job routes as the app sees them (job: queued -> needs_clips -> done)."""
+
+    def __init__(self, files):
+        self.files, self.calls, self.status, self.sent = files, [], "queued", None
+
+    def send_in_parts(self, url, kind, f, fields=None, stop=None, tries=3):
+        self.calls.append(("upload", kind, Path(f).name, dict(fields or {})))
+        return {"job": {"id": "sj-0000000000000001", "status": "queued"}}
+
+    def request(self, url, method, path, **kw):
+        self.calls.append((method, path))
+
+        class R:
+            def __init__(s, code, data=None, content=b""):
+                s.status_code, s._d, s.content = code, data, content
+
+            def json(s):
+                return s._d
+        if method == "GET" and "/files/" in path:
+            return R(200, content=self.files[path.rsplit("/", 1)[-1]])
+        if method == "GET":
+            st = self.status
+            if st == "queued":
+                self.status = "needs_clips"
+                return R(200, {"status": "queued"})
+            if st == "needs_clips":
+                return R(200, {"status": "needs_clips", "needs": [[100.0, 101.05], [200.0, 202.6]]})
+            return R(200, {"status": "done", "passes": 2, "seconds": 90, "files": list(self.files)})
+        if method == "POST" and path.endswith("/clips"):
+            self.sent = [f[1][0] for f in kw["files"]]
+            self.status = "done"
+            return R(200, {"status": "queued"})
+        if method == "DELETE":
+            return R(200, {"status": "cancelled"})
+        return R(404, {})
+
+
+def _ss_patch(serverscan, **kw):
+    """Swap module functions for fakes; returns a function that puts them back."""
+    targets = {"request": serverscan.hub, "send_in_parts": serverscan.hub}
+    old = {}
+    for k, v in kw.items():
+        mod = targets.get(k, serverscan)
+        old[k] = (mod, getattr(mod, k))
+        setattr(mod, k, v)
+
+    def undo():
+        for k, (mod, v) in old.items():
+            setattr(mod, k, v)
+    return undo
+
+
+def _ss_run(runs):
+    def run(cmd, timeout=900):
+        runs.append(cmd)
+        Path(cmd[-1]).write_bytes(b"v" * 100)
+    return run
+
+
+def test_server_scan_round_trip_with_clips():
+    import json
+    from pcs_recorder import serverscan
+    folder = TMP / f"ssr-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "Apex Legends_2026.11.15-17.09.mp4"
+    v.write_bytes(b"x" * 1000)
+    out = folder / "out"
+    files = {v.stem + ".scan.json": b'{"games": [1]}', v.stem + ".feed.json": b'{"lines": []}'}
+    fake = _FakeHubForScan(files)
+    runs = []
+    undo = _ss_patch(serverscan, request=fake.request, send_in_parts=fake.send_in_parts, _run=_ss_run(runs),
+                     media_duration=lambda p: 3213.683, chunks_for=lambda t: 8, scanner_version=lambda: "9.9.9")
+    try:
+        got = serverscan.ServerScan(str(v), str(out), "http://hub", say=lambda m: None, sleep=lambda s: None).run()
+    finally:
+        undo()
+    assert sorted(p.name for p in got) == sorted(files)
+    assert (out / (v.stem + ".scan.json")).read_bytes() == files[v.stem + ".scan.json"]
+    up = [c for c in fake.calls if c[0] == "upload"][0]
+    assert up[1] == "scan-source" and up[2] == v.name and up[3]["duration"] == 3213.683 and up[3]["chunks"] == 8
+    assert up[3]["scanner"] == "9.9.9"
+    assert "noise=drop=not(key)" in runs[0] and "-copyts" in runs[0]           # light copy: keyframes, own times
+    assert len(runs) == 3 and fake.sent == ["clip000.mp4", "clip001.mp4"]      # one clip per window asked for
+    assert runs[1][runs[1].index("-ss") + 1] == "99.950" and runs[1].index("-t") < runs[1].index("-i")
+    assert not (out / "server").exists() and not (out / serverscan.STATE).exists()   # light copy and state gone
+    assert json.loads((out / (v.stem + ".scan.json")).read_text()) == {"games": [1]}
+
+
+def test_server_scan_falls_back_to_this_pc():
+    """Off, no hub, worker off on the hub, an old hub or a bug: None, and the app scans here."""
+    import json
+    from pcs_recorder import hub, serverscan, settings as st
+    folder = TMP / f"ssf-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "rec.mp4"
+    v.write_bytes(b"x")
+    keep = st.SETTINGS_FILE.read_text(encoding="utf-8") if st.SETTINGS_FILE.exists() else None
+
+    def off(*a, **k):
+        raise hub.HubError("the team hub answered 409: off", "http", 409, code="server_scan_off")
+    undo = _ss_patch(serverscan, send_in_parts=off, _run=_ss_run([]), media_duration=lambda p: 60.0,
+                     chunks_for=lambda t: 1, scanner_version=lambda: "9.9.9")
+    try:
+        st.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "http://hub", "server_scan": False}), encoding="utf-8")
+        assert serverscan.wanted() == (False, "http://hub")
+        assert serverscan.scan(str(v), str(folder / "o1"), say=lambda m: None) is None
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "", "server_scan": True}), encoding="utf-8")
+        assert serverscan.wanted()[0] is False
+        st.SETTINGS_FILE.write_text(json.dumps({"hub_url": "http://hub", "server_scan": True}), encoding="utf-8")
+        assert serverscan.wanted() == (True, "http://hub")
+        said = []
+        assert serverscan.scan(str(v), str(folder / "o2"), say=said.append) is None
+        assert "Scanning on this PC" in said[-1] and not (folder / "o2" / "server").exists(), said
+        serverscan.hub.send_in_parts = lambda *a, **k: None                    # hub without /api/uploads
+        assert serverscan.scan(str(v), str(folder / "o3"), say=said.append) is None
+        assert "older hub" in said[-1]
+
+        def boom(*a, **k):
+            raise RuntimeError("bug")
+        serverscan.hub.send_in_parts = boom                                     # never lose a scan to a bug
+        assert serverscan.scan(str(v), str(folder / "o4"), say=said.append) is None
+    finally:
+        undo()
+        if keep is None:
+            st.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            st.SETTINGS_FILE.write_text(keep, encoding="utf-8")
+
+
+def test_server_scan_picks_up_its_job_after_a_stop():
+    """Stopped while Apex ran: the next try asks the hub for the same job instead of sending the recording again."""
+    import json
+    from pcs_recorder import serverscan
+    folder = TMP / f"ssp-{time.time_ns()}"
+    folder.mkdir()
+    v = folder / "rec.mp4"
+    v.write_bytes(b"x")
+    out = folder / "out"
+    out.mkdir()
+    (out / serverscan.STATE).write_text(json.dumps({"job": "sj-0000000000000001"}), encoding="utf-8")
+    fake = _FakeHubForScan({"rec.scan.json": b"{}"})
+    fake.status = "done"
+    undo = _ss_patch(serverscan, request=fake.request, send_in_parts=fake.send_in_parts, _run=_ss_run([]))
+    try:
+        got = serverscan.ServerScan(str(v), str(out), "http://hub", say=lambda m: None, sleep=lambda s: None).run()
+    finally:
+        undo()
+    assert [p.name for p in got] == ["rec.scan.json"]
+    assert not [c for c in fake.calls if c[0] == "upload"]
+
+
+def test_server_scan_decoder_family_follows_this_pc():
+    import json
+    from pcs_recorder import serverscan
+    f = serverscan.APP_DIR / "decoder.json"
+    keep = f.read_text() if f.exists() else None
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"av1-2560x1440-gpu": ["CPU", []]}))
+        assert serverscan.decoder_family() == "cpu"
+        f.write_text(json.dumps({"av1-2560x1440-gpu": ["GPU d3d11va", ["-hwaccel", "d3d11va"]]}))
+        assert serverscan.decoder_family() == "gpu"
+        f.unlink()
+        assert serverscan.decoder_family() == "gpu"
+    finally:
+        if keep is not None:
+            f.write_text(keep)
+
+
 def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback

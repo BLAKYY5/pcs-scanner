@@ -221,9 +221,51 @@ def landing(samples, t0):
             'exitZ': P[ex][3], 'landWindow': [round(P[prev][0], 2), round(P[land][0], 2)], 'landedAt': round(P[land][0], 2),
             'x': P[land][1], 'y': P[land][2], 'z': P[land][3]}
 
+# Scan on the team server (a keyframes-only copy of the recording, see clip_for): the 60 fps reads below need the
+# frames between keyframes, so they come from short clips the player's app cuts (stream copy) and sends afterwards.
+CLIPS = None   # folder of those clips (None = an ordinary scan of the whole recording)
+NEEDS = []     # windows [a, b] a 60 fps read wanted while no clip covered it (sent back to the app)
+_clip_list = None
+
+def _start_time(f):
+    o = subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 'format=start_time,duration', '-of', 'csv=p=0', f],
+                                creationflags=0x08000000 if os.name == 'nt' else 0)
+    return tuple(float(x) for x in o.decode().strip().split(',')[:2])
+
+def _clips(path):
+    """[(clip, start, end)] in the recording's own time (0 = its first frame), cut with -copyts from the recording."""
+    global _clip_list
+    if _clip_list is None:
+        _clip_list = []
+        try: base = _start_time(path)[0]          # the keyframes-only copy keeps the recording's times (-copyts)
+        except Exception: base = 0.0
+        for n in sorted(os.listdir(CLIPS)) if CLIPS and os.path.isdir(CLIPS) else []:
+            if not n.lower().endswith(('.mp4', '.mkv', '.mov')): continue
+            f = os.path.join(CLIPS, n)
+            try:
+                st, du = _start_time(f)
+                _clip_list.append((f, st - base, st - base + du))
+            except Exception:
+                continue
+    return _clip_list
+
+def clip_for(path, a, b):
+    """The clip (path, start in recording time) holding every frame from a to b, or None: the window goes to NEEDS.
+    A clip is cut with -copyts, so its times are the recording's; '-ss x' on it seeks to start + x, and the decoder
+    starts from the same keyframe as on the whole recording: the frames are the same."""
+    for f, st, en in _clips(path):
+        if st <= max(0, a) and en >= b: return f, st
+    if [round(a, 3), round(b, 3)] not in NEEDS: NEEDS.append([round(a, 3), round(b, 3)])
+    return None
+
 def _corner(path, a, b, W=2560, H=1440, cw=420, ch=570):
     """Every frame (60 fps) between a and b, top-left corner only (debug overlay + ring clock live there)."""
-    cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{max(0, a):.3f}', '-i', path, '-t', f'{b - a:.3f}',
+    src, ss = path, max(0, a)
+    if CLIPS is not None:
+        c = clip_for(path, a, b)
+        if c is None: return
+        src, ss = c[0], max(0, a) - c[1]
+    cmd = ['ffmpeg', '-v', 'error'] + DEC + ['-ss', f'{ss:.3f}', '-i', src, '-t', f'{b - a:.3f}',
            '-vf', (f'scale={W}:{H},crop={cw}:{round(ch * 0.75)}:0:0,scale={cw}:{ch}:flags=neighbor' if STRETCH else f'scale={W}:{H},crop={cw}:{ch}:0:0'),
            '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     raw = subprocess.run(cmd, capture_output=True, timeout=180).stdout
