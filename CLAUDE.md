@@ -185,8 +185,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
   (Watson -> Wattson) and drops Whisper's subtitle-credit lines on silence. **Not in the exe**: faster-whisper +
   CTranslate2 + onnxruntime are ~200 MB that every start would unpack, so they are the optional "Transcripts"
   component (`build.yml` builds `PCS-Transcripts.zip`, a run artifact, `pcs-transcribe.exe --selftest` checked); the app
-  downloads it once only when `comms.COMPONENT` pins a published zip (url + SHA-256 + size; None so far: Settings says
-  "Not available yet"). Publish it as a release that is never "latest" (the updater reads the latest release). The
+  downloads it once only when `comms.COMPONENT` pins a published zip (url + SHA-256 + size; without one Settings says
+  "Not available yet"). Pinned: release `transcripts-1` (19 Nov 2026, zip of the 1.11.0 main build), a prerelease
+  never "latest" (the updater reads only the latest release, `test_comms_component_pinned`). A new zip = a new tag that
+  doesn't start with `v` (a `v*` tag runs build.yml's release) and a new pin; keep the old release for the app
+  versions that pin it. Settings shows the first-time download (component + model) in % (`download` in the state). The
   model (1.6 GB, 5 files) comes from a pinned Hugging Face commit with each file's SHA-256 (`MODEL_FILES`), https only,
   into `transcripts/` in the data folder, after the yes only. Developers: `PCS_TRANSCRIBE_PY` (a Python with
   faster-whisper; runs the worker from source) and `PCS_WHISPER_MODEL` (a model folder). Review player: a "Your comms

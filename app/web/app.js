@@ -156,7 +156,7 @@ async function poll() {
     const prev = S; S = await api('/api/state');
     renderTop();
     if (page === 'home') renderHome(prev);
-    if (page === 'settings') syncHubBackup();                          // last copy line only: the form stays as typed
+    if (page === 'settings') { syncHubBackup(); syncTranscript(); }    // those lines only: the form stays as typed
     if (page === 'recordings' && (!prev || JSON.stringify(prev.scans) !== JSON.stringify(S.scans) ||
         (prev.recorder && S.recorder && prev.recorder.status !== S.recorder.status))) loadLibrary();
   } catch (e) { S = null; renderTop(); }
@@ -381,10 +381,16 @@ const TRANSCRIPT_HINT = 'After a session, what you say on your own mic is turned
 function transcriptState() {
   const t = S && S.transcripts;
   if (!t || !t.on) return '';
+  const dl = t.running && !t.current && t.download && t.download.total ? t.download : null;   // first time: component + model
+  if (dl) return ` Downloading for transcripts (first time only): ${Math.floor(100 * dl.done / dl.total)} % of ${(dl.total / 1e9).toFixed(1)} GB.`;
   if (t.running) return t.current ? ` Now: ${t.percent != null ? t.percent + ' % of ' : ''}the last session.` : ' Getting ready (first time: a 1.6 GB download).';
   if (t.note) return ` Not running: ${t.note}.`;
   if (!t.available) return ' Not available yet in this version.';
   return t.done ? ` ${t.done} recording${t.done === 1 ? '' : 's'} turned into text.` : '';
+}
+function syncTranscript() {                                           // Settings: the transcripts line follows the download
+  const el = $('#f-transcript_consent'), small = el && el.closest('label') && el.closest('label').querySelector('small');
+  if (small) small.textContent = TRANSCRIPT_HINT + transcriptState();
 }
 function switchHTML(id, on, label, hint) {
   return `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="track"></span><span><b>${esc(label)}</b><small>${esc(hint)}</small></span></label>`;
