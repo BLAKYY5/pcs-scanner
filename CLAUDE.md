@@ -466,7 +466,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   plate behind them) and dark shapes on bright plates, and each number is found next to its icon (damage digits end at
   x = 2336). Digits are compared as grey 12 x 18 cells, each at its own contrast, with the shapes in `pcs_banner.json`
   (`strip`: per size 'S' 17 px, 'B' 22 px, 'K' knocks; 'X' = not a digit); a doubtful digit = no number. Kills need
-  the skull icon left of them. `games[].own` = for each number the value of the last two reads of the game, which must
+  the skull icon left of them. `games[].own` (+ `damageReads` = [[t, value], ...]: the damage reads as change points plus the last read, for the
+  hub's damage per life, decision 35) = for each number the value of the last two reads of the game, which must
   agree (+ `...At`, `...LastRead`); none when values read twice went down, or when the number stopped being read
   > 10 s before the strip did. Damage often grows in the last second of a game (final fight), read once: by the
   coach's decision (16 Nov 2026) that last read counts when it is above every earlier read of the game and at most

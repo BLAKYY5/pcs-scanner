@@ -762,6 +762,20 @@ def mode_seen(g, R, emblem, starts, gi):
     out['from'] = sorted(named)
     return out
 
+def change_reads(own, key, t0, t1):
+    """The own stats reads of one number inside [t0, t1) as change points: [[t, value], ...] with a read each time the
+    value differs from the read before, plus the last read (so the list ends where the reading ended). Small enough to
+    keep in the scan (`games[].own.damageReads`)."""
+    R = [(t, o[key]) for t, o in own or [] if t0 <= t < t1 and isinstance(o, dict) and o.get(key) is not None]
+    out = []
+    for t, v in R:
+        if not out or out[-1][1] != v:
+            out.append([round(t, 2), v])
+    if R and out[-1][0] != round(R[-1][0], 2):
+        out.append([round(R[-1][0], 2), R[-1][1]])
+    return out
+
+
 def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=None, emblem=None):
     starts = [g['tStart'] for g in games]
     for gi, g in enumerate(games):
@@ -805,6 +819,8 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                         if f[3]:    # the read before it: the rise happened in between (the sound check looks there)
                             prev = [t_ for t_, o in own if 'damage' in o and g['tStart'] <= t_ < f[1]]
                             if prev: st['damagePrevReadAt'] = round(prev[-1], 2)
+            dr = change_reads(own, 'damage', g['tStart'], hi)
+            if dr: st['damageReads'] = dr                                  # the hub splits damage per life (decision 35)
             if st: g['own'] = st
     # A game seen without its drop screen used to start where the HUD was first read (often minutes after the
     # jump). It starts at the jump from the dropship when that was seen (a minute earlier: the ship ride).

@@ -2280,6 +2280,8 @@ def test_squads_left_counter():
     own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
     games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
     SCAN.timeline(games, [], own=own)
+    dr = games[0]["own"].pop("damageReads")                # change points of the damage reads + the last read (decision 35)
+    assert dr == [[float(t), 100 + t] for t in range(10, 20)] + [[40, 400], [42, 400]], dr
     assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
                                "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
     own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
@@ -2288,6 +2290,12 @@ def test_squads_left_counter():
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
     assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
+    assert o["damageReads"][-2:] == [[40, 400], [43, 455]], o["damageReads"]
+    # change points: one entry per new value, the last read added when the value didn't change
+    assert SCAN.change_reads([(1, {"damage": 0}), (2, {"damage": 0}), (3, {}), (4, {"damage": 50}), (5, {"damage": 50}),
+                              (6, {"damage": 50}), (9, {"damage": 80})], "damage", 0, 100) == [[1, 0], [4, 50], [9, 80]]
+    assert SCAN.change_reads([(1, {"damage": 7}), (2, {"damage": 7})], "damage", 0, 100) == [[1, 7], [2, 7]]
+    assert SCAN.change_reads([(1, {"damage": 7})], "damage", 5, 100) == [] and SCAN.change_reads(None, "damage", 0, 9) == []
 
 
 def test_game_end_time():
