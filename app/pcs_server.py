@@ -12,6 +12,7 @@ from __future__ import annotations
 import collections
 import hashlib
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -403,12 +404,77 @@ class Backend:
             try:
                 if os.path.exists(core.YT_TOKEN_F) and core.youtube_service(interactive=False) is None:
                     os.remove(core.YT_TOKEN_F)
-                core.youtube_service(True)
+                core.youtube_service(True, fresh=core.signin_kind() != "full")   # a YouTube-only sign-in: ask again
                 self.youtube = "ok"
                 self.say("Signed in to YouTube. Scrim blocks will be uploaded to the channel you picked.")
+                self.google_to_hub(force=True)          # the team hub learns which Google account this is
             except Exception as e:
                 self.say(f"YouTube sign-in failed: {e}")
+            finally:
+                self._signin = core.signin_kind()
         threading.Thread(target=go, daemon=True).start()
+
+    # ------------------------------------------------------------- Google account for the team hub
+    GOOGLE_LATER_S = 7 * 86400                         # "Not now" on Home: asked again a week later
+
+    def google_to_hub(self, force: bool = False) -> str:
+        """Once per hub + key (again after a new sign-in, `force`): send the Google ID token to the hub, which keeps
+        the player's Google account on the key for the coach. -> "sent", "done" (already sent for this hub and key),
+        "no_hub", "no_signin" (none, or a YouTube-only one from an older version) or "failed: <why>" (older hub,
+        not turned on, offline: tried again at the next start). Never raises; the token and email are never logged."""
+        from pcs_recorder import hub
+        a = self.auto
+        url, key = (a.s.hub_url if a else ""), hub.get_key()
+        if not url or not key:
+            return "no_hub"
+        mark = hub._fp(url + "|" + key)
+        if not force and core.SETTINGS.get("google_hub") == mark:
+            return "done"
+        tok = core.google_id_token()
+        if not tok:
+            return "no_signin"
+        try:
+            hub.send_google(url, tok)
+        except Exception as e:
+            logging.info("Google account not sent to the hub: %s", e)
+            return f"failed: {e}"
+        core.SETTINGS["google_hub"] = mark
+        core.save_settings()
+        self._google_known = True
+        logging.info("Google account sent to the hub")
+        return "sent"
+
+    def google_check(self) -> None:
+        """At start and after joining a hub: send the account if there is one to send; with a YouTube-only sign-in,
+        ask the hub whether it knows this player's account (it decides whether Home asks to sign in again)."""
+        from pcs_recorder import hub
+        self._signin = core.signin_kind()
+        self._google_known = None
+        if self.google_to_hub().startswith("sent"):
+            return
+        a = self.auto
+        if self._signin == "youtube" and a and a.s.hub_url and hub.get_key():
+            self._google_known = hub.google_known(a.s.hub_url)
+
+    def google_ask(self) -> bool:
+        """Home asks a player with a YouTube-only sign-in to sign in again, once the hub said it doesn't know their
+        Google account (an older hub never asks), at a calm moment: not while Apex runs or a game records, not
+        within a week of "Not now"."""
+        if getattr(self, "_signin", None) != "youtube" or getattr(self, "_google_known", None) is not False:
+            return False
+        try:
+            if time.time() < float(core.SETTINGS.get("google_later") or 0):
+                return False
+        except (TypeError, ValueError):
+            pass
+        a = self.auto
+        if a and getattr(a.rec, "current", None) is not None:
+            return False
+        return not self.apex_now()
+
+    def google_later(self) -> None:
+        core.SETTINGS["google_later"] = time.time() + self.GOOGLE_LATER_S
+        core.save_settings()
 
     def _rec_key(self, item_id: str) -> str:
         a = self.auto
@@ -869,6 +935,7 @@ class Backend:
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
+                "accountAsk": self.google_ask(),            # Home: sign in again so the hub knows your Google account
                 "role": core.SETTINGS.get("role", ""), "coach": getattr(self, "coach", False),
                 "teamLink": core.SETTINGS.get("team_link", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
@@ -931,6 +998,7 @@ class Backend:
         """The hub (or its key) changed: look for its weapon icons now, in the background."""
         self._icons_thread = threading.Thread(target=self.sync_icons, args=(0, False), daemon=True)
         self._icons_thread.start()
+        threading.Thread(target=self.google_check, daemon=True).start()   # and which Google account this player is
 
     def _use_invite(self, url: str, code: str) -> None:
         """Redeem a single-use invite and keep the key it gives and the link's address (replacing an old address:
@@ -1766,6 +1834,9 @@ class Server:
                         return self._json(b.state())
                     if path == "/api/youtube/signin":
                         b.yt_signin()
+                        return self._json({"ok": True})
+                    if path == "/api/google/later":
+                        b.google_later()
                         return self._json({"ok": True})
                     if path == "/api/youtube/eec":
                         return self._json({"eec": b.set_eec(body.get("id", ""), body.get("links", []))})

@@ -688,6 +688,26 @@ def send_in_parts(url: str, kind: str, f: Path, fields: dict | None = None, stop
             return d
 
 
+def send_google(url: str, id_token: str) -> None:
+    """Tell the hub which Google account this key's player signed in with (hub 0.6 `POST /api/me/google`): the hub
+    checks the ID token with Google and keeps the account id and email on the key, for the coach only. Raises
+    HubError (404 = older hub, 503 = the coach hasn't turned it on). The token and the hub's answer (it holds the
+    email) are never logged."""
+    _check(request(url, "POST", "/api/me/google", json={"id_token": id_token}, timeout=20))
+
+
+def google_known(url: str) -> bool | None:
+    """Does the hub already know this key's Google account (`GET /api/me/google`)? None: older hub or no answer."""
+    try:
+        r = request(url, "GET", "/api/me/google", timeout=8)
+        if r.status_code != 200:
+            return None
+        d = r.json()
+        return bool(isinstance(d, dict) and d.get("email"))
+    except Exception:
+        return None
+
+
 def summary(answer: dict) -> str:
     """The hub's answer in one line for the player: "Sent to hub: 11 games", or the hub's note on a failure."""
     imports = answer.get("imports") if isinstance(answer, dict) else None

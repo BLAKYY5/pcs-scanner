@@ -193,7 +193,7 @@ function route() {
 window.addEventListener('hashchange', route);
 
 /* ------------------------------------------------------------------ home */
-function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub]); }
+function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub, s.accountAsk]); }
 
 /* First-run setup: the steps a new player needs, in order, each one click (or one paste). Shown on Home until the
    needed ones are done (name, auto-record, team hub or Google), or until hidden. Auto-record comes second: its
@@ -328,6 +328,8 @@ function renderHome(prev, force) {
   $('#main').innerHTML = `${setup}
     ${!S.player && !setup ? `<div class="notice row between"><span><b>Type your EEC name</b> so your scans are labelled for the coach.</span>
       <span class="row"><input id="pname" type="text" placeholder="EEC name" style="width:200px"><button class="btn brand small" id="psave">Save</button></span></div>` : ''}
+    ${S.accountAsk && !setup ? `<div class="notice info row between" id="gask"><span><b>Sign in with Google again</b> so your coach sees which Google account is yours. YouTube uploads keep working either way.</span>
+      <span class="row"><button class="btn brand small" id="gsignin">Sign in</button><button class="btn small ghost" id="glater">Not now</button></span></div>` : ''}
     <section class="card hero ${state}">
       <div class="dot"><i></i></div>
       <div><h1>${esc(title)}</h1><p>${esc(sub)}</p></div>
@@ -370,6 +372,8 @@ function renderHome(prev, force) {
   };
   wireSetup();
   wireCheck();
+  const gs = $('#gsignin'); if (gs) gs.onclick = () => { api('/api/youtube/signin', {}); toast('Your browser opens: sign in and pick the team channel.'); };
+  const gl = $('#glater'); if (gl) gl.onclick = async () => { await api('/api/google/later', {}); S.accountAsk = false; renderHome(null, true); };
   const ps = $('#psave'); if (ps) ps.onclick = async () => {
     const v = $('#pname').value.trim(); if (!v) return;
     S = await api('/api/settings', {player: v}); toast('Saved.'); renderHome(null, true);

@@ -203,6 +203,18 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
+- **One Google sign-in** (`youtube_token.json`, leaving-Drive plan step 8; reworked on 1.11.0 after #90): Settings →
+  YouTube's sign-in asks `openid`, `userinfo.email` and `youtube.upload` in one consent (`core.SIGNIN_SCOPES`; no Drive
+  scope). The file is saved with the scopes Google granted (`signin_json`: the player may untick one) and always
+  loaded and refreshed with those (`_signin_creds`), so a YouTube-only sign-in from 1.11.0 or older keeps uploading,
+  is never refreshed with more and gives no identity (`signin_kind` = none / youtube / full). `core.google_id_token()`
+  refreshes a full one for a fresh ID token. `Backend.google_to_hub` sends it to the hub (`POST /api/me/google`, hub
+  `hub/googleid.py`, 503 until the coach sets `google_client_ids`) once per hub + key (`google_hub` = fingerprint in
+  settings), again after a new sign-in; `google_check` runs at start and after a join or key change. A YouTube-only
+  player whose hub says it doesn't know their account (`GET /api/me/google` email null; an older hub = never asked)
+  gets one Home notice "Sign in with Google again" (`accountAsk` in `/api/state`), never while Apex runs or a game
+  records; "Not now" = a week (`google_later`). The token and email are never logged nor kept outside the encrypted
+  file. An old `google_token.json` (Drive) is still left alone.
 - **Results to the hub**: results go to the team hub only. Google Drive results were removed 19 Nov 2026
   (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
   Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent

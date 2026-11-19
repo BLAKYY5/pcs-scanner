@@ -472,6 +472,8 @@ def main():
     def background_checks():
         b.check_coach()
         b.check_youtube()
+        try: b.google_check()                              # once per hub + key: which Google account this player is
+        except Exception: logging.exception('Google account for the hub')
         told = None
         while True:                                        # at start, then every 6 hours (the app lives in the tray)
             b.check_update(pcs_server.UPDATE_EVERY_S - 60)

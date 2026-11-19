@@ -865,6 +865,249 @@ def test_update_download_checked():
         core.BUILD.update(real_build)
 
 
+_TOK_BASE = {"token": "ya29.at-old", "refresh_token": "1//rt-secret-456", "client_id": "cid", "client_secret": "cs",
+             "token_uri": "https://oauth2.googleapis.com/token"}
+_ID_TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJlbWFpbCI6InRlc3RlckBleGFtcGxlLmNvbSJ9.c2ln"
+
+
+class _FakeRefresh:
+    """Credentials.refresh without Google: records the scopes asked, gives a new access token and an ID token
+    (only when openid was granted, as Google does)."""
+
+    def __enter__(self):
+        from google.oauth2.credentials import Credentials
+        self.asked, self.real = [], Credentials.refresh
+        me = self
+
+        def refresh(creds, request):
+            me.asked.append(list(creds.scopes or []))
+            creds.token = "ya29.at-new"
+            creds.expiry = None
+            creds._id_token = _ID_TOKEN if "openid" in (creds.scopes or []) else None
+        Credentials.refresh = refresh
+        return self
+
+    def __exit__(self, *a):
+        from google.oauth2.credentials import Credentials
+        Credentials.refresh = self.real
+
+
+def _token_file(name):
+    real = core.YT_TOKEN_F
+    core.YT_TOKEN_F = str(TMP / "appdata" / name)
+    Path(core.YT_TOKEN_F).unlink(missing_ok=True)
+    return real
+
+
+def test_one_google_sign_in_scopes():
+    """One Google sign-in: who you are (openid + email) and YouTube upload in one consent, no Drive. The file keeps the
+    scopes Google granted (the player can untick one): without YouTube, no upload and the sign-in asks again."""
+    from google.oauth2.credentials import Credentials
+    assert core.SIGNIN_SCOPES == ["openid", "https://www.googleapis.com/auth/userinfo.email",
+                                  "https://www.googleapis.com/auth/youtube.upload"]
+    assert not [s for s in core.SIGNIN_SCOPES if "drive" in s]
+    src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
+    yt = src[src.index("def youtube_service"):src.index("def google_id_token")]
+    assert "from_client_secrets_file(client, SIGNIN_SCOPES)" in yt and "write_token(YT_TOKEN_F, signin_json(creds))" in yt
+    assert "auth/drive" not in src
+    full = Credentials("ya29.x", refresh_token="1//r", client_id="cid", client_secret="cs",
+                       token_uri="https://oauth2.googleapis.com/token", scopes=core.SIGNIN_SCOPES,
+                       granted_scopes=core.ID_SCOPES)                       # YouTube unticked on Google's page
+    assert json.loads(core.signin_json(full))["scopes"] == core.ID_SCOPES
+    full._granted_scopes = None                                            # Google said nothing: what was asked
+    assert json.loads(core.signin_json(full))["scopes"] == core.SIGNIN_SCOPES
+    real = _token_file("yt_scopes.json")
+    try:
+        assert core.signin_kind() == "none" and core.youtube_service(interactive=False) is None
+        core.write_token(core.YT_TOKEN_F, json.dumps({**_TOK_BASE, "scopes": core.ID_SCOPES}))
+        assert core.signin_kind() == "full"
+        assert core.youtube_service(interactive=False) is None             # identity only: no YouTube upload
+        core.write_token(core.YT_TOKEN_F, json.dumps({**_TOK_BASE, "scopes": core.SIGNIN_SCOPES,
+                                                      "expiry": "2020-01-01T00:00:00Z"}))
+        with _FakeRefresh() as fr:
+            assert core.youtube_service(interactive=False) is not None
+            assert fr.asked == [core.SIGNIN_SCOPES]                         # refreshed with exactly what was granted
+            assert core.google_id_token() == _ID_TOKEN
+        saved = core.read_token(core.YT_TOKEN_F)
+        assert saved["token"] == "ya29.at-new" and saved["scopes"] == core.SIGNIN_SCOPES and "id_token" not in saved
+        if os.name == "nt":
+            assert b"1//rt-secret-456" not in Path(core.YT_TOKEN_F).read_bytes()   # saved encrypted (DPAPI)
+    finally:
+        Path(core.YT_TOKEN_F).unlink(missing_ok=True)
+        core.YT_TOKEN_F = real
+
+
+def test_signin_upgrade_from_1_11():
+    """A player coming from 1.11.0: a YouTube-only sign-in (maybe still in clear, maybe without its scopes) keeps
+    uploading as it is, is never refreshed with more scopes, gives no ID token; the old Drive sign-in file and old
+    settings keys are left alone."""
+    real = _token_file("yt_upgrade.json")
+    drive = TMP / "appdata" / "google_token.json"
+    drive.write_text(json.dumps({**_TOK_BASE, "scopes": ["https://www.googleapis.com/auth/drive.file"]}))
+    before = drive.read_bytes()
+    core.SETTINGS["coach_email"] = "coach@example.com"
+    try:
+        for info in ({**_TOK_BASE, "scopes": core.YT_SCOPES, "expiry": "2020-01-01T00:00:00Z"},
+                     {**_TOK_BASE, "expiry": "2020-01-01T00:00:00Z"}):          # very old file: no "scopes"
+            Path(core.YT_TOKEN_F).write_text(json.dumps(info))                  # in clear, as an older version wrote it
+            assert core.signin_kind() == "youtube"
+            if os.name == "nt":
+                assert b"1//rt-secret-456" not in Path(core.YT_TOKEN_F).read_bytes()   # encrypted when first read
+            with _FakeRefresh() as fr:
+                assert core.google_id_token() is None and fr.asked == []        # no identity, no refresh for it
+                assert core.youtube_service(interactive=False) is not None       # still uploads, no new sign-in
+                assert fr.asked == [core.YT_SCOPES]                              # refreshed with its own scope only
+        assert drive.read_bytes() == before                                     # old Drive file untouched
+        b = pcs_server.Backend(_Auto(str(TMP / "upg")))
+        b.google_check()                                                        # no hub: nothing asked
+        assert b.google_ask() is False
+        st = b.state()
+        assert st["accountAsk"] is False and "google" not in st
+    finally:
+        core.SETTINGS.pop("coach_email", None)
+        drive.unlink(missing_ok=True)
+        Path(core.YT_TOKEN_F).unlink(missing_ok=True)
+        core.YT_TOKEN_F = real
+
+
+def test_google_account_sent_to_hub_once():
+    """The hub learns the player's Google account: the ID token goes to POST /api/me/google once per hub + key (again
+    after a new sign-in), never without a hub, a key or a sign-in; an older hub (404) is tried again at next start."""
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    auto = _Auto(str(TMP / "googlehub"))
+    b = pcs_server.Backend(auto)
+    real_tok, tok = core.google_id_token, {"v": _ID_TOKEN}
+    core.google_id_token = lambda: tok["v"]
+    core.SETTINGS.pop("google_hub", None)
+    try:
+        assert b.google_to_hub() == "no_hub"
+        auto.s.hub_url = fake.url
+        assert b.google_to_hub() == "no_hub"                                    # no key yet
+        hub.set_key(GOOD_KEY)
+        tok["v"] = None
+        assert b.google_to_hub() == "no_signin" and not [1 for _, p, _ in fake.seen if p == "/api/me/google"]
+        tok["v"] = _ID_TOKEN
+        assert b.google_to_hub() == "sent"
+        sent = [(m, a) for m, p, a in fake.seen if p == "/api/me/google"]
+        assert sent == [("POST", "Bearer " + GOOD_KEY)]
+        assert json.loads(fake.bodies[[p for _, p, _ in fake.seen].index("/api/me/google")]) == {"id_token": _ID_TOKEN}
+        assert b.google_to_hub() == "done"                                      # once per hub + key
+        assert b.google_to_hub(force=True) == "sent"                           # a new Google sign-in
+        dump = json.dumps(core.SETTINGS)
+        assert "eyJ" not in dump and "example.com" not in dump                  # neither token nor email kept
+        old = FakeHub("old")
+        try:
+            auto.s.hub_url = old.url                                            # another hub, an older one: 404
+            assert b.google_to_hub().startswith("failed") and b.google_to_hub().startswith("failed")
+        finally:
+            old.stop()
+        src = (Path(pcs_server.WEB).parent / "pcs_server.py").read_text(encoding="utf-8")
+        assert "self.google_to_hub(force=True)" in src[src.index("def yt_signin"):src.index("def google_to_hub")]
+        app_src = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+        assert "b.google_check()" in app_src
+    finally:
+        core.google_id_token = real_tok
+        core.SETTINGS.pop("google_hub", None)
+        fake.stop()
+        _fresh_hub()
+
+
+def test_google_sign_in_again_asked_calmly():
+    """A YouTube-only player on a hub that doesn't know their Google account sees one Home notice "Sign in with Google
+    again": never while Apex runs or a game records, not for a week after "Not now", never with an older hub or once
+    the account is known."""
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    auto = _Auto(str(TMP / "googleask"))
+    b = pcs_server.Backend(auto)
+    real = _token_file("yt_ask.json")
+    core.SETTINGS.pop("google_hub", None)
+    core.SETTINGS.pop("google_later", None)
+    apex = {"on": False}
+    b.apex_now = lambda: apex["on"]
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        core.write_token(core.YT_TOKEN_F, json.dumps({**_TOK_BASE, "scopes": core.YT_SCOPES}))
+        auto.s.hub_url = fake.url
+        hub.set_key(GOOD_KEY)
+        b.google_check()
+        assert ("GET", "/api/me/google", "Bearer " + GOOD_KEY) in fake.seen
+        assert call(srv, "/api/state")[1]["accountAsk"] is True
+        apex["on"] = True
+        assert b.google_ask() is False                                          # never while Apex runs
+        apex["on"] = False
+        auto.rec.current = object()
+        assert b.google_ask() is False                                          # nor while a game records
+        auto.rec.current = None
+        code, _, _ = call(srv, "/api/google/later", {})
+        assert code == 200 and b.google_ask() is False                          # Not now: a week
+        assert core.SETTINGS["google_later"] > time.time() + 6 * 86400
+        core.SETTINGS.pop("google_later")
+        assert b.google_ask() is True
+        fake.google = "tester@example.com"                                      # the hub knows the account
+        b.google_check()
+        assert b.google_ask() is False
+        old = FakeHub("old")                                                    # older hub: no such route
+        try:
+            auto.s.hub_url = old.url
+            b.google_check()
+            assert b.google_ask() is False
+        finally:
+            old.stop()
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "S.accountAsk && !setup" in js and "/api/google/later" in js and "s.accountAsk]" in js
+    finally:
+        srv.stop()
+        core.SETTINGS.pop("google_later", None)
+        Path(core.YT_TOKEN_F).unlink(missing_ok=True)
+        core.YT_TOKEN_F = real
+        fake.stop()
+        _fresh_hub()
+
+
+def test_no_google_email_or_token_in_log():
+    """The player's email and Google tokens never reach app.log: redact masks them, and sending the account to the hub
+    (also when the hub refuses it) logs neither."""
+    import io
+    import logging
+    assert "<email>" in core.redact("signed in as tester@example.com") and "tester@" not in core.redact("tester@example.com")
+    for t in (_ID_TOKEN, "ya29.a0AfB_byC-123", "1//0gAbCdEfGhIjK-lmn"):
+        assert t not in core.redact(f"token {t} here"), t
+    assert core.redact("password=x pcs_" + "A" * 43) == "password=*** pcs_***"   # the old rules still hold
+    hub = _fresh_hub()
+    fake = FakeHub("new")
+    auto = _Auto(str(TMP / "googlelog"))
+    b = pcs_server.Backend(auto)
+    real_tok = core.google_id_token
+    core.google_id_token = lambda: _ID_TOKEN
+    buf = io.StringIO()
+    h = logging.StreamHandler(buf)
+    h.addFilter(core.RedactFilter())
+    root = logging.getLogger()
+    root.addHandler(h)
+    old_level = root.level
+    root.setLevel(logging.DEBUG)
+    try:
+        auto.s.hub_url = fake.url
+        hub.set_key(GOOD_KEY)
+        assert b.google_to_hub(force=True) == "sent"
+        auto.s.hub_url = fake.url + "/nothere"                                   # hub answers 404
+        assert b.google_to_hub(force=True).startswith("failed")
+        logging.info("hub said %s", {"email": "tester@example.com", "id_token": _ID_TOKEN})   # even if code slips
+        text = buf.getvalue()
+        assert "Google account sent to the hub" in text
+        assert "tester@example.com" not in text and _ID_TOKEN not in text and "eyJ" not in text
+    finally:
+        root.removeHandler(h)
+        root.setLevel(old_level)
+        core.google_id_token = real_tok
+        core.SETTINGS.pop("google_hub", None)
+        fake.stop()
+        _fresh_hub()
+
+
 def test_sign_in_tokens_encrypted():
     """Google Drive and YouTube sign-ins are kept encrypted for this Windows user; a file in clear from an older
     version is encrypted the first time it is read, and an unreadable file means "sign in again"."""
@@ -892,7 +1135,7 @@ def test_sign_in_tokens_encrypted():
     assert core.read_token(str(TMP / "appdata" / "missing_token.json")) is None
     # the sign-in code writes through write_token, never in clear
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
-    assert "write_token(YT_TOKEN_F, creds.to_json())" in src
+    assert "write_token(YT_TOKEN_F, signin_json(creds))" in src
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
@@ -1295,6 +1538,7 @@ class FakeHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         self.mode, self.limit, self.seen, self.bodies = mode, False, [], []
+        self.google = None                   # the Google account the hub keeps for the key (GET /api/me/google)
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -1347,6 +1591,11 @@ class FakeHub:
                     return self._send(200, {"ok": True})
                 if p == "/api/db/scrims":
                     return self._send(200, [])
+                if p == "/api/me/google" and self.command == "POST":
+                    hub.google = "tester@example.com"
+                    return self._send(200, {"email": hub.google, "verified_at": "2026-11-19T12:00:00Z", "changed": False})
+                if p == "/api/me/google":
+                    return self._send(200, {"email": hub.google})
                 return self._send(404, {"detail": "Not Found"})
 
             do_GET = do_POST = _go

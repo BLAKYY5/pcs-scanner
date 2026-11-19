@@ -43,8 +43,14 @@ _SECRET = _re.compile(r"""(password\s*[=:]\s*)('[^']*'|"[^"]*"|[^\s,;)'"]+)""", 
 
 _HUBSECRET = _re.compile(r"pcsi?_[A-Za-z0-9_-]{43}")
 
+# Google sign-in: an email address, an ID token (JWT), an access token (ya29.) or a refresh token (1//) never in the log.
+_EMAIL = _re.compile(r"[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63})+")
+_GTOKEN = _re.compile(r"eyJ[\w-]{8,}\.[\w-]+\.[\w-]*|ya29\.[\w.-]+|1//[\w.-]{8,}")
+
 def redact(text):
-    """password=... / password: ... values replaced by ***; a hub key or invite code (pcs_… / pcsi_…) too."""
+    """password=... / password: ... values replaced by ***; a hub key or invite code (pcs_… / pcsi_…), an email
+    address and a Google token too."""
+    text = _GTOKEN.sub('<token>', _EMAIL.sub('<email>', text))
     return _HUBSECRET.sub('pcs_***', _SECRET.sub(r'\1***', text))
 
 class RedactFilter(logging.Filter):
@@ -135,14 +141,50 @@ def _saved_creds(path, scopes):
     except Exception: return None
 
 YT_SCOPES = ['https://www.googleapis.com/auth/youtube.upload']
+# One Google sign-in: who the player is (openid + email: the team hub learns which Google account each key belongs
+# to) and YouTube upload, in one consent. No Drive (results go to the hub only).
+ID_SCOPES = ['openid', 'https://www.googleapis.com/auth/userinfo.email']
+SIGNIN_SCOPES = ID_SCOPES + YT_SCOPES
 YT_TOKEN_F = os.path.join(DATA, 'youtube_token.json')
 
-def youtube_service(interactive=True):
-    """YouTube upload, signed in separately from Drive (the player picks the team channel at sign-in)."""
+def granted_scopes(info):
+    """The scopes a saved sign-in was given. A file without them can only be a YouTube-only sign-in (older versions
+    asked nothing else in this file)."""
+    s = (info or {}).get('scopes') or YT_SCOPES
+    return s.split() if isinstance(s, str) else list(s)
+
+def _signin_creds():
+    """The saved sign-in with the scopes it was granted: refreshing never asks for more, so a YouTube-only sign-in
+    from 1.11.0 or older keeps uploading as it is."""
+    from google.oauth2.credentials import Credentials
+    info = read_token(YT_TOKEN_F)
+    if not info: return None
+    try: return Credentials.from_authorized_user_info(info, granted_scopes(info))
+    except Exception: return None
+
+def signin_kind():
+    """'none' (no sign-in), 'youtube' (YouTube only: from an older version, no identity) or 'full' (identity too)."""
+    info = read_token(YT_TOKEN_F)
+    if not info: return 'none'
+    return 'full' if 'openid' in granted_scopes(info) else 'youtube'
+
+def signin_json(creds):
+    """google-auth's JSON for a new sign-in, its "scopes" set to what Google granted (Google lets the player untick a
+    permission; google-auth would save the scopes asked for)."""
+    info = json.loads(creds.to_json())
+    got = getattr(creds, 'granted_scopes', None)
+    if got:
+        info['scopes'] = got.split() if isinstance(got, str) else list(got)
+    return json.dumps(info)
+
+def youtube_service(interactive=True, fresh=False):
+    """YouTube upload, through the one Google sign-in (the player picks the team channel at sign-in). `fresh`: sign
+    in again even with a working sign-in (a YouTube-only one from an older version; it is kept if that fails)."""
     from google.auth.transport.requests import Request
     from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
-    creds = _saved_creds(YT_TOKEN_F, YT_SCOPES)
+    creds = None if fresh and interactive else _signin_creds()
+    if creds and YT_SCOPES[0] not in (creds.scopes or []): creds = None   # YouTube unticked at sign-in
     if creds and creds.expired and creds.refresh_token:
         try: creds.refresh(Request())
         except Exception: creds = None
@@ -150,10 +192,30 @@ def youtube_service(interactive=True):
         if not interactive: return None
         client = os.path.join(HERE, 'client.json')
         if not os.path.exists(client): raise RuntimeError('This build has no Google sign-in ID (client.json). Ask your coach for a new build.')
-        creds = InstalledAppFlow.from_client_secrets_file(client, YT_SCOPES).run_local_server(port=0, open_browser=True,
-            success_message='PCS Scanner can now upload to the team YouTube channel. You can close this tab.')
-        write_token(YT_TOKEN_F, creds.to_json())
+        os.environ['OAUTHLIB_RELAX_TOKEN_SCOPE'] = '1'          # a permission unticked on Google's page is no crash
+        creds = InstalledAppFlow.from_client_secrets_file(client, SIGNIN_SCOPES).run_local_server(port=0, open_browser=True,
+            success_message='PCS Scanner is signed in with Google and can upload to the team YouTube channel. You can close this tab.')
+        write_token(YT_TOKEN_F, signin_json(creds))
+        if YT_SCOPES[0] not in granted_scopes(read_token(YT_TOKEN_F)):
+            raise RuntimeError('YouTube upload was not allowed on Google\'s page. Sign in again and tick YouTube.')
     return build('youtube', 'v3', credentials=creds, cache_discovery=False)
+
+def google_id_token():
+    """A fresh Google ID token of the player's sign-in (about an hour valid), for the team hub to learn which Google
+    account this player is; None without a sign-in, with a YouTube-only one, or when Google can't be reached.
+    The token and the email in it are never logged."""
+    from google.auth.transport.requests import Request
+    creds = _signin_creds()
+    if not creds or 'openid' not in (creds.scopes or []) or not creds.refresh_token:
+        return None
+    try:
+        creds.refresh(Request())
+    except Exception as e:
+        logging.info('Google sign-in not refreshed for the hub (%s)', e.__class__.__name__)
+        return None
+    try: write_token(YT_TOKEN_F, signin_json(creds))
+    except Exception: pass
+    return getattr(creds, 'id_token', None) or None
 
 # ---------------- team file: weapon icons for the kill feed ----------------
 # The scanner names kill-feed weapons from a small private file the coach builds from the game's own icons. It is
