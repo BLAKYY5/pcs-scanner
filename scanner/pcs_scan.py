@@ -19,6 +19,7 @@ from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
 import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo
+import pcs_bans
 
 VERSION = '1.11.0'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -432,6 +433,7 @@ def duration(path):
 def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
     mr = MapReader(); labels = HUD.Labels(); feed = HUD.Feed(); rpfeed = pcs_ranked.Tracker(); events = []; samples = []; t0 = time.time(); last = 0
     legends = HUD.Legends(); legends43 = HUD.Legends43(like=legends); ring_at = -99.0; icons_at = -99.0; mm_at = -99.0; emb_at = -99.0
+    bans = pcs_bans.Bans()
     perf = perf if perf is not None else {}; tw = time.time()
     mode = LAYOUT; votes = {False: 0, True: 0}     # layout: 16:9 (False) or 4:3 stretched (True), voted from successful reads
     for t, img in frames:
@@ -461,6 +463,10 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             score = lambda r: sum(x['score'] for x in r['squad'] if x['legend'])
             sel = [max(sel, key=score)] if score(sel[1]) > score(sel[0]) else sel[:1]
         if sel: d = sel[0]; events.append({'t': round(t, 2), 'kind': 'select', 'data': d})
+        if not lay:      # legend bans (Ranked Diamond+): ban phase and legend select screens only, 16:9 (pcs_bans)
+            try: bz = bans.read_if(img, bool(sel))
+            except Exception: bz = None
+            if bz: perf.setdefault('_bans', []).append((round(t, 2), bz))
         for v in ([] if d else tops):
             st43 = v is None
             try: bn = (HUD.Banner43 if st43 else HUD.Banner).read(view_top_once() if st43 else v)
@@ -670,11 +676,13 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
     rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []
+    bans = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
         ammo += pf.pop('_ammo', [])
+        bans += pf.pop('_bans', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -692,6 +700,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
     perf['_ammo'] = sorted(ammo, key=lambda r: r[0])
+    perf['_bans'] = sorted(bans, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
     return events, samples, labels, perf
@@ -924,6 +933,8 @@ def main():
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_bans.attach(games, perf.pop('_bans', []), HUD.STRETCH)    # legends banned before each game (Ranked Diamond+)
+        except Exception as e: perf['bansError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},
