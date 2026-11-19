@@ -544,13 +544,51 @@ def test_poi_names_and_aliases():
         assert eec.compare_drop("ZZ", "Fake Top", "zz-south")[0] == "different"
         assert eec.compare_drop("ZZ", "Glass", "zz-east")[0] == "near"              # unknown name: old rule
         assert eec.compare_drop("ZZ", "Somewhere", "zz-east")[0] is None
-        # POI names are game words: English in every app language; the hub is never asked for FR / KO names
+        # POI names are game words: English in every app language; the hub is never asked for FR / KO names, only for
+        # the team's callouts (decision 76: shown on hover after the game's name)
         calls = []
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
         d = eec.app_poi_names("http://hub.test:8420", lambda url, path: calls.append(path) or {"lang": "fr"})
         assert d["lang"] == "en" and d["names"]["zz-north"] == "Fake North" and d["names"]["zz-south"] == "The Fake Mill"
-        assert calls == [] and not hasattr(eec, "shown_names")
+        assert calls == ["/api/db/pois"] and d["callouts"] == {} and not hasattr(eec, "shown_names")
     finally:
         eec._POIS, eec._ALIASES = keep
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
+
+
+def test_poi_callouts_from_the_hub():
+    """Decision 76: the app's POI names stay the game's (ALGS) names; the team hub's `callout` of a Loot Book POI comes
+    with them for the hover text. No hub, an older hub without the field, or a hub out of reach = no callouts; asked at
+    most every 30 min (10 min after a failure); the page shows "Name (callout)" only on hover."""
+    from pcs_recorder import eec
+    eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
+    calls = []
+    docs = [{"id": "we-fragment-east", "data": {"map": "WE", "name": "Fragment East", "callout": " Frag "}},
+            {"id": "we-lava-siphon", "data": {"map": "WE", "name": "Lava Siphon"}},             # older hub: no field
+            {"id": "we-x", "data": {"callout": ""}}, {"id": "we-y", "data": {"callout": 7}}, "junk"]
+    fetch = lambda url, path: calls.append(path) or docs
+    try:
+        assert eec.hub_callouts("", fetch, now=1000) == {} and calls == []                  # no hub: never asked
+        got = eec.hub_callouts("http://hub.test:8420", fetch, now=1000)
+        assert got == {"we-fragment-east": "Frag"} and calls == ["/api/db/pois"], got
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=1000 + 1700) == got and len(calls) == 1
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=1000 + 1900) == got and len(calls) == 2
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=99999, ask=False) == got and len(calls) == 2   # game on
+        assert eec.hub_callouts("http://other.test:8420", fetch, now=99999, ask=False) == {} and len(calls) == 2
+        def down(url, path):
+            calls.append(path)
+            raise OSError("no answer")
+        eec._CALLOUTS["at"] = float("-inf")
+        assert eec.hub_callouts("http://hub.test:8420", down, now=5000) == {}                  # out of reach: nothing
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=5000 + 300) == {}           # retried after 10 min
+        assert eec.hub_callouts("http://hub.test:8420", fetch, now=5000 + 700) == got
+        d = eec.app_poi_names("http://hub.test:8420", fetch)
+        assert d["callouts"] == got and d["names"].get("we-fragment-east", "Fragment East") != "Frag"
+        js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        assert "POI_CALLOUTS = d.callouts || {}" in js and "const poiTitle" in js
+        assert "localStorage.setItem('pcs-poi-names', JSON.stringify(d.names))" in js       # callouts never stored
+    finally:
+        eec._CALLOUTS.update({"at": float("-inf"), "for": None, "map": {}})
 
 
 def test_maps_game_names():
@@ -2285,6 +2323,8 @@ def test_squads_left_counter():
     own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
     games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
     SCAN.timeline(games, [], own=own)
+    dr = games[0]["own"].pop("damageReads")                # change points of the damage reads + the last read (decision 35)
+    assert dr == [[float(t), 100 + t] for t in range(10, 20)] + [[40, 400], [42, 400]], dr
     assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
                                "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
     own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
@@ -2293,6 +2333,12 @@ def test_squads_left_counter():
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
     assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
+    assert o["damageReads"][-2:] == [[40, 400], [43, 455]], o["damageReads"]
+    # change points: one entry per new value, the last read added when the value didn't change
+    assert SCAN.change_reads([(1, {"damage": 0}), (2, {"damage": 0}), (3, {}), (4, {"damage": 50}), (5, {"damage": 50}),
+                              (6, {"damage": 50}), (9, {"damage": 80})], "damage", 0, 100) == [[1, 0], [4, 50], [9, 80]]
+    assert SCAN.change_reads([(1, {"damage": 7}), (2, {"damage": 7})], "damage", 0, 100) == [[1, 7], [2, 7]]
+    assert SCAN.change_reads([(1, {"damage": 7})], "damage", 5, 100) == [] and SCAN.change_reads(None, "damage", 0, 9) == []
 
 
 def test_game_end_time():
@@ -2790,7 +2836,7 @@ def test_fights_and_ring_damage():
     assert f1['opponents'] == 2 and not f1['thirdParty'] and f1['t0'] <= 100 <= 112 <= f1['t1'] < 130, f1
     assert f2['theirs'] == {'knocks': 1, 'kills': 1} and f2['result'] == 'lost', f2                     # he died in it
     assert F.verdict({'knocks': 3, 'kills': 0}, {'knocks': 1, 'kills': 0}) == 'won'
-    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'even'
+    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'won'      # any knock lead (decision 32)
     assert F.verdict({'knocks': 2, 'kills': 2}, {'knocks': 0, 'kills': 0}, wiped=True) == 'lost'
     # third party: a fourth enemy name in one fight
     sigs = ['0' * 36, 'f' * 36, '0f' * 18, 'f0' * 18]
@@ -2804,6 +2850,51 @@ def test_fights_and_ring_damage():
     F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
     f = g[0]['fights'][0]
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
+def test_fights_even_rule_decision_32():
+    """Coach's decision 32 (20 Nov 2026): a fight is even unless a side knocks; kills first, then any knock lead, then a
+    large damage difference (damage dealt = the own damage number's rise during the fight, against damage taken). No
+    knock and no large difference = even. The damage number read once, misread (going down) or not read = no figure."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_fights as F
+    z = {'knocks': 0, 'kills': 0}
+    k = lambda n, m=0: {'knocks': n, 'kills': m}
+    assert F.KNOCK_LEAD == 1 and F.DAMAGE_LEAD == 100
+    assert F.verdict(k(0, 1), k(3, 0)) == 'won' and F.decided_by(k(0, 1), k(3, 0)) == 'kills'     # kills first
+    assert F.verdict(k(0), k(1), dealt=400, taken=0) == 'lost'                                  # then any knock
+    assert F.verdict(k(2), k(1)) == 'won' and F.decided_by(k(2), k(1)) == 'knocks'
+    assert F.verdict(z, z, dealt=180, taken=60) == 'won' and F.decided_by(z, z, dealt=180, taken=60) == 'damage'
+    assert F.verdict(z, z, dealt=20, taken=150) == 'lost'
+    assert F.verdict(k(1), k(1), dealt=0, taken=100) == 'lost'                                  # exactly the lead
+    assert F.verdict(z, z, dealt=150, taken=60) == 'even' and F.decided_by(z, z, dealt=150, taken=60) == ''
+    assert F.verdict(z, z, dealt=None, taken=500) == 'even'                                     # no figure: no damage rule
+    assert F.verdict(k(3, 1), z, wiped=True) == 'lost' and F.decided_by(k(3, 1), z, wiped=True) == 'wiped'
+    # damage dealt from the own stats strip: values read twice; the plate missing before the first read = 0
+    reads = [(float(t), {'kills': 0}) for t in range(100, 104)] + [(float(t), {'damage': 0 if t < 110 else 75 if t < 120 else 230})
+                                                         for t in range(104, 140)]
+    vals = F.damage_values(reads, 90, 200)
+    assert [v for _, _, v in vals] == [0, 75, 230], vals
+    assert F.damage_dealt(vals, 108, 125) == 230 and F.damage_dealt(vals, 112, 115) == 0
+    assert F.damage_dealt(vals, 112, 117) == 155                                                # DEALT_AFTER: 3 s later
+    assert F.damage_dealt(vals, 50, 60) is None and F.damage_dealt([], 100, 110) is None
+    assert F.damage_values(reads + [(140.0, {'damage': 99}), (141.0, {'damage': 99})], 90, 200) is None   # went down
+    # through attach: a fight with hits only (no feed line, no knock) and a big damage lead = won; small = even
+    A = lambda t, s, h: (float(t), {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': h}, [], False)
+    bars = [A(t, 75, 100) for t in range(100, 110)] + [A(110, 15, 100), A(111, 15, 100)] + \
+           [A(t, 75, 100) for t in range(112, 130)]
+    g = [{'tStart': 0.0, 'tEndGame': 900.0}]
+    own = [(float(t), {'damage': 10 if t < 111 else 250}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageTaken'] == 60 and f['damageDealt'] == 240 and f['result'] == 'won' and f['decidedBy'] == 'damage', f
+    own = [(float(t), {'damage': 10 if t < 111 else 90}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageDealt'] == 80 and f['result'] == 'even' and f['decidedBy'] == '', f
+    F.attach(g, [], bars, [])                                                                    # no strip reads
+    f, = g[0]['fights']
+    assert f['damageDealt'] is None and f['result'] == 'even', f
 
 
 def _usage_frame(item=None, bar=(40, 140, 240), p=0.4, tac=None, ult=None):
@@ -3191,6 +3282,104 @@ def test_region_cache_round_trip():
         assert RC.summary(reads)[0].startswith("   0 min: squads 3x")
 
 
+def test_checksets_event_scorers():
+    """Developer tool: tools/checksets.py scores the event check sets (bans, fights, highlights, mode, own state,
+    respawns, heals / abilities) on made-up scan.json files: found / missed / false, results right, per split."""
+    import json as _json
+    root = Path(__file__).resolve().parent.parent
+    if str(root / "tools") not in sys.path:
+        sys.path.insert(0, str(root / "tools"))
+    import checksets as C
+    folder, scans = TMP / f"cs-{time.time_ns()}", TMP / f"cs-scans-{time.time_ns()}"
+    folder.mkdir()
+    scans.mkdir()
+
+    def w(name, d):
+        (folder / name).write_text(_json.dumps(d), encoding="utf-8")
+
+    w("checkset-bans.json", {
+        "games": [{"recording": "A", "game": 0, "selectAt": 100, "bans": ["crypto", "vantage"], "split": "dev"},
+                  {"recording": "A", "game": 1, "selectAt": 900, "bans": ["seer", "wraith"], "split": "held"}],
+        "negatives": ["B (no ban shown)"]})
+    w("checkset-fights.json", {
+        "fights": [{"rec": "A", "t0": 300, "t1": 320, "result": "won", "thirdParty": False, "split": "dev"},
+                   {"rec": "A", "t0": 500, "t1": 510, "result": "lost", "thirdParty": True, "split": "dev"},
+                   {"rec": "A", "t0": 700, "t1": 705, "result": "even", "split": "held"}],
+        "notFights": [{"rec": "A", "t": 600, "split": "dev"}],
+        "ring": [{"rec": "A", "t0": 400, "t1": 420, "outside": True, "split": "dev"},
+                 {"rec": "A", "t": [450, 800], "outside": False, "split": "dev"}]})
+    w("checkset-highlights.json", {
+        "_about": "x",
+        "A": {"split": "dev", "highlights": [{"t0": 300, "t1": 310, "kind": "multi+wipe"},
+                                             {"t0": 1000, "t1": 1001, "kind": "double"}],
+              "borderline": [{"t0": 1200, "t1": 1206}]}})
+    w("checkset-mode.json", {"truths": {"A.mp4": {"split": "dev", "modes": ["ranked", "pubs"]},
+                                        "B.mp4": {"split": "held", "modes": [None]}}})
+    w("checkset-own-state.json", {
+        "scope": {"A.mp4": [0, 2000]},
+        "knocks": [{"recording": "A.mp4", "t": 330, "end": 340, "outcome": "revived", "split": "dev"},
+                   {"recording": "A.mp4", "t": 520, "end": 530, "outcome": "died", "split": "dev"}],
+        "bars": [{"recording": "A.mp4", "t": 250, "who": "self", "state": "alive", "tier": "blue", "shield": 72,
+                  "health": 100, "split": "dev"},
+                 {"recording": "A.mp4", "t": 335, "who": "self", "state": "knocked", "split": "dev"},
+                 {"recording": "A.mp4", "t": 250, "who": "mate", "slot": 2, "state": "alive", "tier": "white",
+                  "shield": 50, "health": 60, "split": "dev"}]})
+    w("checkset-respawn-ring.json", {"respawns": [{"recording": "A.mp4", "t": 610, "tol": 6, "who": "self", "split": "dev"},
+                                                  {"recording": "A.mp4", "t": 640, "tol": 6, "who": "teammate", "split": "dev"}]})
+    w("checkset-usage.json", {
+        "windows": [{"recording": "A.mp4", "from": 200, "to": 400, "what": "heals+tactical", "split": "dev"}],
+        "heals": [{"recording": "A.mp4", "t": 210, "item": "cell", "done": True, "split": "dev"},
+                  {"recording": "A.mp4", "t": 230, "item": "battery", "done": False, "split": "dev"}],
+        "abilities": [{"recording": "A.mp4", "t": 260, "kind": "tactical", "split": "dev"}]})
+    g0 = {"tStart": 120, "mode": "ranked", "select": {"tFirst": 95, "tLast": 110},
+          "bans": [{"legend": "crypto"}, {"legend": "vantage"}],
+          "fights": [{"t0": 298, "t1": 322, "result": "won", "thirdParty": False},
+                     {"t0": 505, "t1": 512, "result": "even", "thirdParty": True},
+                     {"t0": 598, "t1": 601, "result": "lost"}],
+          "ringDamage": {"segments": [{"t0": 405, "t1": 415}, {"t0": 798, "t1": 802}]},
+          "highlights": [{"t0": 305, "t1": 309, "kind": "multi", "tags": ["multi", "wipe"]},
+                         {"t0": 1203, "t1": 1204, "kind": "double", "tags": ["double"]},
+                         {"t0": 1500, "t1": 1501, "kind": "double", "tags": ["double"]}],
+          "ownKnocks": [{"t": 331, "end": 340, "outcome": "revived"}, {"t": 900, "end": 905, "outcome": "died"}],
+          "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[200, "blue", 75, 100], [331, "knocked"]],
+                             "mates": [[[200, "white", 50, 98]], [[200, "white", 50, 62]]]},
+          "respawns": [{"t": 613, "who": "self"}, {"t": 700, "who": "teammate"}],
+          "heals": [{"t": 211, "item": "cell", "done": True}, {"t": 231, "item": "cell", "done": True},
+                    {"t": 300, "item": "syringe", "done": True}],
+          "abilities": [{"t": 261, "kind": "tactical"}, {"t": 350, "kind": "tactical"}]}
+    g1 = {"tStart": 930, "mode": None, "select": {"tFirst": 880, "tLast": 905}, "bans": [{"legend": "seer"}]}
+    (scans / "A.scan.json").write_text(_json.dumps({"games": [g0, g1]}), encoding="utf-8")
+    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": None}]}), encoding="utf-8")
+    assert C.recordings(str(folder)) == ["A", "B"]
+    res, misses, missing = C.score_all(str(folder), str(scans))
+    assert missing == []
+    b = res["bans"]["all"]
+    assert (b["games"], b["gamesRight"], b["legendsFound"], b["legends"], b["negativeFalse"]) == (2, 1, 3, 4, 0), b
+    f = res["fights"]
+    assert f["dev"]["found"] == 2 and f["dev"]["resultRight"] == 1 and f["dev"]["thirdPartyRight"] == 2, f
+    assert f["held"]["fights"] == 1 and f["held"].get("found", 0) == 0
+    assert f["dev"]["notFightsFalse"] == 1 and f["dev"]["ringFound"] == 1 and f["dev"]["redSceneryFalse"] == 1
+    h = res["highlights"]["dev"]
+    assert (h["highlights"], h["found"], h["kindRight"], h["borderline"], h["false"]) == (2, 1, 1, 1, 1), h
+    m = res["mode"]
+    assert m["dev"]["games"] == 2 and m["dev"]["right"] == 1 and m["held"]["notGamesRight"] == 1, m
+    o = res["ownState"]["dev"]
+    assert (o["knocks"], o["found"], o["outcomeRight"], o["false"]) == (2, 1, 1, 1), o
+    assert o["bars"] == 3 and o["barsRead"] == 3 and o["barsRight"] == 3, o     # within 5: shield 75 / 72, health 62 / 60
+    r = res["respawns"]["dev"]
+    assert (r["respawns"], r["found"], r["selfFound"], r.get("teammateFound", 0)) == (2, 1, 1, 0), r
+    u = res["usage"]["dev"]
+    assert (u["heals"], u["healsFound"], u["itemRight"], u["doneRight"], u["healsFalse"]) == (2, 2, 1, 1, 1), u
+    assert (u["tacticals"], u["tacticalsFound"], u["tacticalsFalse"]) == (1, 1, 1) and "ults" not in u, u
+    assert any(x["what"] == "fight result" for x in misses["fights"])
+    # a missing scan counts its truths as unread, never as false ones
+    (scans / "A.scan.json").unlink()
+    res, _, missing = C.score_all(str(folder), str(scans), split="dev")
+    assert missing == ["A"] and res["fights"]["dev"]["missed"] == 2 and "false" not in res["highlights"]["dev"]
+    assert C.main(["score", str(folder), "--scans", str(scans), "--json", str(folder / "out.json")]) == 0
+    assert _json.loads((folder / "out.json").read_text(encoding="utf-8"))["format"] == "pcs-checksets-score/1"
+
+
 def test_check_set_scoring():
     """Developer tool: the check set scorer counts truths, reads and correct reads per field, at the nearest
     keyframe and within 3 s."""
@@ -3373,6 +3562,51 @@ def test_hub_retried_when_only_drive_took_it():
     assert r2.hub_state("k0")["hub"] == "sent"
     r2._retry_hub()
     assert len(hub.hub_calls) == 3
+
+
+def test_hub_requests_say_the_app_version():
+    """Every hub request carries `X-PCS-App: <version>` (the coach's health page: who runs an old app); an odd
+    or unknown version is not sent. Never the key in it."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import pcs_core
+    from pcs_recorder import hub
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen.append(self.headers.get("X-PCS-App"))
+            data = _json.dumps({"name": "Moe", "role": "player"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    real = dict(pcs_core.BUILD)
+    try:
+        hub.set_key("pcs_" + "K" * 43)
+        hub.reset()
+        for version, sent in (("1.12.0", "1.12.0"), ("dev-291", "dev-291"), ("1.0 <x>", None), ("", None),
+                              ("x" * 40, None)):
+            pcs_core.BUILD["version"] = version
+            assert hub.app_version() == (sent or "")
+            assert hub.request(url, "GET", "/api/me").json()["name"] == "Moe"
+            assert seen[-1] == sent, (version, seen)
+        assert all("pcs_" not in (v or "") for v in seen)
+    finally:
+        pcs_core.BUILD.clear()
+        pcs_core.BUILD.update(real)
+        hub.set_key(None)
+        hub.reset()
+        srv.shutdown()
 
 
 def test_hub_key_refused_then_fixed():
@@ -5342,6 +5576,10 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    # the clip's thread removes the .part just after it says "Stopped" (clips.Clipper._run's finally): wait for it
+    end = time.time() + 10
+    while list((folder / "Clips").glob("*.part")) and time.time() < end:
+        time.sleep(0.05)
     assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
     # Apex running: refused at once
     try:

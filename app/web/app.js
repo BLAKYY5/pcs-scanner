@@ -14,6 +14,9 @@ const mapName = m => MAPS[m] || m || '?';
 /* POI ids (kept in scans) -> the game's names, in the player's language when the team hub has it (/api/pois) */
 let POI_NAMES = (() => { try { return JSON.parse(localStorage.getItem('pcs-poi-names') || '{}') || {}; } catch (e) { return {}; } })();
 const poiName = p => POI_NAMES[p] || (p || '').replace(/^[a-z]{2}-/, '').split('-').map(w => w ? w[0].toUpperCase() + w.slice(1) : w).join(' ');
+/* the team's callout for a POI (team hub, decision 76): never the main name, only on hover: "Name (callout)" */
+let POI_CALLOUTS = {};
+const poiTitle = p => { const n = poiName(p), c = p && POI_CALLOUTS[p]; return c && c !== n ? `${n} (${c})` : n; };
 
 async function api(path, body) {
   const r = await fetch(path, {method: body === undefined ? 'GET' : 'POST', headers: {'X-PCS-Token': TOKEN, 'Content-Type': 'application/json'},
@@ -657,7 +660,8 @@ function buildEvents(d) {
     if (L.exitAtExact != null) ev.push({t: L.exitAtExact, k: 'jump', g: gi, title: t('Jumped from the ship')});
     const ee = eecOf(d, gi), here = (ours && ours.poi) || L.poi;
     const landSub = ee ? t('EEC drop {poi}', {poi: ee.eecDrop}) + (ee.check === 'different' ? ' · ' + t('scan says {poi}', {poi: ee.ourDrop}) : '') : (here ? t('at {poi}', {poi: poiName(here)}) : '');
-    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: t('Landed'), sub: landSub});
+    const landTip = !ee && here && poiTitle(here) !== poiName(here) ? t('at {poi}', {poi: poiTitle(here)}) : '';   // hover: + callout
+    if (L.landedAtExact != null) ev.push({t: L.landedAtExact, k: 'land', g: gi, title: t('Landed'), sub: landSub, tip: landTip});
     (g.ring || []).forEach(r => {
       const n = r.round ? ' ' + r.round : '', after = r.endsAfterGame ? ' · ' + t('after your game ended') : '';
       if (r.kind === 'wait') {
@@ -912,7 +916,7 @@ function drawTimeline() {
   $('#laneE').innerHTML = `<span class="lane-label">${[t('Start · jump · landing · rings'), RV.ev.some(e => USEK.includes(e.k)) ? t('heals · abilities') : '', RV.ev.some(e => AMMOK.includes(e.k)) ? t('ammo') : ''].filter(Boolean).join(' · ')}</span>` + RV.ev.filter(e => e.k === 'ringout').map(e =>
     `<div class="ringout" data-t="${e.t}" style="left:${pct(e.t)};width:${pct(Math.max(1, e.t1 - e.t))}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('') +
     RV.ev.filter(e => !['feed', 'respawn', 'knock', 'mark', 'mute', 'fight', 'call', 'scanfight', 'ringout'].includes(e.k)).map(e =>
-    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
+    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.tip || e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
   const lm = $('#laneM');
   if (lm) {
     const marks = RV.d.marks || [], spans = [], open = {};
@@ -975,7 +979,7 @@ function drawSide() {
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">${t('Game {n} · {map}', {n: g + 1, map: esc(mapName(sp.map))})}</div>`; }
       if (e.laneOnly) return;
       const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff', scanfight: e.result === 'won' ? '#5fd08f' : '#e6ad45', ringout: '#e0623a', heal: '#5fd0c8', ult: '#4aa3ff', tac: '#9db8d9', lowammo: '#e6ad45', noheals: '#e0623a'}[e.k];
-      html += `<div class="ev${e.k === 'respawn' ? ' respawn' : ''}" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
+      html += `<div class="ev${e.k === 'respawn' ? ' respawn' : ''}" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small${e.tip ? ` title="${esc(e.tip)}"` : ''}>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">' + t('No events found.') + '</div>';
   } else if (RV.tab === 'feed') {
@@ -1039,15 +1043,15 @@ function dropHTML(g, i) {
   const spots = (g.drop && g.drop.spots) || [];
   if (!spots.length) return `<div class="gamehead">${t('Game {n} · {map}', {n: i + 1, map: esc(mapName(g.map))})}</div>${eecDropHTML(g, i)}<div class="muted" style="padding:6px">${t('The drop map wasn\'t seen in this game.')}</div>`;
   const byPoi = {};
-  spots.forEach(s => { const k = poiName(s.poi) || t('Open ground'); (byPoi[k] = byPoi[k] || {n: 0, ours: false}).n++; if (s.kind === 'ours') byPoi[k].ours = true; });
+  spots.forEach(s => { const k = poiName(s.poi) || t('Open ground'); (byPoi[k] = byPoi[k] || {n: 0, ours: false, tip: s.poi ? poiTitle(s.poi) : k}).n++; if (s.kind === 'ours') byPoi[k].ours = true; });
   const rows = Object.entries(byPoi).sort((a, b) => b[1].ours - a[1].ours || b[1].n - a[1].n);
   const grid = [20, 40, 60, 80].map(p => `<line x1="${p}" y1="0" x2="${p}" y2="100"/><line x1="0" y1="${p}" x2="100" y2="${p}"/>`).join('');
   const dots = spots.slice().sort((a, b) => (a.kind === 'ours') - (b.kind === 'ours')).map(s =>
-    `<circle cx="${s.x}" cy="${s.y}" r="${s.kind === 'ours' ? 2.6 : 1.7}" fill="${s.kind === 'ours' ? '#e5392d' : '#d9d6cf'}" stroke="#121211" stroke-width=".6"><title>${esc(poiName(s.poi) || t('Open ground'))}${s.kind === 'ours' ? ' (' + t('us') + ')' : ''}</title></circle>`).join('');
+    `<circle cx="${s.x}" cy="${s.y}" r="${s.kind === 'ours' ? 2.6 : 1.7}" fill="${s.kind === 'ours' ? '#e5392d' : '#d9d6cf'}" stroke="#121211" stroke-width=".6"><title>${esc((s.poi && poiTitle(s.poi)) || t('Open ground'))}${s.kind === 'ours' ? ' (' + t('us') + ')' : ''}</title></circle>`).join('');
   return `<div class="gamehead">${t('Game {n} · {map} · {spots} squads', {n: i + 1, map: esc(mapName(g.map)), spots: spots.length})}</div>${eecDropHTML(g, i)}
     <svg class="dropmap" viewBox="0 0 100 100" role="img" aria-label="${t('Drop spots')}"><g stroke="#24231f" stroke-width=".3">${grid}</g>${dots}</svg>
     <div class="faint" style="font-size:12px;margin-top:4px">${t('Positions on the map as shown on the drop screen. Red = your squad.')}</div>
-    <div class="pois">${rows.map(([k, v]) => `<div class="${v.ours ? 'ours' : ''}"><span>${esc(k)}${v.ours ? ' · ' + t('you') : ''}</span><span class="mono">${v.n > 1 ? t('{n} squads', {n: v.n}) : t('1 squad')}</span></div>`).join('')}</div>`;
+    <div class="pois">${rows.map(([k, v]) => `<div class="${v.ours ? 'ours' : ''}"><span${v.tip !== k ? ` title="${esc(v.tip)}"` : ''}>${esc(k)}${v.ours ? ' · ' + t('you') : ''}</span><span class="mono">${v.n > 1 ? t('{n} squads', {n: v.n}) : t('1 squad')}</span></div>`).join('')}</div>`;
 }
 function onTime(force) {
   const v = $('#vid'); if (!v || !RV) return;
@@ -1657,6 +1661,7 @@ function renderSettings() {
           <small>${t('Takes effect the next time Apex starts.')}</small></label>
         <div class="field">${switchHTML('f-send_mic', s.send_mic, t('Send my mic track to the team'), t('With the scan results, for the comms review'))}</div>
         <div class="field">${switchHTML('f-share_tracks', s.share_tracks, t('Share mic tracks with my team'), t('Your mic track goes to your teammates, theirs come to you by themselves while Apex is closed') + (S.teamTracks && S.teamTracks.tracks ? ' ' + t('({tracks} here)', {tracks: S.teamTracks.tracks}) : ''))}</div>
+        <div class="field">${switchHTML('f-share_clips', s.share_clips, t('Allow my voice in teammates\' clips'), t('Off: your teammates\' clips (for Discord) leave your voice out. Sharing your mic with the team doesn\'t change this.'))}</div>
       </div>
       ${switchHTML('f-transcript_consent', s.transcript_consent, t('Comms transcripts'), TRANSCRIPT_HINT + transcriptState())}
       <h3>${t('Hotkeys while recording')}</h3>
@@ -1759,10 +1764,12 @@ function renderSettings() {
   const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input, select', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
   // sharing needs the mic recorded and sent: switching one off switches sharing off, sharing on switches them on
-  const sh = $('#f-share_tracks'), sm = $('#f-send_mic'), ma = $('#f-mic_audio');
+  const sh = $('#f-share_tracks'), sm = $('#f-send_mic'), ma = $('#f-mic_audio'), sc = $('#f-share_clips');
   if (sh && sm && ma) {
-    sh.onchange = () => { if (sh.checked) { sm.checked = true; ma.checked = true; } };
-    [sm, ma].forEach(x => x.addEventListener('change', () => { if (!x.checked) sh.checked = false; }));
+    sh.onchange = () => { if (sh.checked) { sm.checked = true; ma.checked = true; } else if (sc) sc.checked = false; };
+    [sm, ma].forEach(x => x.addEventListener('change', () => { if (!x.checked) { sh.checked = false; if (sc) sc.checked = false; } }));
+    // clips are a separate yes (coach, 20 Nov 2026), but only make sense while the mic is shared: on = sharing on too
+    if (sc) sc.onchange = () => { if (sc.checked) { sh.checked = sm.checked = ma.checked = true; } };
   }
   const en = $('#f-enabled'); if (en) en.onchange = async () => {
     try { S = await api('/api/autorecord', {enabled: en.checked}); toast(en.checked ? t('Auto-record on.') : t('Auto-record off.')); renderTop(); }
@@ -1796,7 +1803,7 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'share_clips', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
     if (gamesEdit) { body.game_exes = gamesEdit.exes.slice(); body.game_ignore = gamesEdit.ignore.slice(); }
@@ -2035,6 +2042,7 @@ function loadPoiNames() {
   return api('/api/pois').then(d => {
     if (!d || !d.names) return;
     POI_NAMES = d.names;
+    POI_CALLOUTS = d.callouts || {};                    // in memory only: the team's callouts are not kept on disk
     try { localStorage.setItem('pcs-poi-names', JSON.stringify(d.names)); } catch (e) {}   // shown at once next time
   }).catch(() => {});
 }

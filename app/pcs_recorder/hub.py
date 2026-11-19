@@ -17,6 +17,8 @@ Answers
   Network errors: the caller retries later, as before.
 - A hub from before keys (0.2) ignores the header and has no /api/ping or /api/me: everything else works as
   before, with or without a key set.
+- Every request also says which app version sends it (`X-PCS-App: 1.12.0`): the coach's health page shows who still
+  runs an older app. Only the version; a hub that doesn't know the header ignores it.
 
 Addresses
 - `http://` (home network, Tailscale) and `https://` (the public hub behind Cloudflare, `https://hub.<domain>`)
@@ -44,6 +46,7 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from pathlib import Path
@@ -54,6 +57,7 @@ from .settings import APP_DIR
 log = logging.getLogger("hub")
 KEY_FILE = APP_DIR / "hub_key.dat"
 KEY_RE = re.compile(r"pcs_[A-Za-z0-9_-]{43}")
+VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,31}")
 TIMEOUT = 10
 REFUSED = "The team hub refused your key: paste a new one in Settings → Team hub"
 NO_KEY = "The team hub needs your key: paste it in Settings → Team hub"
@@ -365,6 +369,13 @@ def public_state(url: str) -> dict:
 
 # ------------------------------------------------------------------ requests
 
+def app_version() -> str:
+    """This app's version for the `X-PCS-App` header (pcs_core's build.json), "" when not known."""
+    core = sys.modules.get("pcs_core")
+    v = str((getattr(core, "BUILD", None) or {}).get("version") or "") if core else ""
+    return v if VERSION_RE.fullmatch(v) else ""
+
+
 def request(url: str, method: str, path: str, *, timeout: float = TIMEOUT, force: bool = False, **kw):
     """One request to the hub, with the key. Raises HubError for: no answer (network), 401 (refused), 429 (wait).
     Other answers (200, 404, 500…) are returned. `force` (the Test button) tries even after a refusal."""
@@ -381,6 +392,8 @@ def request(url: str, method: str, path: str, *, timeout: float = TIMEOUT, force
     headers = dict(kw.pop("headers", None) or {})
     if key:
         headers["Authorization"] = "Bearer " + key
+    if app_version():
+        headers.setdefault("X-PCS-App", app_version())
     try:
         r = requests.request(method, url + path, headers=headers, timeout=timeout, allow_redirects=False, **kw)
     except requests.RequestException as e:

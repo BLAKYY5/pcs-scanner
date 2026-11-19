@@ -259,6 +259,8 @@ class _S:            # recorder settings stand-in
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     mic_device = "default"
     share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
+    share_clips = False
+    transcripts_withdraw = False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -3045,18 +3047,20 @@ def test_watch_session_plan_through_the_app():
         hub.set_key(GOOD_KEY)
         r = call(srv, "/api/watch/list?fresh=1")[1]
         assert [(p["id"], p["moments"]) for p in r["plans"]] == [("pl-1", 3), ("pl-2", 0)]
+        def last(path):                    # the session's websocket connects in its own thread: skip its calls
+            return next((c[1:3] for c in reversed(fake.calls) if c[0] == "POST" and c[1] == path), None)
         code, snap, _ = call(srv, "/api/watch/start", {"gameKey": "", "plan": "pl-1"})
         assert code == 200 and snap["state"]["plan"]["at"] == 0 and snap["state"]["gameKey"] == "g-1"
-        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
+        assert last("/api/sessions") == ("/api/sessions", {"gameKey": "", "plan": "pl-1"})
         assert wait_for(lambda: b.watch.connected)
         call(srv, "/api/watch/control", {"action": "item", "index": 1, "junk": 2})
-        assert fake.calls[-1][1:3] == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
+        assert last("/api/sessions/s-1/control") == ("/api/sessions/s-1/control", {"action": "item", "index": 1})
         call(srv, "/api/watch/control", {"action": "plan", "plan": "pl-1"})
-        assert fake.calls[-1][2] == {"action": "plan", "plan": "pl-1"}
+        assert last("/api/sessions/s-1/control")[1] == {"action": "plan", "plan": "pl-1"}
         call(srv, "/api/watch/end", {})
         # a plain start sends no plan (as before)
         call(srv, "/api/watch/start", {"gameKey": "g-2"})
-        assert fake.calls[-1][1:3] == ("/api/sessions", {"gameKey": "g-2"})
+        assert last("/api/sessions") == ("/api/sessions", {"gameKey": "g-2"})
         call(srv, "/api/watch/end", {})
         # a hub without plans: the list still works, with none
         fake.has_plans = False
@@ -3748,10 +3752,14 @@ class _Page:
             self.prof = Path(tempfile.mkdtemp(dir=TMP))
             self.proc = subprocess.Popen([str(edge), "--headless=new", "--remote-debugging-port=0", "--no-first-run",
                                           f"--user-data-dir={self.prof}", "--window-size=1320,860", "about:blank"])
-            port_f, end = self.prof / "DevToolsActivePort", time.time() + 30
-            while not (port_f.exists() and port_f.read_text().strip()) and time.time() < end:
-                time.sleep(0.2)
-            port = int(port_f.read_text().split()[0])
+            port_f, end, port = self.prof / "DevToolsActivePort", time.time() + 60, 0
+            while not port:
+                try:                               # Edge holds the file while it writes it: Permission denied
+                    port = int(port_f.read_text().split()[0])
+                except (OSError, ValueError, IndexError):
+                    if time.time() > end:
+                        raise
+                    time.sleep(0.2)
         end = time.time() + 20
         while True:
             try:
@@ -3762,10 +3770,12 @@ class _Page:
                 if time.time() > end:
                     raise
                 time.sleep(0.3)
-        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=20, suppress_origin=True)
-        self.n = 0
-        self.send("Page.navigate", {"url": url})
-        end = time.time() + 20
+        self.ws = websocket.create_connection(page["webSocketDebuggerUrl"], timeout=60, suppress_origin=True)
+        self.n = 1
+        # not waiting for Page.navigate's own answer (slow on a busy runner: "timed out"): the loop below waits for
+        # the page itself, and send() skips answers that aren't its own
+        self.ws.send(json.dumps({"id": self.n, "method": "Page.navigate", "params": {"url": url}}))
+        end = time.time() + 45
         while self.js("typeof PCS_POLL") != "object":
             if time.time() > end:
                 raise AssertionError("the page didn't load")
@@ -3792,6 +3802,10 @@ class _Page:
             self.ws.close()
         finally:
             if self.proc:
+                if os.name == "nt":                # Edge's own child processes too, or they keep the runner busy
+                    import subprocess
+                    subprocess.run(["taskkill", "/T", "/F", "/PID", str(self.proc.pid)], capture_output=True,
+                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), timeout=30)
                 self.proc.kill()
                 self.proc.wait(10)
 
@@ -4513,6 +4527,7 @@ def test_setup_choices():
         assert s.transcript_asked and s.transcript_consent
         call(srv, "/api/setup/choice", {"choice": "transcripts", "on": False})
         assert s.transcript_asked and not s.transcript_consent
+        assert s.transcripts_withdraw is True                    # yes -> no: the hub must be told (decision 21)
         said = []
         b.say = said.append
         call(srv, "/api/setup/choice", {"choice": "autorecord", "on": False})
@@ -4523,6 +4538,9 @@ def test_setup_choices():
         s2._sync_sharing = lambda: None
         s2.save_settings({"transcript_consent": True})
         assert s2.auto.s.transcript_asked and not s2.auto.s.share_asked
+        assert not s2.auto.s.transcripts_withdraw
+        s2.save_settings({"transcript_consent": False})
+        assert s2.auto.s.transcripts_withdraw is True
     finally:
         srv.stop()
         st.save = st_save
@@ -4560,6 +4578,10 @@ class TeamHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         self.calls, self.shared, self.rec = [], [], rec
+        self.bodies = []                 # what PUT /api/me/sharing got
+        self.clips = None                # share_clips per track: None = an older hub without the field
+        self.features = ["comms"]        # GET /api/me features ("transcripts": takes PUT /api/me/transcripts)
+        self.transcripts = []            # what PUT /api/me/transcripts got
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -4580,14 +4602,25 @@ class TeamHub:
                     return self._json(401, {"error": "bad_key"})
                 if self.path == "/api/me/sharing" and self.command == "PUT":
                     n = int(self.headers.get("Content-Length") or 0)
-                    hub.shared.append(json.loads(self.rfile.read(n))["share_tracks"])
+                    hub.bodies.append(json.loads(self.rfile.read(n)))
+                    hub.shared.append(hub.bodies[-1]["share_tracks"])
                     return self._json(200, {"share_tracks": hub.shared[-1]})
+                if self.path == "/api/me" and self.command == "GET":
+                    return self._json(200, {"name": "Moe", "role": "player", "features": hub.features})
+                if self.path == "/api/me/transcripts" and self.command == "PUT":
+                    if "transcripts" not in hub.features:
+                        return self._json(404, {"error": "not_found"})
+                    n = int(self.headers.get("Content-Length") or 0)
+                    hub.transcripts.append(json.loads(self.rfile.read(n)))
+                    return self._json(200, {"transcripts": hub.transcripts[-1]["transcripts"]})
                 if self.path.startswith("/api/team-tracks"):
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     if q["recording"][0] != hub.rec:
                         return self._json(200, {"recording": q["recording"][0], "games": []})
                     t = {"player": "Zed", "recording": "zed-rec", "scan_id": 7, "name": "zed-rec.mic.m4a",
                          "size": len(MIC_BYTES)}
+                    if hub.clips is not None:
+                        t["share_clips"] = hub.clips
                     return self._json(200, {"recording": hub.rec, "player": "Moe", "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "start": 50.0, "end": 1550.0,
                          "tracks": [{**t, "jumpAt": 340.0}], "skipped": [{"player": "Kai", "reason": "not_shared"}]},
@@ -4612,6 +4645,62 @@ class TeamHub:
     def stop(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+def test_transcripts_no_tells_the_hub():
+    """Decision 21: a player who switches comms transcripts from yes to no has the hub told with his own key
+    (PUT /api/me/transcripts {"transcripts": false}; the hub deletes his transcripts). Only when GET /api/me lists the
+    feature "transcripts": an older hub gets nothing (asked again 6 h later). Hub out of reach: tried again later.
+    Said yes again before it was sent: nothing sent."""
+    from pcs_recorder import settings as st, teamtracks
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    real_up = hub.internet_up
+    hub.internet_up = lambda: True                           # no look at the outside world in tests
+    fake = TeamHub("none")
+    s = st.Settings()
+    s.hub_url = fake.url
+    saved = []
+    real_save = st.save
+    st.save = lambda x: saved.append(x.transcripts_withdraw)
+    clock = {"t": 1000.0}
+    tt = teamtracks.TeamTracks(lambda: s, lambda: {}, lambda: None, now=lambda: clock["t"])
+    try:
+        assert tt.sync_transcripts() is None and fake.calls == []            # nothing to withdraw: no request
+        s.transcripts_withdraw = True
+        assert tt.sync_transcripts() is None                                   # older hub: no feature, nothing sent
+        assert fake.calls == [("GET", "/api/me")] and fake.transcripts == [] and s.transcripts_withdraw
+        assert tt.sync_transcripts() is None and len(fake.calls) == 1        # not asked again at once
+        fake.features = ["comms", "transcripts"]                              # the hub updated
+        clock["t"] += teamtracks.OLD_HUB_RETRY_S + 1
+        assert tt.sync_transcripts() is True
+        assert fake.transcripts == [{"transcripts": False}] and fake.calls[-1] == ("PUT", "/api/me/transcripts")
+        assert s.transcripts_withdraw is False and saved[-1] is False
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and len(fake.calls) == n        # sent once
+        # hub out of reach: kept, sent at a later try
+        s.transcripts_withdraw = True
+        url = s.hub_url
+        s.hub_url = "http://127.0.0.1:9"
+        assert tt.sync_transcripts() is None and s.transcripts_withdraw
+        s.hub_url = url
+        assert tt.sync_transcripts() is True and len(fake.transcripts) == 2
+        # said yes again before it went out: nothing sent, the flag dropped
+        s.transcripts_withdraw, s.transcript_consent = True, True
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and not s.transcripts_withdraw and len(fake.calls) == n
+        # the minute tick sends it too (never during a game: tick does nothing then)
+        s.transcripts_withdraw, s.transcript_consent = True, False
+        tt.busy = lambda: "Apex is running"
+        assert not tt.tick() and s.transcripts_withdraw
+        tt.busy = lambda: None
+        tt.tick()
+        _tt_wait(tt)
+        assert not s.transcripts_withdraw and len(fake.transcripts) == 3
+    finally:
+        st.save = real_save
+        fake.stop()
+        _fresh_hub().internet_up = real_up
 
 
 def _tt_wait(tt, s=10):
@@ -4663,6 +4752,7 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert fake.shared == [False, True]
+        assert fake.bodies[-1] == {"share_tracks": True, "share_clips": False}   # clips: a separate yes, off by default
         asked = [c[1] for c in fake.calls if c[1].startswith("/api/team-tracks")]
         assert asked == ["/api/team-tracks?recording=" + rec.stem], asked   # not the old one, not the missing one
         got = teamtracks.base_dir() / rec.stem / "Zed-7.mic.m4a"
@@ -4680,6 +4770,13 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert len([c for c in fake.calls if c[1] == "/api/scans/7/file"]) == 1
+        # "Allow my voice in teammates' clips" on: the hub is told again, with the clips answer
+        s.share_clips = True
+        assert tt.sync_sharing() is True and fake.bodies[-1] == {"share_tracks": True, "share_clips": True}
+        n = len(fake.bodies)
+        assert tt.sync_sharing() is True and len(fake.bodies) == n             # unchanged: not sent again
+        s.share_clips = False
+        assert tt.sync_sharing() is True and fake.bodies[-1]["share_clips"] is False
         # Apex starting during a download: stopped, no partial file, tried again later
         got.unlink()
         tt.st["recs"][rec.stem]["checked"] = 0
@@ -5232,6 +5329,7 @@ def test_clip_routes_and_privacy():
     consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
     own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
     b, srv, fake, v, vid, started = _clip_server("clipapi")
+    fake.clips = True                                        # Zed allows his voice in teammates' clips
     try:
         body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
         code, r, _ = call(srv, "/api/clips/make", body)
@@ -5275,6 +5373,40 @@ def test_clip_routes_and_privacy():
         code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "notes": True, "player": "Moe"})
         assert code == 200 and started[-1]["notes"] == [{"t": 12, "dur": 5, "text": "for Moe"}]
     finally:
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_teammate_voice_needs_their_clips_yes():
+    """Coach, 20 Nov 2026: a teammate's voice goes into a clip only when they said yes to clips (a separate answer,
+    off by default); sharing the mic with the team doesn't cover it. Said no, no answer, or an older hub without the
+    field = left out, and said so. The player's own answer: in Settings, saved, sent to the hub with the sharing one."""
+    from pcs_recorder import settings as st, teamtracks
+    b, srv, fake, v, vid, started = _clip_server("clipvoice")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7"], "notes": False}
+        for clips in (None, False):                          # an older hub (no field), then Zed said no
+            fake.clips = clips
+            code, r, _ = call(srv, "/api/clips/make", body)
+            assert code == 200 and started[-1]["team"] == [], r
+            assert started[-1]["leftOut"] == ["Zed's mic: they haven't allowed their voice in clips"], started[-1]
+        fake.clips = True
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and [p for _, _, p in started[-1]["team"]] == ["Zed"] and started[-1]["leftOut"] == []
+        # the player's own answer: off by default, a Settings field, needs the mic shared to count
+        assert st.Settings().share_clips is False and "share_clips" in pcs_server.REC_FIELDS
+        s = _S(str(TMP))
+        s.comms_consent = s.share_tracks = True
+        s.share_clips = True
+        assert teamtracks.clips_answer(s) is True
+        s.share_tracks = False
+        assert teamtracks.clips_answer(s) is False
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "f-share_clips" in js and "'share_clips'" in js
+        fr = _i18n_tables()["fr"]
+        assert fr["Allow my voice in teammates' clips"] != "Allow my voice in teammates' clips"
+    finally:
+        fake.stop()
         srv.stop()
         _fresh_hub().internet_up = _clip_server.internet_up
 
