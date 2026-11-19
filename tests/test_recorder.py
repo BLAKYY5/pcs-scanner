@@ -4646,5 +4646,255 @@ def test_scanner_speedups_give_the_same_numbers():
         assert R.read_cards(a) is not None
 
 
+
+# ------------------------------------------------------------------ clips for Discord (pcs_recorder/clips.py)
+def test_clip_size_rules():
+    """Discord clips stay under 10 MB: bitrate from the length, picture smaller and 30 fps as the bitrate drops,
+    too long refused; H.264 on the card the recorder uses (NVENC / AMF / Quick Sync), else x264."""
+    from pcs_recorder import clips
+    assert clips.DISCORD_TARGET < clips.DISCORD_BYTES <= 10_000_000
+    k30 = clips.discord_video_kbps(30, 1)
+    assert 2000 < k30 < 2500 and (k30 + 96) * 30 * 1000 / 8 < clips.DISCORD_TARGET
+    assert clips.discord_video_kbps(60, 0) > clips.discord_video_kbps(60, 2)       # no sound = more for the picture
+    m = clips.discord_max_s(1)
+    assert clips.discord_video_kbps(m, 1) >= clips.MIN_VIDEO_KBPS > clips.discord_video_kbps(m + 5, 1)
+    assert clips.out_format(2560, 1440, 60, "discord", 8000) == (1920, 1080, 60)
+    assert clips.out_format(2560, 1440, 60, "discord", 2256) == (1280, 720, 30)
+    assert clips.out_format(2560, 1440, 60, "discord", 734) == (854, 480, 30)
+    assert clips.out_format(1280, 720, 60, "discord", 8000) == (1280, 720, 60)      # never larger than the recording
+    assert clips.out_format(1440, 1080, 60, "discord", 2256) == (960, 720, 30)      # 4:3 stays 4:3
+    assert clips.out_format(2560, 1440, 60, "full", None) == (2560, 1440, 60)
+    assert clips.full_kbps(2560, 1440, 60) == 20000 and 12000 < clips.full_kbps(1920, 1080, 60) < 14000
+    assert [clips.hw_encoder(e) for e in ("jim_av1_nvenc", "obs_nvenc_hevc_tex", "av1_texture_amf", "obs_qsv11_v2", "")] == \
+        ["h264_nvenc", "h264_nvenc", "h264_amf", "h264_qsv", "libx264"]
+    for enc in ("h264_nvenc", "h264_amf", "h264_qsv", "libx264"):
+        a = clips.encoder_args(enc, "discord", 2000)
+        assert a[a.index("-c:v") + 1] == enc and "-maxrate" in a and "3000k" in a
+        assert "-maxrate" in clips.encoder_args(enc, "full", 20000)                 # full quality has a ceiling too
+
+
+def test_clip_note_spans():
+    """Coach notes in clip time, as the review player shows them (t - 0.05 to t + dur); notes without text or
+    drawing are skipped; same notes side by side are one picture."""
+    from pcs_recorder import clips
+    a = {"t": 10, "dur": 5, "text": "Push", "drawings": []}
+    b = {"t": 12, "dur": 10, "text": "", "drawings": [{"kind": "pen", "color": "#fff", "pts": [[0, 0]]}]}
+    empty = {"t": 11, "dur": 5, "text": " ", "drawings": []}
+    far = {"t": 100, "dur": 5, "text": "later"}
+    sp = clips.note_spans([a, b, empty, far], 8, 20)
+    assert [(round(x, 2), round(y, 2), [n is a for n in on]) for x, y, on in sp] == \
+        [(1.95, 3.95, [True]), (3.95, 7.0, [True, False]), (7.0, 12.0, [False])], sp
+    assert clips.note_spans([a], 16, 30) == [] and clips.note_spans([], 0, 5) == []
+    many = [{"t": i, "dur": 0.5, "text": str(i)} for i in range(100)]
+    assert len(clips.note_spans(many, 0, 100)) == clips.MAX_OVERLAYS
+
+
+def test_clip_teammate_offsets():
+    """A teammate's track: their time = this recording's time + off, only inside the game part it belongs to."""
+    from pcs_recorder import clips
+    parts = [{"start": 50, "end": 1550, "off": 140}, {"start": 1550, "end": None, "off": 140}]
+    assert clips.team_inputs(parts, 100, 130) == [(240, 30, 0)]
+    assert clips.team_inputs(parts, 1540, 1560) == [(1680, 10, 0), (1690, 10, 10)]       # across two games
+    assert clips.team_inputs([{"start": 0, "end": None, "off": -20}], 10, 40) == [(0, 20, 10)]   # they started later
+    assert clips.team_inputs([{"start": 0, "end": 30, "off": 5}], 40, 60) == []
+
+
+def test_clip_ffmpeg_command():
+    """One ffmpeg run: video cut at the range, notes laid over for their time, chosen tracks mixed at their levels
+    with teammates' tracks delayed to their place; no tracks = no sound."""
+    from pcs_recorder import clips
+    src = {"codec": "av1", "w": 2560, "h": 1440, "fps": 60}
+    cmd = clips.build_cmd("rec.mp4", "out.part", 100, 130, w=1280, h=720, fps=30, src=src, own=[0, 2],
+                          team=[("zed.m4a", [{"start": 0, "end": None, "off": -110}])],
+                          overlays=[("n0.png", 2, 5)], enc="h264_amf", size="discord", vkbps=2000, hwdec=False)
+    s = " ".join(cmd)
+    assert "-hwaccel" not in cmd and cmd[cmd.index("-ss") + 1] == "100.000" and cmd[-1] == "out.part"
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=1280:720" in fc and "fps=30" in fc and "between(t,2.000,5.000)" in fc
+    assert "[0:a:0]" in fc and "[0:a:2]" in fc and "[0:a:1]" not in fc                 # track 2 (voice app) not chosen
+    assert "adelay=10000|10000" in fc and "amix=inputs=4:duration=first:normalize=0" in fc   # silence + 3 tracks
+    assert "-ss 0.000 -t 20.000 -i zed.m4a" in s and "-b:a 96k" in s and "-movflags +faststart" in s
+    quiet = clips.build_cmd("rec.mp4", "o", 0, 5, w=2560, h=1440, fps=60, src=src, own=[], team=[], overlays=[],
+                            enc="libx264", size="full", vkbps=20000, hwdec=True)
+    assert "-an" in quiet and "amix" not in " ".join(quiet)
+    fc = quiet[quiet.index("-filter_complex") + 1]
+    assert "scale" not in fc and "fps=" not in fc                               # full: the recording's size
+    if os.name == "nt":
+        i = quiet.index("-hwaccel")
+        assert quiet[i + 1:i + 4] == ["d3d11va", "-c:v", "av1"]
+
+
+def test_clip_note_picture():
+    """The coach's drawing and note text drawn at the clip's size: lines where they are, see-through elsewhere."""
+    from PIL import Image
+    from pcs_recorder import clips
+    out = TMP / "clipnote" / "n.png"
+    note = {"t": 0, "dur": 5, "text": "Rotate now, ring is closing", "drawings": [
+        {"kind": "arrow", "color": "#ff3b30", "pts": [[0.1, 0.5], [0.5, 0.5]]},
+        {"kind": "rect", "color": "#0a84ff", "pts": [[0.1, 0.7], [0.3, 0.9]]}]}
+    clips.render_notes([note], 640, 360, out)
+    im = Image.open(out).convert("RGBA")
+    assert im.size == (640, 360)
+    r, g, b, a = im.getpixel((192, 180))                  # on the arrow
+    assert a == 255 and r > 200 and g < 120, (r, g, b, a)
+    assert im.getpixel((5, 350))[3] == 0                  # nothing there
+    r, g, b, a = im.getpixel((int(0.1 * 640), 290))      # left side of the box
+    assert a == 255 and b > 200, (r, g, b, a)
+    top_right = [im.getpixel((x, y)) for x in range(400, 640) for y in range(0, 60)]
+    assert any(p[0] > 240 and p[1] > 200 and p[2] < 60 and p[3] == 255 for p in top_right)   # the yellow bar
+    clips.render_notes([{"text": "x" * 3000, "drawings": [{"kind": "bogus", "color": "nope", "pts": [[2, 2]]}]}],
+                       320, 180, out)                     # odd input doesn't break it
+
+
+def test_clip_clipboard_data():
+    """Copy file: the clipboard gets the file as Explorer copies it (CF_HDROP, wide names, ends with two NULs)."""
+    import struct
+    from pcs_recorder import clips
+    p = str(TMP / "Clips" / "a clip.mp4")
+    d = clips.hdrop([p])
+    assert struct.unpack("<IiiII", d[:20]) == (20, 0, 0, 0, 1)
+    assert d[20:].decode("utf-16-le") == os.path.abspath(p) + "\0\0"
+    if os.name == "nt" and os.environ.get("CI"):          # the real clipboard only on CI (not a player's clipboard)
+        import ctypes
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_bytes(b"x")
+        clips.copy_files_to_clipboard([p])
+        u32, sh = ctypes.windll.user32, ctypes.windll.shell32
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        sh.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        assert u32.OpenClipboard(None)
+        try:
+            h = u32.GetClipboardData(15)
+            buf = ctypes.create_unicode_buffer(520)
+            assert h and sh.DragQueryFileW(h, 0, buf, 520) and buf.value == os.path.abspath(p)
+        finally:
+            u32.CloseClipboard()
+
+
+def _clip_source(folder, secs=8):
+    import subprocess
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "Apex Legends_clip-test.mp4"
+    tones = []
+    for f in (300, 500, 700):
+        tones += ["-f", "lavfi", "-i", f"sine=f={f}:d={secs}"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=640x360:r=30:d={secs}"]
+                   + tones + ["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-c:a", "aac", str(v)], check=True)
+    mate = folder / "mate.m4a"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f=900:d={secs + 5}", "-c:a", "aac",
+                    str(mate)], check=True)
+    return v, mate
+
+
+def _clip_wait(c, s=120):
+    end = time.time() + s
+    while c.state()["running"] and time.time() < end:
+        time.sleep(0.05)
+    return c.state()
+
+
+def test_clip_made_with_ffmpeg():
+    """A real clip: saved in Clips next to the recording as H.264 + AAC MP4 (plays in Discord), the range's length,
+    one mixed sound track, coach note burned in; under 10 MB; no .part or temp files left; Show / Copy only on it."""
+    import json as _json
+    import shutil
+    import subprocess
+    from pcs_recorder import clips
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("  (skipped: no ffmpeg)")
+        return
+    v, mate = _clip_source(TMP / "cliprec")
+    c = clips.Clipper()
+    note = {"t": 3, "dur": 2, "text": "Here", "drawings": [{"kind": "circle", "color": "#ffd60a", "pts": [[.3, .3], [.7, .7]]}]}
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "discord", "own": [0, 2],
+             "team": [(str(mate), [{"start": 0, "end": None, "off": 2}], "Zed")], "notes": [note], "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and not st["error"], st
+    f = Path(st["file"])
+    assert f.parent == v.parent / "Clips" and f.name == "Apex Legends_clip-test clip 0m01s-0m06s.mp4"
+    assert f.stat().st_size < clips.DISCORD_BYTES and st["encoder"] == "libx264"
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                     "stream=codec_type,codec_name,pix_fmt,channels:format=duration", "-of", "json",
+                                     str(f)], capture_output=True, text=True).stdout)
+    kinds = [(x["codec_type"], x["codec_name"]) for x in pr["streams"]]
+    assert kinds == [("video", "h264"), ("audio", "aac")], kinds
+    assert pr["streams"][0]["pix_fmt"] == "yuv420p" and pr["streams"][1]["channels"] == 2
+    assert abs(float(pr["format"]["duration"]) - 5.0) < 0.15, pr["format"]
+    frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", "2", "-i", str(f), "-frames:v", "1", "-f", "rawvideo",
+                            "-pix_fmt", "rgb24", "-"], capture_output=True).stdout          # clip 2 s = recording 3.5 s
+
+    def px(x, y):
+        i = (y * 640 + x) * 3
+        return frame[i:i + 3]
+    assert any(p[0] > 200 and p[1] > 170 and p[2] < 90 for p in (px(x, 180) for x in range(185, 200))), "no circle"
+    assert not list(f.parent.glob("*.part")) and not list(Path(tempfile.gettempdir()).glob("pcs-clip-*"))
+    assert c.own_clip(str(f)) == str(f) and c.own_clip(str(v)) is None                 # Show / Copy: only its clips
+    # no sound chosen: no sound track; same name again gets (2)
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "full", "own": [], "team": [], "notes": [],
+             "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["name"].endswith(" (2).mp4"), st
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json",
+                                     st["file"]], capture_output=True, text=True).stdout)
+    assert [x["codec_type"] for x in pr["streams"]] == ["video"]
+
+
+def test_clip_stops_and_falls_back():
+    """Apex starting stops the clip (nothing left behind); a graphics card encoder that fails falls back to the CPU;
+    a Discord clip that came out too big is made again smaller."""
+    from pcs_recorder import clips
+    folder = TMP / "clipfake"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "rec.mp4"
+    v.write_bytes(b"video")
+    src = {"codec": "hevc", "w": 2560, "h": 1440, "fps": 60, "dur": 600}
+    busy = {"why": None}
+    runs = []
+    script = {}
+
+    def run(cmd, length):
+        runs.append(cmd)
+        enc = cmd[cmd.index("-c:v", cmd.index("-filter_complex")) + 1]
+        if enc == "h264_nvenc" and "-hwaccel" in cmd:
+            return 1, "decoder failed"
+        if script.get("apex"):
+            busy["why"] = "Apex is running"
+        Path(cmd[-1]).write_bytes(b"x" * script["sizes"].pop(0))
+        return 0, ""
+    c = clips.Clipper(lambda: busy["why"], run=run)
+    spec = {"video": str(v), "start": 10, "end": 40, "size": "discord", "src": src, "own": [0], "team": [], "notes": [],
+            "obs_encoder": "jim_nvenc"}
+    # card encoder with card decoding fails -> same encoder, CPU decoding; first file too big -> made again lower
+    script.update(sizes=[12_000_000, 9_000_000])
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and st["mb"] == 9.0 and not st["over"], st
+    rates = [int(r[r.index("-b:v") + 1].rstrip("k")) for r in runs]
+    if os.name == "nt":
+        assert len(runs) == 3 and "-hwaccel" in runs[0] and "-hwaccel" not in runs[1], runs
+    assert rates[2] < rates[1] * 0.8, rates
+    # Apex starts during the clip: stopped, no file, no .part
+    runs.clear()
+    script.update(sizes=[5_000_000], apex=True)
+    spec["end"] = 20
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
+    # Apex running: refused at once
+    try:
+        c.start(spec)
+        raise AssertionError("not refused")
+    except RuntimeError as e:
+        assert "Apex" in str(e)
+    busy["why"] = None
+    script["apex"] = False
+    # too long for 10 MB: said so, nothing made
+    spec.update(start=0, end=500)
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Failed" and "Too long for 10 MB" in st["error"], st
+
 if __name__ == "__main__":
     sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))

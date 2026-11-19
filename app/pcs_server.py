@@ -240,6 +240,9 @@ class Backend:
         self.open_path = lambda p: os.startfile(p) if os.name == "nt" else None
         self.open_window = lambda url, title: False        # a second app window (pywebview); False = none
         self.set_start_with_windows = lambda on: None
+        from pcs_recorder import clips
+        self.reveal_file = clips.show_in_folder           # a clip in Explorer, selected
+        self.copy_file = lambda f: clips.copy_files_to_clipboard([f])   # a clip on the clipboard, as Explorer copies
         self.quit = lambda: None
 
     # ------------------------------------------------------------- messages
@@ -1379,6 +1382,109 @@ class Backend:
         if self.auto and self.auto.s.hub_url:
             self.teamtracks.tick()
 
+    # ------------------------------------------------------------- clips for Discord (review player)
+    @property
+    def clipper(self):
+        """pcs_recorder.clips.Clipper: one clip at a time, never while Apex runs or a game records."""
+        if getattr(self, "_clipper", None) is None:
+            from pcs_recorder import clips
+            self._clipper = clips.Clipper(self._clip_busy)
+        return self._clipper
+
+    def _clip_busy(self) -> str | None:
+        a = self.auto
+        if a and a.rec.current is not None:
+            return "a game is being recorded"
+        try:
+            from pcs_recorder.core import apex_running
+            if apex_running():
+                return "Apex is running. Close Apex to make a clip"
+        except Exception:
+            pass
+        return None
+
+    def _clip_team(self, path: str, ids: list[str]) -> tuple[list, list[str]]:
+        """The teammates' mic tracks asked for that may go into a clip: downloaded, and the hub says right now that
+        the teammate still shares it. ([(file, parts, player)], [what was left out and why])"""
+        ids = [str(i) for i in ids or [] if re.fullmatch(r"\d{1,10}", str(i))]
+        if not ids:
+            return [], []
+        from pcs_recorder import teamtracks, hub
+        from urllib.parse import quote
+        have = {t["id"]: t for t in (self.teamtracks.for_recording(path) if self.auto else [])}
+        names = [have[i]["player"] + "'s mic" if i in have else "a teammate's mic" for i in ids]
+        if not self.auto or not teamtracks.active(self.auto.s):
+            return [], [f"{n}: your own mic sharing is off" for n in names]
+        try:
+            r = hub.request(self.auto.s.hub_url, "GET", "/api/team-tracks?recording=" + quote(Path(path).stem), timeout=8)
+            hub._check(r)
+            still = {str(t.get("scan_id")) for g in r.json().get("games") or [] for t in g.get("tracks") or []}
+        except Exception as e:
+            import logging
+            logging.getLogger("clips").info("teammates' tracks left out, hub not asked: %s", e)
+            return [], [f"{n}: the team hub could not confirm they still share it" for n in names]
+        out, left = [], []
+        for i, n in zip(ids, names):
+            f = self.teamtracks.file(path, i) if i in have else None
+            if f and i in still:
+                out.append((str(f), have[i]["parts"], have[i]["player"]))
+            else:
+                left.append(f"{n}: not shared any more" if f else f"{n}: not downloaded")
+        return out, left
+
+    def make_clip(self, body: dict) -> dict:
+        """Review player → Make clip. body: id, start, end, size (discord | full), tracks [own track numbers],
+        team [teammate track ids], notes (bool), player (whose notes: the coach looking at a player's recording)."""
+        from pcs_recorder import clips
+        it = self.find(str(body.get("id") or ""))
+        if not it:
+            raise RuntimeError("Recording not found")
+        why = self._clip_busy()
+        if why:
+            raise RuntimeError(why + ".")
+        try:
+            start, end = float(body.get("start")), float(body.get("end"))
+        except (TypeError, ValueError):
+            raise RuntimeError("Set a start and an end first.") from None
+        size = body.get("size") if body.get("size") in ("discord", "full") else "discord"
+        src = clips.probe(it["path"])
+        if src["dur"]:
+            end = min(end, src["dur"])
+        if not (0 <= start and end - start >= clips.MIN_S):
+            raise RuntimeError("The clip must be at least 1 second long.")
+        if size == "full" and end - start > clips.FULL_MAX_S:
+            raise RuntimeError(f"A clip can be at most {clips.FULL_MAX_S // 60} minutes long.")
+        tracks = {t["n"]: t for t in audio_tracks(it["path"])}
+        own = []
+        for n in body.get("tracks") or []:
+            t = tracks.get(n) if isinstance(n, int) else None
+            if not t:
+                continue
+            if t["key"] in clips.OWN_TRACKS_LEFT_OUT:          # teammates' voices: only through their own mic tracks
+                raise RuntimeError("The voice app track can't go into a clip. Add your teammates' own mic tracks instead.")
+            own.append(n)
+        team, left = self._clip_team(it["path"], body.get("team") or [])
+        n_audio = len(own) + len(team)
+        if size == "discord" and clips.discord_video_kbps(end - start, n_audio) < clips.MIN_VIDEO_KBPS:
+            raise RuntimeError(f"Too long for 10 MB. Make it {clips.discord_max_s(n_audio)} s or shorter, or pick Full quality.")
+        notes = []
+        if body.get("notes"):
+            try:
+                notes = self.notes(it["id"], body.get("player") or None).get("notes") or []
+            except Exception:
+                notes = []
+        return self.clipper.start({"video": it["path"], "start": start, "end": end, "size": size, "src": src,
+                                   "own": own, "team": team, "notes": notes, "leftOut": left,
+                                   "obs_encoder": self.auto.s.encoder if self.auto else ""})
+
+    def clip_file_action(self, action: str, file: str) -> dict:
+        """Show in folder / Copy: only on a clip this app made."""
+        f = self.clipper.own_clip(file)
+        if not f:
+            raise RuntimeError("Clip not found.")
+        (self.reveal_file if action == "show" else self.copy_file)(f)
+        return {"ok": True}
+
     def minimaps_tick(self) -> int:
         """The hub's map pictures in the data folder, so scans can read the player's position from the HUD minimap
         (pcs_minimap). Not while Apex runs; a picture already here is not downloaded again."""
@@ -1613,6 +1719,8 @@ class Server:
                         if snap.get("ended"):
                             b.talk_stop("session ended")        # ended by the hub (idle, replaced): talk too
                         return self._json(snap)
+                    if path == "/api/clips/state":
+                        return self._json(b.clipper.state())
                     if path == "/api/watch/talk":
                         return self._json(b.talk_state())
                     if path.startswith("/api/library/") and path.endswith("/extras"):
@@ -1675,6 +1783,21 @@ class Server:
                         return self._json(b.note_change(str(body.get("id") or ""), path.rsplit("/", 1)[1], body))
                     if path.startswith("/api/watch/"):
                         return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
+                    if path == "/api/clips/make":
+                        try:
+                            return self._json(b.make_clip(body))
+                        except RuntimeError as e:
+                            return self._json({"error": str(e)}, 400)
+                    if path == "/api/clips/stop":
+                        b.clipper.stop()
+                        return self._json({"ok": True})
+                    if path in ("/api/clips/show", "/api/clips/copy"):
+                        try:
+                            return self._json(b.clip_file_action(path.rsplit("/", 1)[1], str(body.get("file") or "")))
+                        except RuntimeError as e:
+                            return self._json({"error": str(e)}, 404)
+                        except OSError as e:
+                            return self._json({"error": str(e)}, 500)
                     if path == "/api/label":
                         return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
                     if path == "/api/signin":

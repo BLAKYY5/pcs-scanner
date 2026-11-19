@@ -758,7 +758,7 @@ async function renderReview(id) {
               <button class="btn small" id="rvTheatre" title="Video across the whole window (T)">Theatre</button><button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
           <div id="mixer"></div>
-          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen · <kbd>M</kbd> map · <kbd>U</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
+          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen · <kbd>M</kbd> map · <kbd>U</kbd> mute · <kbd>V</kbd> scanner view on/off · <kbd>C</kbd> clip (<kbd>I</kbd> <kbd>O</kbd> start / end)</div>
         </div>
       </div>
       <aside class="card side">
@@ -789,6 +789,7 @@ async function renderReview(id) {
   loadNotes(d.id);
   if (window.reviewExtras) reviewExtras(d, v);                          // session bookmarks, review talk (review-extras.js)
   if (window.minimapSetup) minimapSetup(d, v);                          // Map panel: your path on the game's minimap (minimap.js)
+  if (window.clipSetup) clipSetup(d, v);                                // Clip for Discord (clip.js)
 }
 async function showVideoError(v, id) {   /* say which: file missing, can't be read, damaged, or a format not supported */
   const code = v.error ? v.error.code : 0;
