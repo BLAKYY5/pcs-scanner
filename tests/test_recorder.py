@@ -723,6 +723,42 @@ def test_no_game_recordings():
     assert no_game(retention.Entry(path=str(folder / "missing.mp4"), started=now)) is False
 
 
+def test_hybrid_mp4_recording():
+    """OBS 30.2+ records straight into an .mp4 (hybrid MP4): no remux after the session, the file is used once OBS
+    has finished writing it (size holding still). Older OBS keeps .mkv + remux. Both in OBS's config and when the
+    running OBS is prepared."""
+    import threading
+    from pcs_recorder import obs as obsmod
+    assert obsmod.rec_format((33, 0, 1)) == obsmod.rec_format((30, 2, 0)) == "hybrid_mp4"
+    assert obsmod.rec_format((30, 1, 2)) == obsmod.rec_format((29, 1, 3)) == obsmod.rec_format(()) == "mkv"
+    real = obsmod.exe_version
+    try:
+        for ver, fmt in (((33, 0, 1), "hybrid_mp4"), ((30, 0, 0), "mkv")):
+            obsmod.exe_version = lambda path=None, v=ver: v
+            obsmod.write_config(settings.Settings(folder=str(TMP / "hy")), "av1_texture_amf", 2560, 1440)
+            ini = (obsmod.CONFIG / "basic" / "profiles" / "PCS" / "basic.ini").read_text()
+            assert f"RecFormat2={fmt}\n" in ini and "AutoRemux=true" in ini, ini
+    finally:
+        obsmod.exe_version = real
+    folder = TMP / f"hybrid-{time.time_ns()}"
+    folder.mkdir()
+    mp4 = folder / "Apex Legends_x.mp4"
+    mp4.write_bytes(b"\0" * UNIT)
+    r = Recorder(settings.load(), FakeOBS(folder), FakeHub(), FakeUI(), fake_scan, is_apex_running=lambda: False)
+
+    def finish():                                           # OBS still writing the index for a moment
+        time.sleep(0.1)
+        with open(mp4, "ab") as f:
+            f.write(b"\1" * UNIT)
+    t = threading.Thread(target=finish)
+    t.start()
+    t0 = time.time()
+    assert r._final_file(str(mp4), wait_s=5, poll=0.3) == str(mp4)
+    t.join()
+    assert mp4.stat().st_size == 2 * UNIT and time.time() - t0 < 2      # waited for the end, not for the limit
+    assert not (folder / "Apex Legends_x.mkv").exists()
+
+
 def test_half_written_mp4_is_never_scanned():
     """OBS copies the .mkv into an .mp4 after the session; a half-written .mp4 that stops growing for a moment
     must not be taken (a 2-hour session was once scanned as 'no game' that way). The .mkv is used instead."""

@@ -89,8 +89,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   by exe name `voice_exe`; keys `discord_audio`, `hk_mute_discord`, track key `discord` and OBS input
   "PCS Discord" kept for compatibility), 3 = microphone (`mic_device`). A settings change that alters
   `config_signature` restarts OBS at the next Apex start.
-- **Recording file**: OBS writes mkv, then remuxes to mp4. Use the mp4 only when it's ≥ 0.98 × the mkv size and
-  stable, else the mkv. A half-written mp4 once produced a "0 games" scan.
+- **Recording file**: OBS 30.2+ records hybrid MP4 (`obs.rec_format`, from obs64.exe's version in the config and
+  the running OBS's version in `prepare`): an .mp4 from the start, no remux, used once its size holds still
+  (`Recorder._settled`). Older OBS: mkv, then remuxed to mp4; use the mp4 only when it's ≥ 0.98 × the mkv size and
+  stable, else the mkv. A half-written mp4 once produced a "0 games" scan. Checked 19 Nov 2026: a hybrid MP4 and
+  the same bits in a plain MP4 scan identically; track cutting and concat work on it.
 - **Scan validity**: `read_nothing` (no layout votes, no games) = failed scan, retry. `no_game` needs the video
   to have been read, no games and no feed lines; those recordings are deleted first by retention.
 - **Game mode**: the ranked badge share alone is unreliable. A scrim needs proof: the scrim drop screen (all 20

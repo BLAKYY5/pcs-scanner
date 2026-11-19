@@ -611,6 +611,8 @@ class Recorder:
         and if that takes too long, the .mkv is the complete recording (a half-written .mp4 can't be read:
         the scan of a 2-hour session once found nothing because of that)."""
         mkv = Path(path)
+        if mkv.suffix.lower() == ".mp4":                 # hybrid MP4 (OBS 30.2+): no remux; done once it stops growing
+            return self._settled(mkv, wait_s if wait_s is not None else 60, poll)
         if mkv.suffix.lower() != ".mkv":
             return str(mkv)
         mp4 = mkv.with_suffix(".mp4")
@@ -630,6 +632,22 @@ class Recorder:
                 last = size
             time.sleep(poll)
         return str(mkv if mkv.exists() else mp4)
+
+    @staticmethod
+    def _settled(f: Path, wait_s: float, poll: float) -> str:
+        """An .mp4 OBS wrote directly: OBS finishes it (the index at the end) as the recording stops. Wait until its
+        size holds still for one poll (at most wait_s), then use it."""
+        end, last = time.time() + wait_s, -1
+        while time.time() < end:
+            try:
+                size = f.stat().st_size
+            except OSError:
+                size = -1
+            if size > 0 and size == last:
+                break
+            last = size
+            time.sleep(poll)
+        return str(f)
 
     # ---------------------------------------------------------- hotkeys during a recording
     def hotkey(self, action: str) -> str | None:
