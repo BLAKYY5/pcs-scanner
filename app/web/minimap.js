@@ -2,7 +2,7 @@
    the video's moment, the landing spot, the harvesters, the ring circles (when the scan has `ringCircles`), our kill
    feed events and the coach's notes placed where the player was, and (Squad switch) the teammates' paths from the
    team hub. Also the map of Watch together (wtMapSetup / wtMapTick, called from session.js).
-   Loaded after app.js (uses $, esc, api, TOKEN, page, pageArg, RV, gameAt, seek, mapName, poiName, fmtT, feedSide,
+   Loaded after app.js (uses $, esc, api, TOKEN, page, pageArg, RV, gameAt, seek, mapName, poiName, poiTitle, fmtT, feedSide,
    feedEvent).
 
    The pictures come from the team hub (EA's files: never in the app). The app downloads one with the player's key the
@@ -343,6 +343,8 @@ function mmDraw() {
     const where = !game.pts.length || now ? '' : ' · ' + ((from != null && at < from) ? t('before the jump') :
       spec ? t('spectating') : at < game.pts[0].t ? t('not on the map yet') : t('no position read now'));
     cap.textContent = t('Game {n} · {map}', {n: MM.gi + 1, map: mapName(game.g.map)}) + (game.landPoi ? ' · ' + t('landed at {poi}', {poi: poiName(game.landPoi)}) : '') + where;
+    const tip = game.landPoi && poiTitle(game.landPoi) !== poiName(game.landPoi) ? t('landed at {poi}', {poi: poiTitle(game.landPoi)}) : '';
+    if (cap.title !== tip) cap.title = tip;              // hover: the team's callout after the game's name (decision 76)
   }
 }
 
