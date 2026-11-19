@@ -2994,7 +2994,7 @@ def test_highlight_settings_and_scan_rules():
     for k in ("hl_chain_s", "hl_multi_min", "hl_double_s"):
         assert k in pcs_server.REC_FIELDS
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-    for text in ("<h2>Highlights</h2>", 'id="f-hl_chain_s"', 'id="f-hl_multi_min"', 'id="f-hl_double_s"', "'hl_chain_s', 'hl_multi_min', 'hl_double_s'"):
+    for text in ("<h2>${t('Highlights')}</h2>", 'id="f-hl_chain_s"', 'id="f-hl_multi_min"', 'id="f-hl_double_s"', "'hl_chain_s', 'hl_multi_min', 'hl_double_s'"):
         assert text in js, text
     root = Path(pcs_server.WEB).parent.parent                 # the new scanner module is in the exe
     assert '"--hidden-import", "pcs_highlights"' in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
@@ -3034,7 +3034,7 @@ def test_review_highlights_list_star_and_clip():
         assert [h["kind"] for h in d["games"][0]["highlights"]] == ["wipe", "double"]
         assert d["games"][1]["highlights"] is None
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-        assert "Highlights (${L.length})" in js and ">Clip it</button>" in js and "HL_BEFORE = 5, HL_AFTER = 3" in js
+        assert "t('Highlights ({n})', {n: L.length})" in js and ">${t('Clip it')}</button>" in js and "HL_BEFORE = 5, HL_AFTER = 3" in js
         assert "function clipOpenRange(a, b)" in (Path(pcs_server.WEB) / "clip.js").read_text(encoding="utf-8")
         page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
         try:
