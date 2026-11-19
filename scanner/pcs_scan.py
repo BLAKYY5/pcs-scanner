@@ -226,7 +226,13 @@ def new_game(t, mp):
     return {'tStart': t, 'tEnd': t, 'map': mp, 'drop': None, 'harvRaw': [], 'mapFrames': 0, 'calib': []}
 
 def assemble(events):
-    games = []; g = None; events = HUD.select_runs(events); banner = []
+    games = []; g = None; events = HUD.select_runs(events); banner = []; rdrop = []
+    def ranked_drop(g, t):
+        """Ranked's drop-point screen seen just before the game (kept as data: it never starts a game or proves a scrim)."""
+        R = [x for x in rdrop if 0 <= t - x[0] < 180]; rdrop.clear()
+        if not R: return
+        best = max(R, key=lambda x: len(x[1]['spots']))[1]
+        g['rankedDrop'] = dict(best, tFirst=R[0][0], tLast=R[-1][0], frames=len(R))
     def titled(g, t):
         """Give the game the mode and map words of the loading banner seen just before its legend select
         (the word read most often; a word the scanner doesn't know yet is kept as its shape)."""
@@ -242,11 +248,12 @@ def assemble(events):
     for ev in events:
         t, kind, d = ev['t'], ev['kind'], ev['data']
         if kind == 'banner': banner.append((t, d)); continue
+        if kind == 'rankedDrop': rdrop.append((t, d)); continue
         if kind == 'select':    # legend select screen: a new game starts here
             if g and g.get('select') and t - g['select']['tLast'] <= 5: HUD.merge_select(g['select'], d, t); g['tEnd'] = max(g['tEnd'], t); continue
             if g and g['drop'] and g['mapFrames'] == 0 and not g.get('select') and t - g['drop']['tLast'] < 180:
                 g['select'] = HUD.new_select(d, t); g['tEnd'] = t; continue      # same game: its drop screen came first
-            g = new_game(t, None); g['select'] = HUD.new_select(d, t); titled(g, t); games.append(g); continue
+            g = new_game(t, None); g['select'] = HUD.new_select(d, t); titled(g, t); ranked_drop(g, t); games.append(g); continue
         if kind == 'drop':
             if g and g.get('select') and not g['drop'] and g['mapFrames'] == 0 and t - g['select']['tLast'] < 180:
                 g['map'] = d['map']; g['tStart'] = g['tEnd'] = t; g['drop'] = dict(d, tFirst=t, tLast=t); continue   # same game: legend select came first
@@ -261,7 +268,7 @@ def assemble(events):
         if g is not None and g['map'] is None: g['map'] = d['map']      # game opened by its legend select: first map seen
         elif g is not None and g.get('banner') and g['mapFrames'] == 0 and g['map'] != d['map']: g['map'] = d['map']   # the full map outranks the banner word
         if g is None or g['map'] != d['map'] or (t - g['tEnd'] > 25 * 60 and not g['drop']):
-            g = new_game(t, d['map']); games.append(g)
+            g = new_game(t, d['map']); ranked_drop(g, t); games.append(g)
         elif d['harv'] and len(g['harvRaw']) >= 5 and not any(e['kind'] == 'drop' for e in events):  # ranked only
             known = np.array([h[:2] for h in g['harvRaw']])
             near = [np.min(np.linalg.norm(known - np.array(h), axis=1)) < 1.0 for h in d['harv']]
@@ -294,6 +301,7 @@ def assemble(events):
                     'drop': g['drop'], 'dropMap': g.get('dropMap'), 'harvesters': hv, 'calib': g['calib']})
         if g.get('select'): out[-1]['select'] = {k: v for k, v in g['select'].items() if not k.startswith('_')}
         if g.get('banner'): out[-1]['banner'] = g['banner']
+        if g.get('rankedDrop'): out[-1]['rankedDrop'] = g['rankedDrop']
     # a game opened by its legend select where nobody opened the full map: same map as the nearest game of the
     # session (less than 45 min away), marked as a guess
     known = [g for g in out if g['map'] != '?']
@@ -443,9 +451,16 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 if bn: events.append({'t': round(t, 2), 'kind': 'banner', 'data': bn}); d = bn
         # The readers take the uint8 frame and make int16 only the small areas they compute on: converting the whole
         # 1440p frame cost about 6 ms each time, up to three times per keyframe (results are identical).
+        # A banner read does not end the keyframe: the scrim drop screen shows the map's name in the same place at the
+        # top left (custom lobbies, e.g. "WORLD'S EDGE (SEASON 17)"), read as a banner with unknown words. Skipping the
+        # drop reader there lost every scrim's drop screen, so no scrim mode (1.10.8 to 1.10.14; found on Oct 2026 scrims).
+        if bn: d = None
         for st in ([] if d else cands):
             HUD.LOOSE = st
             d = read_dropscreen(view_drop(img) if st else img, st)
+            if d and bn and bn.get('mode') == 'ranked':     # Ranked's drop-point screen ("RANKED - DROPZONE", 17 Nov
+                d['ranked'] = True                          # 2026 update): same layout as the scrim one, kept as data only
+                events.append({'t': round(t, 2), 'kind': 'rankedDrop', 'data': d}); break
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
             d = mr.read(view_map(img) if st else img, st)
             if d:
@@ -463,6 +478,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     except Exception: ic = None
                     if ic and (ic['care'] or ic['strongholds']): perf.setdefault('_icons', []).append((round(t, 2), d['map'], ic))
                 break
+        if bn and not d: d = bn     # a loading banner only: as before (no HUD reads on it)
         if not d:   # normal HUD: ring clock + debug overlay + event feed
             for st in cands:
                 HUD.LOOSE = st
@@ -689,11 +705,15 @@ def mode_seen(g, R, emblem, starts, gi):
     named = {k: v for k, v in seen.items() if v}
     if 'ranked' in named.values() and named.get('emblem') == 'other':
         named.pop('emblem')         # rank badges are round emblems too: an unnamed emblem never outvotes ranked signs
+    if seen['drop'] and 'ranked' in named.values():
+        # Since the 17 Nov 2026 update Ranked shows a drop-point screen ("RANKED - DROPZONE") laid out like the scrim
+        # drop screen: any ranked sign beats it. The drop read stays as data, marked ranked, never scrim proof.
+        g['drop']['ranked'] = True; seen['drop'] = None; named.pop('drop')
     if badge:                       # the RP panel: ranked, as before, unless the banner or emblem names another mode
         if any(v in ('wildcard', 'pubs') for v in named.values()):
             out['conflict'] = True; out['from'] = sorted(named); return out
         out['mode'] = 'ranked'; out['from'] = sorted(k for k, v in named.items() if v == 'ranked'); return out
-    if seen['drop']:                # scrim proof: the drop screen, no RP panel (rule unchanged)
+    if seen['drop']:                # scrim proof: the drop screen and no ranked sign (Wildcard / pubs signs: as before)
         out['mode'] = 'scrim'; out['from'] = ['drop']; return out
     names = set(named.values())
     if len(names) > 1:
