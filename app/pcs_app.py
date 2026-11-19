@@ -24,6 +24,7 @@ def selftest(out):
     try:
         import numpy, scipy.ndimage, scipy.signal, PIL.Image, pcs_scan, pcs_hud, pcs_audio, pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_ammo, pcs_minimap, pcs_ranked, pcs_highlights, scipy.fft, tkinter   # noqa: F401
         import psutil, obsws_python, pystray, requests, pcs_recorder.runtime, pcs_server, webview   # noqa: F401
+        import pcs_bans   # noqa: F401
         import pcs_recorder.hub   # noqa: F401
         import pcs_recorder.notes   # noqa: F401
         import pcs_recorder.watch, pcs_recorder.talk, websocket   # noqa: F401

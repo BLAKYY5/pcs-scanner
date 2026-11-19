@@ -2853,6 +2853,95 @@ def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
     return a
 
 
+def _ban_tiles(d):
+    """A fake private icons file with two made-up legend tiles (smooth random grey, no game image) -> (path, tiles)."""
+    import numpy as np
+    from PIL import Image
+    rng = np.random.default_rng(7)
+    tiles = {}
+    for n in ('alpha', 'beta'):
+        low = rng.integers(20, 235, (8, 12)).astype(np.uint8)
+        tiles[n] = np.asarray(Image.fromarray(low).resize((95, 64), Image.BICUBIC)).clip(1, 255).astype(np.uint8)
+    p = os.path.join(d, 'icons.npz')
+    np.savez(p, **{'legend_' + k: v for k, v in tiles.items()}, legend_dummie=tiles['alpha'], r99=np.ones((5, 5), np.uint8))
+    return p, tiles
+
+
+def _ban_frame(a, tile, x0, y0, w, tag=False, sign=True):
+    """Draw a banned portrait as the game does: orange-red frame (top edge at y0, x0..x0+w), the tile inside at the
+    frame's scale, the round "no" sign under the middle, optionally a chance tag above (a roll candidate)."""
+    import numpy as np
+    from PIL import Image
+    import pcs_bans as B
+    OR = (232, 79, 60)
+    k = B.TILE / (w / B.SRC_W); h = int(w * 0.95)
+    up = np.asarray(Image.fromarray(tile).resize((int(tile.shape[1] / k), int(tile.shape[0] / k)), Image.BICUBIC))
+    box = a[y0 + 6:y0 + h, x0 + 6:x0 + w - 6]
+    ph, pw = min(box.shape[0], up.shape[0]), min(box.shape[1], up.shape[1])
+    box[:ph, :pw] = up[:ph, :pw, None]
+    a[y0:y0 + 4, x0:x0 + w] = OR; a[y0:y0 + h, x0:x0 + 4] = OR; a[y0:y0 + h, x0 + w - 4:x0 + w] = OR
+    if tag: a[y0 - 28:y0 - 6, x0:x0 + w] = OR
+    if sign:
+        xm, yc, R = x0 + w // 2, y0 + int(w * 1.12), int(w * 0.2)
+        yy, xx = np.ogrid[-R:R, -R:R]; rr = np.hypot(yy, xx)
+        reg = a[yc - R:yc + R, xm - R:xm + R]
+        reg[rr < R * 0.95] = OR; reg[rr < R * 0.7] = (5, 0, 0)
+    return a
+
+
+def test_legend_bans_reader():
+    """Legend bans (pcs_bans): a banned portrait (orange-red frame + "no" sign) in the legend select grid and in the
+    BANNED! box is found and named from the icons file's legend tiles; a roll candidate (chance tag above) and a frame
+    without the sign are not bans; nothing on an empty frame; the ban phase's bottom bar is told. Per game: 2 reads
+    make a ban, `bans` None = not read (no select screen), [] = select screen without bans."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_bans as B
+    with tempfile.TemporaryDirectory() as d:
+        path, tiles = _ban_tiles(d)
+        R = B.Bans(path)
+        assert sorted(n for n, *_ in R.T) == ['alpha', 'beta'], [n for n, *_ in R.T]
+        empty = np.full((1440, 2560, 3), 40, np.uint8)
+        assert B.frames(empty) == [] and R.read_if(empty, True) is None and not B.ban_phase(empty)
+        a = np.full((1440, 2560, 3), 40, np.uint8)
+        _ban_frame(a, tiles['alpha'], 478, 1116, 102)                      # legend select grid
+        _ban_frame(a, tiles['beta'], 920, 1116, 102)
+        _ban_frame(a, tiles['beta'], 1300, 1116, 102, tag=True)           # a roll candidate: not a ban
+        _ban_frame(a, tiles['alpha'], 1600, 935, 102, sign=False)         # no sign: not a ban
+        got = sorted((h, n) for h, n, sc, x, y in R.read(a))
+        assert got == [('banned-portrait', 'alpha'), ('banned-portrait', 'beta')], got
+        b = np.full((1440, 2560, 3), 40, np.uint8)
+        _ban_frame(b, tiles['beta'], 1136, 706, 128)                       # the BANNED! box
+        b[1340:1418] = (232, 79, 60)                                         # the ban phase's red bar
+        assert B.ban_phase(b) and not B.ban_phase(a)
+        r = R.read_if(b, False)
+        assert r and [(h, n) for h, n, sc, x, y in r] == [('ban-screen', 'beta')], r
+        assert R.read_if(b[:, :, :], False) and R.read_if(a, False) is None    # grid without bar: only with the select screen
+        assert B.Bans(os.path.join(d, 'none.npz')).read(a) and all(n is None for _, n, *_ in B.Bans(os.path.join(d, 'none.npz')).read(a))
+    reads = [(100.0, [('ban-screen', 'beta', 0.9, 1136)]), (101.0, [('ban-screen', 'beta', 0.9, 1136)]),
+             (110.0, [('banned-portrait', 'alpha', 0.9, 478), ('banned-portrait', 'beta', 0.9, 920)]),
+             (111.0, [('banned-portrait', 'alpha', 0.9, 478), ('banned-portrait', 'beta', 0.9, 920)]),
+             (112.0, [('banned-portrait', 'gamma', 0.6, 1300)]),               # one read only: not a ban
+             (900.0, [('banned-portrait', 'alpha', 0.9, 478)])]                 # after the game started: not its ban
+    games = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}},
+             {'tStart': 800.0, 'select': {'tFirst': 770.0, 'tLast': 800.0}},
+             {'tStart': 1500.0}]
+    B.attach(games, reads)
+    g0 = {e['legend']: (e['how'], e['reads']) for e in games[0]['bans']}
+    assert g0 == {'beta': ('ban-screen', 4), 'alpha': ('banned-portrait', 2)}, games[0]['bans']
+    assert games[0]['bansSeen'] is True
+    assert games[1]['bans'] == [] and games[1]['bansSeen'] is False         # select screen, no bans shown
+    assert games[2]['bans'] is None and games[2]['bansSeen'] is False       # no select screen: not read
+    g = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}}]
+    B.attach(g, reads, stretched=True)
+    assert g[0]['bans'] is None
+    # two banned cells in one column of the grid (rows 1 and 2): two bans, not one
+    g = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}}]
+    col = [(t, [('banned-portrait', 'alpha', 0.9, 700, 935), ('banned-portrait', 'beta', 0.9, 705, 1116)]) for t in (120.0, 121.0)]
+    B.attach(g, col)
+    assert sorted(e['legend'] for e in g[0]['bans']) == ['alpha', 'beta'], g[0]['bans']
+
+
 def test_ammo_reader_and_events():
     """Ammo panel and heal slot (pcs_ammo): magazine, reserve (dim leading zeros), heal count and item; an empty heal
     slot only with the key hint and the ammo read; nothing on an empty frame. Per game: a fight that starts with less
