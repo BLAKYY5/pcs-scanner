@@ -361,6 +361,8 @@ def main():
             show_running_instance()                        # the running one shows its window instead
         return
     core.cleanup_staged()
+    try: core.remove_old_drive_signin()                    # the old Drive sign-in file of 1.10.x: not used any more
+    except Exception: logging.exception('old Drive sign-in')
     if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
         threading.Thread(target=core.clean_old_unpacked, daemon=True, name='clean-temp').start()
     try:

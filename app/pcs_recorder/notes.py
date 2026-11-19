@@ -22,7 +22,7 @@ from .settings import APP_DIR
 
 log = logging.getLogger("notes")
 CACHE_DIR = APP_DIR / "notes-cache"
-FIELDS = ("t", "dur", "text", "scope", "drawings")
+FIELDS = ("t", "dur", "text", "scope", "drawings", "replayFrom", "replayTo")   # replay range: hub 0.6, game time
 
 
 def recording_name(path: str) -> str:
@@ -81,6 +81,11 @@ def clean_note(n: dict) -> dict:
     plain colours, whatever a hub sends."""
     n = dict(n)
     n["t"], n["dur"] = num(n.get("t")), num(n.get("dur"), 5.0)
+    # the 2D replay range that goes with the note (hub 0.6; seconds after the jump): both numbers or neither
+    a, b = num(n.get("replayFrom"), None), num(n.get("replayTo"), None)
+    n.pop("replayFrom", None); n.pop("replayTo", None)
+    if a is not None and b is not None and a < b:
+        n["replayFrom"], n["replayTo"] = a, b
     dr = n.get("drawings") if isinstance(n.get("drawings"), list) else []
     if "replies" in n:                  # (a hub from before replies sends none: the page then offers no reply box)
         n["replies"] = [clean_reply(r) for r in (n["replies"] if isinstance(n["replies"], list) else [])

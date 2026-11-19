@@ -158,6 +158,8 @@ def test_recording_date_and_game_data_for_review():
             "own": {"kills": 2, "killsAt": 948.0, "assists": 1, "damage": 695, "damageSingleRead": False},
             "feedStats": {"squadKnocks": 1, "players": [{"slot": 2, "legend": "crypto", "self": True, "kills": 0}]},
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
+            "shieldTimeline": {"cols": ["t", "tier", "shield", "health"], "self": [[600.0, "blue", 75, 100], [900.0, "knocked"],
+                                                                                [912.0, "white", 0, 30]], "mates": [[], []]},
             "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
             "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
             "ammoEvents": [{"t": 700.0, "kind": "lowAmmoFight", "mag": 12, "reserve": 8, "magFull": 28, "fightEnd": 720.0},
@@ -196,6 +198,10 @@ def test_recording_date_and_game_data_for_review():
         assert g["own"]["kills"] == 2 and "knocks" not in g["own"]                     # not read: the page shows "–"
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
         assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
+        # own shield / health (pcs_bars shieldTimeline): a thin lane, shown only when the scan has it, words through t()
+        assert g["shieldTimeline"]["self"][1] == [900.0, "knocked"] and o["shieldTimeline"] is None
+        assert "shieldRuns(d).length ? '<div class=\"lane shield\" id=\"laneH\">" in js and "t('Your shield · health')" in js
+        assert "drawShield();" in js and "t('shield {shield} ({tier}) · health {health}'" in js
         # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
         assert "knock: ['', t('Knocked')]" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
@@ -253,6 +259,8 @@ class _S:            # recorder settings stand-in
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     mic_device = "default"
     share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
+    share_clips = False
+    transcripts_withdraw = False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -643,8 +651,11 @@ def test_no_google_drive_results():
     root = Path(__file__).resolve().parent.parent
     for f in ("pcs_core.py", "pcs_server.py", "pcs_app.py", "pcs_recorder/runtime.py", "pcs_recorder/core.py"):
         text = (root / "app" / f).read_text(encoding="utf-8")
+        if f == "pcs_core.py":                  # only to recognise and remove the old Drive sign-in file at start
+            assert text.count("google_token.json") == 1 and text.count("auth/drive") == 1, f
+            text = text.replace("google_token.json", "").replace("auth/drive", "")
         assert "auth/drive" not in text and "'drive', 'v3'" not in text and "drive_upload" not in text, f
-        assert "PCS Scans" not in text and "google_token.json" not in text, f
+        assert "PCS Scans" not in text and "google_token.json" not in text and "Drive only" not in text, f
     privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
     assert "not used any more" in privacy and "never to Google Drive" in privacy
 
@@ -927,6 +938,51 @@ def test_sign_in_tokens_encrypted():
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
+def test_old_drive_signin_removed():
+    """At start the old Drive sign-in (google_token.json, drive.file only) is removed: only that file, only while
+    every permission in it is a Drive one. A YouTube or account sign-in in it, a file without permissions, one that
+    can't be read here, and youtube_token.json are left alone."""
+    base = {"token": "ya29.old", "refresh_token": "1//rt-old", "client_id": "cid", "client_secret": "cs",
+            "token_uri": "https://oauth2.googleapis.com/token"}
+    drive = ["https://www.googleapis.com/auth/drive.file"]
+    f = Path(core.OLD_DRIVE_TOKEN_F)
+    assert f.name == "google_token.json" and f.parent == Path(core.YT_TOKEN_F).parent
+    yt = Path(core.YT_TOKEN_F)
+    yt_before = yt.read_bytes() if yt.exists() else None
+    try:
+        assert core.remove_old_drive_signin() is False                         # no file: nothing to do
+        # the old kind, in clear (1.9 and older) and encrypted (1.10.x): removed
+        f.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        core.write_token(str(f), json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        f.write_text(json.dumps({**base, "scopes": " ".join(drive)}))         # scopes as one string
+        assert core.remove_old_drive_signin() is True and not f.exists()
+        # anything else in that file stays
+        for info in ({**base, "scopes": core.YT_SCOPES},                        # YouTube
+                     {**base, "scopes": drive + core.YT_SCOPES},                # Drive and YouTube
+                     {**base, "scopes": drive + ["openid", "email"]},           # an account sign-in
+                     {**base, "scopes": []}, base):                             # no permissions written
+            f.write_text(json.dumps(info))
+            assert core.remove_old_drive_signin() is False and f.exists(), info
+            f.unlink()
+        for raw in (json.dumps({"dpapi": "AAAA"}), "not json"):               # another user's, damaged
+            f.write_text(raw)
+            assert core.remove_old_drive_signin() is False and f.exists()
+            f.unlink()
+        # youtube_token.json is never removed, even holding a Drive-only sign-in
+        yt.write_text(json.dumps({**base, "scopes": drive}))
+        assert core.remove_old_drive_signin(str(yt)) is False and yt.exists()
+        assert core.remove_old_drive_signin() is False and yt.exists()
+        # the app calls it once at start
+        src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+        assert "core.remove_old_drive_signin()" in src
+    finally:
+        f.unlink(missing_ok=True)
+        if yt_before is None: yt.unlink(missing_ok=True)
+        else: yt.write_bytes(yt_before)
+
+
 def test_request_body_limit():
     """The page sends small JSON only: a huge request body is refused before it is read."""
     b = pcs_server.Backend()
@@ -984,6 +1040,13 @@ def test_hub_notes_cleaned_for_the_page():
     assert [d["color"] for d in n["drawings"]] == ["#ffd60a", "#ffd60a"]
     assert n["drawings"][0]["pts"] == [[0.1, 0.2], [0.0, 1.0]]
     assert notes.num(float("nan")) == 0.0 and notes.num("12.5") == 12.5 and notes.num(None, 3.0) == 3.0
+    # the 2D replay range: two numbers in order, or none at all
+    assert notes.clean_note({"t": 1, "replayFrom": "-20", "replayTo": 40})["replayFrom"] == -20.0
+    for bad in ({"replayFrom": 10}, {"replayFrom": 50, "replayTo": 40}, {"replayFrom": "x", "replayTo": 4},
+                {"replayFrom": None, "replayTo": None}):
+        n = notes.clean_note({"t": 1, **bad})
+        assert "replayFrom" not in n and "replayTo" not in n, bad
+    assert "replayFrom" in notes.FIELDS and "replayTo" in notes.FIELDS
 
 
 def test_no_password_in_app_log():
@@ -2146,6 +2209,9 @@ def test_coach_notes():
         r = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "Rotate now"}})[1]
         assert r["notes"][0]["text"] == "Rotate now" and r["notes"][0]["version"] == 2
         assert fake.calls[-2][0] == "PUT" and fake.calls[-2][2] == {"if_version": "1"}
+        # a 2D replay range (hub 0.6, seconds after the jump) goes with the note; null / null clears it
+        call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**r["notes"][0], "replayFrom": 30.5, "replayTo": 60}})
+        assert fake.calls[-2][0] == "PUT" and fake.calls[-2][3]["replayFrom"] == 30.5 and fake.calls[-2][3]["replayTo"] == 60
         code, r, _ = call(srv, "/api/notes/save", {"id": vid, "player": "Moe", "note": {**n, "text": "stale"}})
         assert code == 500 and "409" in r["error"] and "reload" in r["error"], r                # someone changed it
         # a recording the hub doesn't know: said so, and saving is refused with the hub's words
@@ -4183,6 +4249,7 @@ def test_setup_choices():
         assert s.transcript_asked and s.transcript_consent
         call(srv, "/api/setup/choice", {"choice": "transcripts", "on": False})
         assert s.transcript_asked and not s.transcript_consent
+        assert s.transcripts_withdraw is True                    # yes -> no: the hub must be told (decision 21)
         said = []
         b.say = said.append
         call(srv, "/api/setup/choice", {"choice": "autorecord", "on": False})
@@ -4193,6 +4260,9 @@ def test_setup_choices():
         s2._sync_sharing = lambda: None
         s2.save_settings({"transcript_consent": True})
         assert s2.auto.s.transcript_asked and not s2.auto.s.share_asked
+        assert not s2.auto.s.transcripts_withdraw
+        s2.save_settings({"transcript_consent": False})
+        assert s2.auto.s.transcripts_withdraw is True
     finally:
         srv.stop()
         st.save = st_save
@@ -4230,6 +4300,10 @@ class TeamHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         self.calls, self.shared, self.rec = [], [], rec
+        self.bodies = []                 # what PUT /api/me/sharing got
+        self.clips = None                # share_clips per track: None = an older hub without the field
+        self.features = ["comms"]        # GET /api/me features ("transcripts": takes PUT /api/me/transcripts)
+        self.transcripts = []            # what PUT /api/me/transcripts got
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -4250,14 +4324,25 @@ class TeamHub:
                     return self._json(401, {"error": "bad_key"})
                 if self.path == "/api/me/sharing" and self.command == "PUT":
                     n = int(self.headers.get("Content-Length") or 0)
-                    hub.shared.append(json.loads(self.rfile.read(n))["share_tracks"])
+                    hub.bodies.append(json.loads(self.rfile.read(n)))
+                    hub.shared.append(hub.bodies[-1]["share_tracks"])
                     return self._json(200, {"share_tracks": hub.shared[-1]})
+                if self.path == "/api/me" and self.command == "GET":
+                    return self._json(200, {"name": "Moe", "role": "player", "features": hub.features})
+                if self.path == "/api/me/transcripts" and self.command == "PUT":
+                    if "transcripts" not in hub.features:
+                        return self._json(404, {"error": "not_found"})
+                    n = int(self.headers.get("Content-Length") or 0)
+                    hub.transcripts.append(json.loads(self.rfile.read(n)))
+                    return self._json(200, {"transcripts": hub.transcripts[-1]["transcripts"]})
                 if self.path.startswith("/api/team-tracks"):
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
                     if q["recording"][0] != hub.rec:
                         return self._json(200, {"recording": q["recording"][0], "games": []})
                     t = {"player": "Zed", "recording": "zed-rec", "scan_id": 7, "name": "zed-rec.mic.m4a",
                          "size": len(MIC_BYTES)}
+                    if hub.clips is not None:
+                        t["share_clips"] = hub.clips
                     return self._json(200, {"recording": hub.rec, "player": "Moe", "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "start": 50.0, "end": 1550.0,
                          "tracks": [{**t, "jumpAt": 340.0}], "skipped": [{"player": "Kai", "reason": "not_shared"}]},
@@ -4282,6 +4367,62 @@ class TeamHub:
     def stop(self):
         self.httpd.shutdown()
         self.httpd.server_close()
+
+
+def test_transcripts_no_tells_the_hub():
+    """Decision 21: a player who switches comms transcripts from yes to no has the hub told with his own key
+    (PUT /api/me/transcripts {"transcripts": false}; the hub deletes his transcripts). Only when GET /api/me lists the
+    feature "transcripts": an older hub gets nothing (asked again 6 h later). Hub out of reach: tried again later.
+    Said yes again before it was sent: nothing sent."""
+    from pcs_recorder import settings as st, teamtracks
+    hub = _fresh_hub()
+    hub.set_key(GOOD_KEY)
+    real_up = hub.internet_up
+    hub.internet_up = lambda: True                           # no look at the outside world in tests
+    fake = TeamHub("none")
+    s = st.Settings()
+    s.hub_url = fake.url
+    saved = []
+    real_save = st.save
+    st.save = lambda x: saved.append(x.transcripts_withdraw)
+    clock = {"t": 1000.0}
+    tt = teamtracks.TeamTracks(lambda: s, lambda: {}, lambda: None, now=lambda: clock["t"])
+    try:
+        assert tt.sync_transcripts() is None and fake.calls == []            # nothing to withdraw: no request
+        s.transcripts_withdraw = True
+        assert tt.sync_transcripts() is None                                   # older hub: no feature, nothing sent
+        assert fake.calls == [("GET", "/api/me")] and fake.transcripts == [] and s.transcripts_withdraw
+        assert tt.sync_transcripts() is None and len(fake.calls) == 1        # not asked again at once
+        fake.features = ["comms", "transcripts"]                              # the hub updated
+        clock["t"] += teamtracks.OLD_HUB_RETRY_S + 1
+        assert tt.sync_transcripts() is True
+        assert fake.transcripts == [{"transcripts": False}] and fake.calls[-1] == ("PUT", "/api/me/transcripts")
+        assert s.transcripts_withdraw is False and saved[-1] is False
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and len(fake.calls) == n        # sent once
+        # hub out of reach: kept, sent at a later try
+        s.transcripts_withdraw = True
+        url = s.hub_url
+        s.hub_url = "http://127.0.0.1:9"
+        assert tt.sync_transcripts() is None and s.transcripts_withdraw
+        s.hub_url = url
+        assert tt.sync_transcripts() is True and len(fake.transcripts) == 2
+        # said yes again before it went out: nothing sent, the flag dropped
+        s.transcripts_withdraw, s.transcript_consent = True, True
+        n = len(fake.calls)
+        assert tt.sync_transcripts() is None and not s.transcripts_withdraw and len(fake.calls) == n
+        # the minute tick sends it too (never during a game: tick does nothing then)
+        s.transcripts_withdraw, s.transcript_consent = True, False
+        tt.busy = lambda: "Apex is running"
+        assert not tt.tick() and s.transcripts_withdraw
+        tt.busy = lambda: None
+        tt.tick()
+        _tt_wait(tt)
+        assert not s.transcripts_withdraw and len(fake.transcripts) == 3
+    finally:
+        st.save = real_save
+        fake.stop()
+        _fresh_hub().internet_up = real_up
 
 
 def _tt_wait(tt, s=10):
@@ -4333,6 +4474,7 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert fake.shared == [False, True]
+        assert fake.bodies[-1] == {"share_tracks": True, "share_clips": False}   # clips: a separate yes, off by default
         asked = [c[1] for c in fake.calls if c[1].startswith("/api/team-tracks")]
         assert asked == ["/api/team-tracks?recording=" + rec.stem], asked   # not the old one, not the missing one
         got = teamtracks.base_dir() / rec.stem / "Zed-7.mic.m4a"
@@ -4350,6 +4492,13 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert len([c for c in fake.calls if c[1] == "/api/scans/7/file"]) == 1
+        # "Allow my voice in teammates' clips" on: the hub is told again, with the clips answer
+        s.share_clips = True
+        assert tt.sync_sharing() is True and fake.bodies[-1] == {"share_tracks": True, "share_clips": True}
+        n = len(fake.bodies)
+        assert tt.sync_sharing() is True and len(fake.bodies) == n             # unchanged: not sent again
+        s.share_clips = False
+        assert tt.sync_sharing() is True and fake.bodies[-1]["share_clips"] is False
         # Apex starting during a download: stopped, no partial file, tried again later
         got.unlink()
         tt.st["recs"][rec.stem]["checked"] = 0
@@ -4902,6 +5051,7 @@ def test_clip_routes_and_privacy():
     consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
     own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
     b, srv, fake, v, vid, started = _clip_server("clipapi")
+    fake.clips = True                                        # Zed allows his voice in teammates' clips
     try:
         body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
         code, r, _ = call(srv, "/api/clips/make", body)
@@ -4945,6 +5095,40 @@ def test_clip_routes_and_privacy():
         code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "notes": True, "player": "Moe"})
         assert code == 200 and started[-1]["notes"] == [{"t": 12, "dur": 5, "text": "for Moe"}]
     finally:
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_teammate_voice_needs_their_clips_yes():
+    """Coach, 20 Nov 2026: a teammate's voice goes into a clip only when they said yes to clips (a separate answer,
+    off by default); sharing the mic with the team doesn't cover it. Said no, no answer, or an older hub without the
+    field = left out, and said so. The player's own answer: in Settings, saved, sent to the hub with the sharing one."""
+    from pcs_recorder import settings as st, teamtracks
+    b, srv, fake, v, vid, started = _clip_server("clipvoice")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7"], "notes": False}
+        for clips in (None, False):                          # an older hub (no field), then Zed said no
+            fake.clips = clips
+            code, r, _ = call(srv, "/api/clips/make", body)
+            assert code == 200 and started[-1]["team"] == [], r
+            assert started[-1]["leftOut"] == ["Zed's mic: they haven't allowed their voice in clips"], started[-1]
+        fake.clips = True
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and [p for _, _, p in started[-1]["team"]] == ["Zed"] and started[-1]["leftOut"] == []
+        # the player's own answer: off by default, a Settings field, needs the mic shared to count
+        assert st.Settings().share_clips is False and "share_clips" in pcs_server.REC_FIELDS
+        s = _S(str(TMP))
+        s.comms_consent = s.share_tracks = True
+        s.share_clips = True
+        assert teamtracks.clips_answer(s) is True
+        s.share_tracks = False
+        assert teamtracks.clips_answer(s) is False
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "f-share_clips" in js and "'share_clips'" in js
+        fr = _i18n_tables()["fr"]
+        assert fr["Allow my voice in teammates' clips"] != "Allow my voice in teammates' clips"
+    finally:
+        fake.stop()
         srv.stop()
         _fresh_hub().internet_up = _clip_server.internet_up
 
@@ -4994,7 +5178,7 @@ def test_clip_in_review_page():
 # ------------------------------------------------------------------ languages (app/web/i18n, pcs_i18n)
 
 GAME_WORDS = ("knock", "third party", "ring", "care package", "harvester", "banner", "beacon", "Ranked", "Pubs", "Wildcard",
-              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical")
+              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical", "shield", "health")
 
 
 def _i18n_tables():
@@ -5026,8 +5210,11 @@ def test_language_tables_match():
             if re.search(r"(?<![A-Za-z])" + re.escape(w), k, re.I):
                 assert re.search(re.escape(w), fr[k], re.I), (w, k, fr[k])
     gloss = (Path(pcs_server.WEB) / "i18n" / "glossary.md").read_text(encoding="utf-8")
-    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard"):
+    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard",
+              "shield", "health", "purple"):
         assert w in gloss, w
+    for c in ("white", "blue", "purple", "red", "gold"):     # armour colours are game words (coach, 20 Nov 2026)
+        assert fr[c] == c, (c, fr[c])
 
 
 def _web_leftovers(src):
