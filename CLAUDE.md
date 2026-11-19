@@ -42,10 +42,10 @@ app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types),
                         hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
-                        hubbackup, stitch, comms (team hub features, see below)
+                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord)
 app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
 app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
-                        review-extras.js (no build step, no framework)
+                        review-extras.js, clip.js/.css (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
 tools/                  developer tools, not in the exe (region cache, check set, audio cross-check, mode emblems)
@@ -297,6 +297,24 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   folder and file name are set back after; if that fails, the next game start prepares OBS again. Segments
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
+- **Clips for Discord** (`pcs_recorder/clips.py`, `web/clip.js` + `clip.css`, idea #8, 19 Nov 2026): review player →
+  Clip (key C): start / end (Here buttons, keys I / O, or a typed time) or a moment from the list (events, own marks,
+  coach notes, session bookmarks) with 3-30 s before / after; the range shows on the timeline. Sound: the recording's
+  own tracks except the voice-app track (it holds teammates' voices without their own consent; the server refuses it
+  too), plus downloaded teammates' mic tracks, each at its offset per game: only when the player shares their own
+  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment (a teammate who said no
+  since the download, or a hub out of reach = left out, listed under the clip). Coach notes on screen in the range
+  (text + drawings, as the player shows them) are drawn with Pillow on transparent PNGs at the clip's size and laid
+  over for their time. Discord = under 10 MB (aimed at 9.0 MB: AMF overshot by 6 %; bitrate from the length, 1080 /
+  720 / 540 / 480 and 30 fps as it drops, at most ~3 min with sound; encoded again lower if still over 10 MB); Full
+  quality = the recording's size and frame rate, ~20 Mbit/s at 1440p60 (a fixed quality gave 58 Mbit/s). H.264 + AAC
+  MP4, yuv420p, faststart. Encoder on the recorder's card (NVENC / AMF / Quick Sync from `s.encoder`), decoding on the
+  card (`-hwaccel d3d11va -c:v <codec>`: AV1 needs the decoder named), then the card's encoder with CPU decoding, then
+  x264. Measured on the coach's RX 9070 XT, AV1 1440p60: 30 s -> 9.5 MB in 11 s, 85 s -> 9.6 MB in 30 s. Never while
+  Apex runs or a game records (refused; Apex starting stops it, `.part` removed), below-normal priority, one at a time.
+  Saved in a `Clips` folder next to the recording (the Recordings list doesn't look inside; retention never touches
+  it). Show in folder (`explorer /select,`) and Copy file (CF_HDROP + "Preferred DropEffect" copy, paste in Discord
+  with Ctrl+V) act only on clips the app made in this run. Nothing is uploaded.
 - **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.2 collection `minimaps`): the review player
   draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`;
   without the overlay the HUD minimap's reads from `minimapTrack`, `pcs_server.seen_rows`, `seenFrom: "minimap"`)

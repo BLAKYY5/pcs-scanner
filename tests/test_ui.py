@@ -4676,6 +4676,177 @@ def test_hub_status_in_settings_page():
     assert "h.reach" in fn and "re.state !== 'ok'" in fn
 
 
+
+# ------------------------------------------------------------------ clips for Discord (review player)
+class _ClipAuto:
+    """Just enough of the auto-recorder for the clip routes: settings, nothing recording."""
+
+    def __init__(self, folder, hub_url):
+        self.s = _S(str(folder))
+        self.s.hub_url = hub_url
+        self.s.encoder = "jim_nvenc"
+        self.s.share_tracks = self.s.comms_consent = self.s.mic_audio = self.s.send_mic = True
+        self.rec = _Rec()
+
+
+class _ClipTT:
+    """Teammates' tracks downloaded for the recording: Zed (scan 7, still shared) and Kai (scan 9, said no since)."""
+
+    def __init__(self, folder):
+        self.folder = folder
+        for i in ("7", "9"):
+            (folder / f"t{i}.mic.m4a").write_bytes(b"mic")
+
+    def for_recording(self, path):
+        return [{"id": "7", "player": "Zed", "parts": [{"start": 0, "end": None, "off": 1.0}]},
+                {"id": "9", "player": "Kai", "parts": [{"start": 0, "end": None, "off": 2.0}]}]
+
+    def file(self, path, sid):
+        f = self.folder / f"t{sid}.mic.m4a"
+        return f if f.is_file() else None
+
+
+def _clip_server(tmpname):
+    import subprocess
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        raise Skipped("no ffmpeg")
+    folder = TMP / tmpname
+    folder.mkdir(exist_ok=True)
+    v = folder / "Apex Legends_2026.11.07-21.42.mp4"
+    tones = []
+    for f in (300, 500, 700):
+        tones += ["-f", "lavfi", "-i", f"sine=f={f}:d=600"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=black:s=320x180:r=10:d=600"]
+                   + tones + ["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-c:a", "aac", "-b:a", "16k", str(v)], check=True)
+    v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"], "events": []}))
+    fake = TeamHub(v.stem)
+    hubm = _fresh_hub()
+    hubm.set_key(GOOD_KEY)
+    _clip_server.internet_up = hubm.internet_up
+    hubm.internet_up = lambda: True                          # no name lookup of the outside world in tests
+    b = pcs_server.Backend(_ClipAuto(folder, fake.url))
+    b._clip_busy = lambda: b.busy_why                        # no real Apex look in tests
+    b.busy_why = None
+    b._teamtracks = _ClipTT(folder)
+    started = []
+
+    class FakeClipper:
+        made = set()
+
+        def start(self, spec):
+            started.append(spec)
+            return {"running": True, "step": "Starting"}
+
+        def state(self):
+            return {"running": False}
+
+        def stop(self):
+            started.append("stop")
+
+        own_clip = __import__("pcs_recorder.clips", fromlist=["Clipper"]).Clipper.own_clip
+        lock = threading.Lock()
+    b._clipper = FakeClipper()
+    srv = pcs_server.Server(b)
+    srv.start()
+    vid = next(x["id"] for x in b.library() if x["path"] == str(v))
+    return b, srv, fake, v, vid, started
+
+
+def test_clip_routes_and_privacy():
+    """Make clip: the recording's own tracks but never the voice-app track (teammates' voices without their own
+    consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
+    own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
+    b, srv, fake, v, vid, started = _clip_server("clipapi")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200, r
+        spec = started[-1]
+        assert spec["own"] == [0, 2] and spec["obs_encoder"] == "jim_nvenc" and spec["video"] == str(v)
+        assert [(Path(f).name, p) for f, _, p in spec["team"]] == [("t7.mic.m4a", "Zed")], spec["team"]
+        assert spec["leftOut"] == ["Kai's mic: not shared any more"], spec["leftOut"]
+        assert ("GET", "/api/team-tracks?recording=" + v.stem) in fake.calls
+        # the voice app's track: refused, nothing started
+        n = len(started)
+        code, r, _ = call(srv, "/api/clips/make", {**body, "tracks": [0, 1]})
+        assert code == 400 and "voice app" in r["error"] and len(started) == n, r
+        # own sharing off: no teammate tracks at all (no hub request needed)
+        b.auto.s.share_tracks = False
+        calls = len(fake.calls)
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and started[-1]["team"] == [] and len(fake.calls) == calls
+        assert all("your own mic sharing is off" in x for x in started[-1]["leftOut"])
+        b.auto.s.share_tracks = True
+        # hub out of reach: teammates left out, the clip still made
+        fake.stop()
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and started[-1]["team"] == [], r
+        assert all("could not confirm" in x for x in started[-1]["leftOut"]) and len(started[-1]["leftOut"]) == 2
+        # too long for Discord, too short, Apex running
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "end": 400})
+        assert code == 400 and "Too long for 10 MB" in r["error"], r
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "size": "full", "end": 400})
+        assert code == 200 and started[-1]["size"] == "full"
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "end": 10.5})
+        assert code == 400 and "at least 1 second" in r["error"]
+        b.busy_why = "Apex is running. Close Apex to make a clip"
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": []})
+        assert code == 400 and "Close Apex" in r["error"], r
+        b.busy_why = None
+        assert call(srv, "/api/clips/state")[1] == {"running": False}
+        assert call(srv, "/api/clips/stop", {})[0] == 200 and started[-1] == "stop"
+        # coach notes: the hub's (or cached) notes of the player asked for
+        b.notes = lambda i, p=None: {"notes": [{"t": 12, "dur": 5, "text": f"for {p}"}]}
+        code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "notes": True, "player": "Moe"})
+        assert code == 200 and started[-1]["notes"] == [{"t": 12, "dur": 5, "text": "for Moe"}]
+    finally:
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_show_and_copy_only_own_clips():
+    """Show in folder / Copy file act only on a clip the app made in this run, never on any path the page sends."""
+    b, srv, fake, v, vid, started = _clip_server("clipshow")
+    shown, copied = [], []
+    b.reveal_file, b.copy_file = shown.append, copied.append
+    try:
+        clip = v.parent / "Clips" / "x clip.mp4"
+        clip.parent.mkdir(exist_ok=True)
+        clip.write_bytes(b"clip")
+        for what in ("show", "copy"):
+            assert call(srv, f"/api/clips/{what}", {"file": str(clip)})[0] == 404       # not made by the app
+            assert call(srv, f"/api/clips/{what}", {"file": str(v)})[0] == 404
+        b.clipper.made = {os.path.normcase(os.path.abspath(str(clip)))}
+        assert call(srv, "/api/clips/show", {"file": str(clip)})[0] == 200 and shown == [str(clip)]
+        assert call(srv, "/api/clips/copy", {"file": str(clip)})[0] == 200 and copied == [str(clip)]
+        clip.unlink()
+        assert call(srv, "/api/clips/copy", {"file": str(clip)})[0] == 404             # gone: nothing to copy
+    finally:
+        fake.stop()
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_in_review_page():
+    """The review player has the Clip bar; the page never offers the voice app's track and uses the server's
+    numbers for the 10 MB limit; the module is in the exe."""
+    from pcs_recorder import clips
+    web = Path(pcs_server.WEB)
+    js = (web / "clip.js").read_text(encoding="utf-8")
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert '<script src="clip.js"></script>' in html and 'href="clip.css"' in html
+    assert "clipSetup(d, v)" in (web / "app.js").read_text(encoding="utf-8")
+    assert "x.key !== 'discord'" in js and "/api/clips/make" in js and "'/api/clips/' + b.dataset.act" in js
+    assert 'data-act="show"' in js and 'data-act="copy"' in js
+    nums = dict(re.findall(r"(CLIP_TARGET|CLIP_MIN_KBPS|CLIP_AUDIO_KBPS) = (\d+)", js))
+    assert int(nums["CLIP_TARGET"]) == clips.DISCORD_TARGET and int(nums["CLIP_MIN_KBPS"]) == clips.MIN_VIDEO_KBPS
+    assert int(nums["CLIP_AUDIO_KBPS"]) == clips.audio_kbps(1, "discord")
+    assert "@keyframes" not in (web / "clip.css").read_text(encoding="utf-8")       # no endless animation
+    root = web.parent.parent
+    assert "pcs_recorder.clips" in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "import pcs_recorder.clips" in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
+
 if __name__ == "__main__":
     try:
         code = run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")])

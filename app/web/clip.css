@@ -1,0 +1,20 @@
+/* Clip for Discord bar in the review player (clip.js) */
+.clipbar{margin-top:12px;padding:12px 16px;display:flex;flex-direction:column;gap:10px;border-color:#2a4270}
+.cliptitle{font:600 15px var(--display);letter-spacing:.06em;text-transform:uppercase;color:var(--info)}
+.cliprow{display:flex;flex-wrap:wrap;align-items:center;gap:8px 16px}
+.clipt{display:inline-flex;align-items:center;gap:6px}
+.clipt span,.clipm span,.cliplab{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted)}
+.clipt input{width:84px;padding:5px 8px;font-family:var(--mono)}
+.clipt select{width:auto;padding:4px 8px}
+.clipm{display:inline-flex;align-items:center;gap:6px;flex:1 1 320px;min-width:0}
+.clipm select{flex:1;min-width:0;width:auto;padding:4px 8px}
+.clipck{display:inline-flex;align-items:center;gap:6px;cursor:pointer}
+.cliplen{font-family:var(--mono);color:var(--muted)}
+.cliplen.bad{color:var(--accent)}
+.clipprog{display:flex;align-items:center;gap:12px}
+.clipprog span{white-space:nowrap}
+.clipprog .bar{flex:1;height:6px;border-radius:3px;background:var(--line);overflow:hidden}
+.clipprog .bar i{display:block;height:100%;background:var(--info);transition:width .3s}
+.clipdone{display:flex;flex-wrap:wrap;align-items:center;gap:8px}
+.clipdone b{overflow-wrap:anywhere}
+.cliprange{position:absolute;top:0;bottom:0;background:rgba(106,160,255,.14);border-left:2px solid var(--info);border-right:2px solid var(--info);pointer-events:none;z-index:3}
