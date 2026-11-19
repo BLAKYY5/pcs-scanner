@@ -371,6 +371,9 @@ class UI:
                 self.log_line(f"[Auto-record] {title}: {text}")
             except Exception:
                 pass
+        from . import games
+        if games.gaming_now():                  # another game runs: nothing on the screen (Activity only)
+            return
         self.on_main(lambda: self._toast(title, text, sticky, action))
 
     def activity(self, text: str) -> None:
@@ -651,7 +654,7 @@ def settings_window(root: tk.Tk, s: st.Settings, usage: tuple[int, int], on_save
     en = tk.BooleanVar(value=s.enabled)
     row("Auto-record Apex", ttk.Checkbutton(f, variable=en), "records while Apex runs")
     hub = tk.StringVar(value=s.hub_url)
-    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = Drive only")
+    row("Team hub address", ttk.Entry(f, textvariable=hub, width=34), "from your coach; empty = results stay on this PC")
     folder = tk.StringVar(value=s.folder)
     fr = ttk.Frame(f)
     ttk.Entry(fr, textvariable=folder, width=28).pack(side="left")
@@ -730,16 +733,16 @@ class AutoRecorder:
         from .precheck import RecCheck
         self.check = self.rec.check = RecCheck(self.s, self.rec.obs, self.rec, self.ui,
                                                setting_up=lambda: bool(getattr(self, "_setting_up", False)))
-        self.sender.stop = lambda: self.rec.is_apex_running()     # same rule as every upload: never during a game
+        self.sender.stop = lambda: bool(self.rec.holding())       # same rule as every upload: never during a game
         from .talk import Talk
         self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
         self.thread = None
         self.hotkeys = Hotkeys(self.s, self.rec)
         if youtube_service:
             from .youtube import Uploader
-            from .core import apex_running
+            from .core import game_running
             from .night import Night
-            self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, apex_running)
+            self.rec.youtube = Uploader(self.s, self.rec, self.ui, youtube_service, game_running)
             self.rec.night = self.rec.youtube.night = Night(self.s, self.rec, self.ui)
             self.ui.actions["cancelshutdown"] = ("Cancel", lambda: self.rec.night.cancel("Cancelled: the PC stays on."))
         if yt_signin:
@@ -771,7 +774,7 @@ class AutoRecorder:
                     except Exception as e:
                         log.exception("tick failed")
                         crash.report_exception("unhandled", e)
-                    if not self.rec.apex:
+                    if not self.rec.hold:
                         crash.tick()                 # crash reports not delivered yet, new OBS crash files
                 time.sleep(3)
         self.thread = threading.Thread(target=loop, daemon=True)
