@@ -410,6 +410,7 @@ const TRANSCRIPT_HINT = t('After a session, what you say on your own mic is turn
 function transcriptState() {
   const tr = S && S.transcripts;
   if (!tr || !tr.on) return '';
+  if (tr.where === 'server') return ' ' + t('Made on the team server: nothing runs on this PC.');
   const dl = tr.running && !tr.current && tr.download && tr.download.total ? tr.download : null;   // first time: component + model
   if (dl) return ' ' + t('Downloading for transcripts (first time only): {pct} % of {gb} GB.', {pct: Math.floor(100 * dl.done / dl.total), gb: (dl.total / 1e9).toFixed(1)});
   if (tr.running) return ' ' + (tr.current ? (tr.percent != null ? t('Now: {pct} % of the last session.', {pct: tr.percent}) : t('Now: the last session.')) : t('Getting ready (first time: a 1.6 GB download).'));

@@ -18,9 +18,12 @@ voice-app track (every teammate's voice mixed) nor the game sound, and nobody el
   by SHA-256. The model (1.6 GB) is downloaded the same way from a pinned Hugging Face commit (`MODEL_FILES`, each
   file's SHA-256), into the app's data folder. A developer can point `PCS_TRANSCRIBE_PY` at a Python with
   faster-whisper (runs `pcs_transcribe.py` from source) and `PCS_WHISPER_MODEL` at a model folder.
-- Later (hook, not built): the hub's scan worker (hub PR #53) can run the same `pcs_transcribe.py` on the mic track
-  it already holds (`<recording>.mic.m4a`, `--stream 0`) and import the same `.comms.json`; the app then only needs
-  to skip recordings the hub says it transcribes (`where() == "server"`).
+- On the team server (coach's decision 20 Nov 2026, Whisper on the server's GPU): when the hub's /api/me lists
+  "comms-server" and the player's mic track goes to the hub (comms consent, mic on, "Send my mic track"), nothing runs
+  on this PC (`where() == "server"`): the app tells the hub the player's yes (`PUT /api/me/transcripts`, once per
+  hub and key; the hub transcribes only players whose yes it holds), and downloads the transcripts the hub made of
+  its own recordings into the results folder (`<rec>.comms.json`, for the review player; state "server"). Said no:
+  the copies downloaded from the hub are deleted here (the hub deletes its own when told).
 
 State in `transcripts.json` (no key, no text): per recording status, tries, note, sent.
 """
@@ -48,6 +51,8 @@ SUFFIX = ".comms.json"
 PARTIAL_SUFFIX = ".comms.partial.json"
 MAX_AGE_DAYS = 3
 MAX_TRIES = 3
+FETCH_EVERY_S = 600                   # on the team server: look for its transcripts every 10 min
+FETCH_DAYS = 7                        # ... of recordings from the last 7 days
 BUSY_EVERY_S = 3
 SPARE = 2 << 30                       # leave at least 2 GB free on the drive
 
@@ -307,8 +312,14 @@ class Comms:
     """`settings()` gives the recorder settings; `recordings()` the app's own recordings as {key: Entry}; `busy()` a
     reason not to run now, or None; `send(files)` sends files to the team hub (None: no hub)."""
 
-    def __init__(self, settings, recordings, busy, send=None, now=time.time, version="", hub_ok=None):
+    def __init__(self, settings, recordings, busy, send=None, now=time.time, version="", hub_ok=None,
+                 server_ok=None, hub_call=None):
         self.settings, self.recordings, self.busy, self.send, self.now = settings, recordings, busy, send, now
+        # server_ok(): the hub makes transcripts itself (/api/me lists "comms-server"); hub_call(method, path, **kw)
+        # -> requests.Response with the player's key (pcs_recorder.hub.request). None = never on the server.
+        self.server_ok, self.hub_call = server_ok, hub_call
+        self.told: tuple | None = None                   # (hub address, key fingerprint) that took the player's yes
+        self.next_fetch = 0.0
         # hub_ok(): the team hub keeps transcripts with their rules (its /api/me lists "comms"). An older hub would
         # store the file as a plain scan file any teammate can download, so nothing is sent to it (None = no check).
         self.hub_ok = hub_ok
@@ -341,8 +352,15 @@ class Comms:
             log.warning("transcripts state not saved: %s", e)
 
     def where(self) -> str:
-        """Where transcripts are made: "local" (this PC). Hook for later: "server" when the hub's worker makes them."""
-        return "local"
+        """Where transcripts are made: "server" when the team hub makes them (it lists "comms-server" and the player's
+        mic track goes to it), else "local" (this PC)."""
+        s = self.settings()
+        if self.server_ok is None or self.hub_call is None or not s.hub_url or not (s.send_mic and s.comms_consent):
+            return "local"
+        try:
+            return "server" if self.server_ok() else "local"
+        except Exception:
+            return "local"
 
     # ------------------------------------------------------------ when
     def tick(self) -> bool:
@@ -351,9 +369,20 @@ class Comms:
             s = self.settings()
             if not eligible(s):
                 self.stop("the player said no")
+                self.drop_server_copies()
                 return False
-            if self.busy() or self.running or self.now() < self.next_try or self.where() != "local":
+            if self.busy() or self.running or self.now() < self.next_try:
                 return False
+            if self.where() == "server":
+                if self.now() < self.next_fetch:
+                    return False
+                self.next_fetch = self.now() + FETCH_EVERY_S
+                with self.lock:
+                    if self.running:
+                        return False
+                    self.running = True
+                threading.Thread(target=self._run_server, daemon=True, name="transcripts-server").start()
+                return True
             if not self.todo() and not self.unsent():
                 return False
         except Exception:
@@ -537,6 +566,98 @@ class Comms:
             log.info("transcriber stopped: %s", why)
             stop_tree(p)
 
+    # ------------------------------------------------------------ on the team server
+    def _run_server(self) -> None:
+        """Tell the hub the yes, then fetch the transcripts it made of this PC's recordings."""
+        try:
+            self.note = ""
+            if self.tell_yes():
+                self.fetch_from_hub()
+        except Exception as e:
+            log.info("transcripts from the team server: %s", e)
+        finally:
+            with self.lock:
+                self.running = False
+
+    def tell_yes(self) -> bool:
+        """PUT /api/me/transcripts {"transcripts": true} once per hub address and key. True = the hub holds the yes."""
+        from . import hub
+        s = self.settings()
+        key = hub.get_key()
+        if not key or not eligible(s):
+            return False
+        who = (s.hub_url, hub._fp(key))
+        if self.told == who:
+            return True
+        r = self.hub_call("PUT", "/api/me/transcripts", json={"transcripts": True}, timeout=8)
+        if r.status_code >= 400:
+            log.info("transcripts answer refused by the hub: %s", r.status_code)
+            return False
+        self.told = who
+        return True
+
+    def fetch_from_hub(self) -> int:
+        """The hub's transcripts of this PC's recent recordings that have none here yet -> `<rec>.comms.json`.
+        Returns how many were written."""
+        want = {}
+        now = self.now()
+        for e in (self.recordings() or {}).values():
+            if e.path and e.status == "uploaded" and now - float(e.started or 0) <= FETCH_DAYS * 86400 \
+                    and not comms_path(e.path).is_file():
+                want[Path(e.path).stem] = e.path
+        if not want:
+            return 0
+        me = self.hub_call("GET", "/api/me", timeout=8).json().get("name") or ""
+        rows = self.hub_call("GET", "/api/scans", params={"limit": 300}, timeout=15).json()
+        n = 0
+        for r in rows if isinstance(rows, list) else []:
+            stem = r.get("recording") or ""
+            if r.get("kind") != "comms" or stem not in want or (r.get("uploader") or "").lower() != me.lower():
+                continue
+            if not eligible(self.settings()):
+                break
+            resp = self.hub_call("GET", f"/api/scans/{int(r['id'])}/file", timeout=30)
+            if resp.status_code != 200:
+                continue
+            try:
+                d = json.loads(resp.content.decode("utf-8"))
+                if d.get("kind") != "comms":
+                    continue
+            except (ValueError, UnicodeDecodeError, AttributeError):
+                continue
+            out = comms_path(want.pop(stem))
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_name(out.name + ".tmp")
+            tmp.write_bytes(resp.content)
+            os.replace(tmp, out)
+            self.st["recs"][stem] = {"status": "server", "sent": self.now(), "tries": 0}
+            n += 1
+        if n:
+            self._save()
+            log.info("%d transcript(s) made on the team server downloaded", n)
+        return n
+
+    def drop_server_copies(self) -> int:
+        """Said no: the transcripts downloaded from the team server are deleted here (only those)."""
+        n = 0
+        for e in (self.recordings() or {}).values():
+            if not e.path:
+                continue
+            stem = Path(e.path).stem
+            if (self.st["recs"].get(stem) or {}).get("status") != "server":
+                continue
+            try:
+                comms_path(e.path).unlink(missing_ok=True)
+                n += 1
+            except OSError:
+                continue
+            self.st["recs"].pop(stem, None)
+        if n:
+            self._save()
+            log.info("%d transcript(s) from the team server deleted (the player said no)", n)
+        self.told = None
+        return n
+
     def cleanup(self) -> None:
         """Forget recordings the app no longer has (their transcript went with the results folder)."""
         keep = {Path(e.path).stem for e in (self.recordings() or {}).values() if e.path}
@@ -551,7 +672,7 @@ class Comms:
         prog = None
         if self.progress and self.progress[1]:
             prog = round(100 * self.progress[0] / self.progress[1])
-        return {"on": eligible(s), "running": self.running, "current": self.current, "percent": prog, "done": done,
+        return {"on": eligible(s), "where": self.where() if eligible(s) else "local", "running": self.running, "current": self.current, "percent": prog, "done": done,
                 "note": self.note, "model": model_ready(), "runtime": runtime_cmd() is not None,
                 "available": runtime_cmd() is not None or bool(COMPONENT),
                 "download": ({"done": self.download[0], "total": self.download[1]} if self.download else None)}
