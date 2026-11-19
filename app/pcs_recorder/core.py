@@ -186,11 +186,12 @@ class Recorder:
     # ---------------------------------------------------------- main loop step
     def tick(self) -> None:
         with self.lock:
-            games.configure(self.s)              # the player's Games settings (cheap: a few fields)
+            if getattr(self, "s", None) is not None:
+                games.configure(self.s)          # the player's Games settings (cheap: a few fields)
             apex = self.is_apex_running()
             self.apex = apex                     # read by the window (it polls less often during games)
             game = "" if apex else (self.other_game() or "")
-            if game != self.game:
+            if game != getattr(self, "game", ""):
                 if game:
                     log.info("%s runs: heavy work waits until it closes", game)
                     self._activity(paused_line(game))
