@@ -525,7 +525,7 @@ async function scan(ids) {
 
 /* ------------------------------------------------------------------ review */
 const HEALN = {cell: 'Shield cell', battery: 'Shield battery', syringe: 'Syringe', medkit: 'Med kit', phoenix: 'Phoenix kit'};
-const KIND = {select: ['S', 'Legend select'], drop: ['D', 'Drop map'], start: ['G', 'Game start'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], respawn: ['', 'Respawn'], knock: ['', 'Knocked'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call'], scanfight: ['', 'Fight'], ringout: ['', 'Outside the ring'], heal: ['', 'Heal'], ult: ['', 'Ultimate'], tac: ['', 'Tactical']};
+const KIND = {select: ['S', 'Legend select'], drop: ['D', 'Drop map'], start: ['G', 'Game start'], jump: ['J', 'Jumped'], land: ['L', 'Landed'], ring: ['R', 'Ring'], ringclose: ['R', 'Ring'], feed: ['', 'Kill feed'], respawn: ['', 'Respawn'], knock: ['', 'Knocked'], mark: ['★', 'Your mark'], mute: ['', 'Mute'], fight: ['', 'Fight'], call: ['!', 'Loud call'], scanfight: ['', 'Fight'], ringout: ['', 'Outside the ring'], heal: ['', 'Heal'], ult: ['', 'Ultimate'], tac: ['', 'Tactical'], lowammo: ['', 'Low on ammo'], noheals: ['', 'Out of heals']};
 const TRACKN = {game: 'Game sound', discord: 'Voice app', mic: 'Microphone'};
 const VOICE_NAMES = {discord: 'Discord', teamspeak: 'TeamSpeak'};
 function voiceName(s) {          /* the voice app recorded on track 2, as the player calls it */
@@ -566,6 +566,11 @@ function gameHeadHTML(g, i, total) {
   const lv = livesOf(g);
   if (lv) stats.push(`<span class="gstat" title="Lives in this game: 1 + your respawns${lv.lives > 1 ? ' (' + lv.each.map(fmtT).join(', ') + ' each)' : ''}"><small>Lives</small><b>${lv.lives}</b></span>`,
     `<span class="gstat" title="Time dead: from each death to the respawn, and after the last death until the game ended for you (spectating)"><small>Dead</small><b>${fmtT(lv.dead)}</b></span>`);
+  const am = g.ammoSummary;
+  if (am && am.reads > 0) {
+    if (am.fightsChecked) stats.push(`<span class="gstat" title="Fights that started with less than one magazine left in reserve (weapon in hand), of the fights whose ammo was read"><small>Low-ammo fights</small><b>${am.lowAmmoFights} of ${am.fightsChecked}</b></span>`);
+    stats.push(`<span class="gstat" title="Times your heal slot was empty after you had heals${am.outOfHeals ? ', and for how long in all' : ''}"><small>Out of heals</small><b>${am.outOfHeals ? am.outOfHeals + '× · ' + fmtT(am.outOfHealsSeconds || 0) : 'never'}</b></span>`);
+  }
   if (sl.length) stats.push(`<span class="gstat" title="The last count read in this game. Not always your placement: it keeps going down while you spectate."><small>Squads left (last read)</small><b>${sl[sl.length - 1][1]}</b></span>`);
   if (stats.length) parts.push(`<span class="gstats">${stats.join('')}</span>`);
   return parts.join('');
@@ -646,6 +651,7 @@ function buildEvents(d) {
       if (a.kind === 'ult') ev.push({t: a.t, k: 'ult', g: gi, title: 'Ultimate used', sub: who});
       else if (a.kind === 'tactical') ev.push({t: a.t, k: 'tac', g: gi, title: 'Tactical used', sub: who, laneOnly: true});
     });
+    (g.ammoEvents || []).forEach(e => { const x = ammoEvent(e, gi); if (x) ev.push(x); });
   });
   (d.marks || []).forEach(m => {
     if (m.kind === 'mark') ev.push({t: m.t, k: 'mark', title: 'Marked moment', sub: 'hotkey pressed in game'});
@@ -694,6 +700,16 @@ function bannerText(r) {
   if (typeof r.beaconAt === 'number') parts.push('beacon' + at(r.beaconAt));
   else if (r.modeRespawn) parts.push('mode respawn');
   return parts.join(' · ');
+}
+/* ammo and heals read from the HUD (scanner pcs_ammo): a fight that started with less than one magazine left in
+   reserve, and the heal slot running empty after the player had heals */
+function ammoEvent(e, gi) {
+  if (!e || typeof e.t !== 'number') return null;
+  if (e.kind === 'lowAmmoFight') return {t: e.t, k: 'lowammo', g: gi, title: 'Fight started low on ammo',
+    sub: [e.mag != null ? `${e.mag} in the magazine` : '', e.reserve != null ? `${e.reserve} in reserve` : ''].filter(Boolean).join(' · ')};
+  if (e.kind === 'outOfHeals') return {t: e.t, k: 'noheals', g: gi, title: 'Out of heals',
+    sub: typeof e.end === 'number' && e.end > e.t ? 'for ' + fmtT(e.end - e.t) : 'none picked up after'};
+  return null;
 }
 /* one fight of the scan (pcs_fights): won / lost / even by knocks and kills on each side, third party */
 const FIGHT_WORD = {won: 'Fight won', lost: 'Fight lost', even: 'Fight even'};
@@ -835,7 +851,7 @@ function seek(t) {
   const v = $('#vid'); if (!v || RV.ed) return;          // drawing a note: stay on its frame
   v.currentTime = Math.max(0, t - (seek.lead || 0)); onTime();
 }
-const USEK = ['heal', 'ult', 'tac'];
+const USEK = ['heal', 'ult', 'tac'], AMMOK = ['lowammo', 'noheals'];
 function drawTimeline() {
   if (!RV || !$('#laneG')) return;
   const D = dur(), pct = t => (t / D * 100).toFixed(3) + '%';
@@ -845,7 +861,7 @@ function drawTimeline() {
     // small ticks under the games where the "squads left" count went down (tooltip: the count)
     (RV.d.games || []).map(g => (g.squadsLeft || []).map(([t, n]) =>
       `<i class="sqt" data-t="${t}" style="left:${pct(t)}" title="${fmtT(t)} · ${n} squad${n === 1 ? '' : 's'} left"></i>`).join('')).join('');
-  $('#laneE').innerHTML = `<span class="lane-label">Start · jump · landing · rings${RV.ev.some(e => USEK.includes(e.k)) ? ' · heals · abilities' : ''}</span>` + RV.ev.filter(e => e.k === 'ringout').map(e =>
+  $('#laneE').innerHTML = `<span class="lane-label">Start · jump · landing · rings${RV.ev.some(e => USEK.includes(e.k)) ? ' · heals · abilities' : ''}${RV.ev.some(e => AMMOK.includes(e.k)) ? ' · ammo' : ''}</span>` + RV.ev.filter(e => e.k === 'ringout').map(e =>
     `<div class="ringout" data-t="${e.t}" style="left:${pct(e.t)};width:${pct(Math.max(1, e.t1 - e.t))}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('') +
     RV.ev.filter(e => !['feed', 'respawn', 'knock', 'mark', 'mute', 'fight', 'call', 'scanfight', 'ringout'].includes(e.k)).map(e =>
     `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
@@ -907,7 +923,7 @@ function drawSide() {
     RV.ev.forEach((e, i) => {
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">Game ${g + 1} · ${esc(mapName(sp.map))}</div>`; }
       if (e.laneOnly) return;
-      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff', scanfight: e.result === 'won' ? '#5fd08f' : '#e6ad45', ringout: '#e0623a', heal: '#5fd0c8', ult: '#4aa3ff', tac: '#9db8d9'}[e.k];
+      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff', scanfight: e.result === 'won' ? '#5fd08f' : '#e6ad45', ringout: '#e0623a', heal: '#5fd0c8', ult: '#4aa3ff', tac: '#9db8d9', lowammo: '#e6ad45', noheals: '#e0623a'}[e.k];
       html += `<div class="ev${e.k === 'respawn' ? ' respawn' : ''}" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">No events found.</div>';

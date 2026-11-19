@@ -599,6 +599,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   (17 Nov, 360 keyframes): 352 the same, the rest read vs not read on one keyframe, never two items. The review player draws
   heals (small teal dots), ult uses (blue diamonds) and tacticals (small grey dots) on the events lane; heals and ults
   also in Events ("Shield battery", "Ultimate used · Seer").
+- **Ammo and heals carried** (`pcs_ammo.py`, 16:9 only, ~1 ms per own-HUD keyframe). Weapon panel bottom right: the
+  magazine is two big digits (x 2306..2376, rows 1285..1326), the reserve three smaller ones under it (x 2305..2374,
+  rows 1337..1362). Both are padded with dim leading zeros ('04', '076'), so every digit has a fixed cell; a leading cell
+  too faint for a digit is read again at lower contrast and may only be '0'. Empty magazine = '00' with a red box. L-STAR
+  (∞ for the magazine) and modes with no reserve limit (∞ under the magazine: 7 Nov) read as nothing. The weapon in hand
+  (slot 1 / 2) = the white name under the panel. Heal slot left of the tactical: the selected item's count (white,
+  right-aligned at x 717, rows 1347..1364; columns searched below row 1352 left of x 702, where the icon reaches) and the
+  item by colour (blue = shield cell / battery, not told apart; white = syringe; red = med kit; orange = phoenix, unseen).
+  Only the selected kind is shown, so this is "heals of that kind", not all heals. Empty slot = its key hint box (x
+  673..701, rows 1380..1406) with no icon and no count, trusted only with the magazine read on the same frame (the death
+  box screen hides the slot). Digits: 12 x 18 grey cells against `pcs_banner.json` `ammo` (fonts M, R, H, 'X' = not a
+  digit; built from our dev frames; the heal font's 9 is its 6 turned half round: no 9 seen in dev). Per game:
+  `ammoTimeline` {cols [t, slot, mag, reserve], rows: a row per change}, `healTimeline` {cols [t, item, count]},
+  `ammoEvents` [{t, kind: lowAmmoFight, mag, reserve, magFull, fightEnd} | {t, kind: outOfHeals, end}], `ammoSummary`
+  {reads, healReads, fightsChecked, lowAmmoFights, outOfHeals, outOfHealsSeconds}, and each fight gets `ammoAtStart`.
+  Low-ammo fight = the last read within 20 s before the fight's start shows less than one full magazine in reserve
+  (magFull = the largest magazine read in that slot over the 3 min before) or nothing left. Out of heals = the empty slot
+  read twice in a row after the player had heals in that game. Spectating frames are left out. Review: amber / red marks
+  on the events lane, Events "Fight started low on ammo" / "Out of heals", game bar "Low-ammo fights a of b", "Out of
+  heals". Check: hand-read samples (`pcs-handoff\checkset\ammo\`; see HANDOFF 19 Nov).
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:

@@ -201,6 +201,8 @@ select.label:disabled{opacity:.5;cursor:default}
 .ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
 .mk.heal,.mk.ult,.mk.tac{width:8px;height:8px;border-width:1px;top:78%;font-size:0}   /* heals and abilities: small, low in the lane */
 .mk.heal{background:#5fd0c8}.mk.ult{background:#4aa3ff;width:10px;height:10px;border-radius:2px;transform:translate(-50%,-50%) rotate(45deg)}.mk.tac{background:#9db8d9;top:22%}
+.mk.lowammo,.mk.noheals{width:8px;height:8px;border-width:1px;top:50%;font-size:0;border-radius:1px}   /* ammo / heals (pcs_ammo) */
+.mk.lowammo{background:#e6ad45}.mk.noheals{background:#e0623a}
 .mk.ult:hover,.mk.ult:focus-visible{transform:translate(-50%,-50%) rotate(45deg) scale(1.25)}
 .mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */

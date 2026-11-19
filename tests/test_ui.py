@@ -155,6 +155,11 @@ def test_recording_date_and_game_data_for_review():
             "ownKnocks": [{"t": 900.0, "end": 912.0, "reads": 9, "outcome": "revived"}],
             "heals": [{"t": 610.5, "item": "battery", "done": True, "reads": 5}],
             "abilities": [{"t": 620.0, "kind": "ult", "legend": "crypto"}, {"t": 630.0, "kind": "tactical", "legend": "crypto"}],
+            "ammoEvents": [{"t": 700.0, "kind": "lowAmmoFight", "mag": 12, "reserve": 8, "magFull": 28, "fightEnd": 720.0},
+                           {"t": 800.0, "kind": "outOfHeals", "end": 850.0}],
+            "ammoSummary": {"reads": 300, "healReads": 290, "fightsChecked": 2, "lowAmmoFights": 1, "outOfHeals": 1,
+                            "outOfHealsSeconds": 50.0},
+            "ammoTimeline": {"cols": ["t", "slot", "mag", "reserve"], "rows": [[600.0, 1, 28, 200]]},
             "samples": [[550.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False]]}
     old = {"map": "WE", "tStart": 10.0, "drop": {"spots": [], "err": 0}}              # a scan from before 1.10.8
     for v, games, rs in ((named, [game, old], "2026-11-07T21:42:00"), (by_scan, [old], "2026-11-03T22:17:00"), (bare, [old], None)):
@@ -191,6 +196,10 @@ def test_recording_date_and_game_data_for_review():
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
         assert g["heals"][0]["item"] == "battery" and g["abilities"][0]["kind"] == "ult" and o["heals"] is None
         assert "battery: 'Shield battery'" in js and "'Ultimate used'" in js and "laneOnly: true" in js and "if (e.laneOnly) return;" in js
+        # ammo (pcs_ammo): events and the summary reach the page (Events, events lane, game bar); the timelines stay in the scan
+        assert g["ammoEvents"][0]["kind"] == "lowAmmoFight" and g["ammoSummary"]["outOfHeals"] == 1 and "ammoTimeline" not in g
+        assert o["ammoEvents"] is None
+        assert "'Fight started low on ammo'" in js and "'Out of heals'" in js and "Low-ammo fights" in js
         assert o["select"] is None and o["own"] is None and o["squadsLeft"] is None   # old scans: fields just missing
         assert o["drop"]["spots"] == []
         # a missing file: the player can say so (404), not "format not supported"
