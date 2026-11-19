@@ -419,14 +419,16 @@ def spawn_detached(cmd):
 def relaunch_args(cur, ok, show):
     """How the finisher starts the app again. Updated: in the tray (--background) with --updated (the new version
     says so in a corner message and never closes itself), or with its window when the player pressed Update in the
-    open window. Copy failed: the old version, with its window, as before (it doesn't know --updated)."""
+    open window. Copy failed: the old version, with its window (it wasn't updated: no "updated" message)."""
     if not ok or show: return [cur]
     return [cur, '--background', '--updated']
 
 def finish_update(cur, old_pid, show=False):
     """Runs in the new exe: wait for the old app to close, copy over it, start it. Never leaves the player
-    without an app: if the copy fails, the old version is started again. Started by an older version, there is
-    no --show: the new version starts in the tray (the corner message tells the player)."""
+    without an app: if the copy fails, the old version is started again. Without --show (Update pressed in the corner
+    message or the tray) the new version starts in the tray (the corner message tells the player). Installed versions
+    (1.10.12+) start every new release with this command line: keep `--finish-update <old exe> <old pid> [--show]`
+    and one .exe file (PCS-Scanner.exe) per release, which they take as the update."""
     import shutil
     ulog(f'finisher started (waiting for {old_pid})')
     try:

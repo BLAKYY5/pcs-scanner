@@ -92,8 +92,10 @@ hub only. See [PRIVACY.md](PRIVACY.md).
   to (127.0.0.1, random port and token); `web/` is the interface. API tests: `python tests/test_ui.py`.
 - `app/pcs_recorder/` — Auto-record: Apex detection, private OBS driven over obs-websocket, scan prompt,
   folder limits, uploads to the team hub (or to Drive when no hub is set). Logic tests: `python tests/test_recorder.py`.
-- `.github/workflows/build.yml` — builds `PCS-Scanner.exe` on every push; a `v*` tag publishes a release.
+- `.github/workflows/build.yml` — builds `PCS-Scanner.exe` on every push; a push to `main` with a new version (or a
+  `v*` tag) publishes a release.
 
 ## Build settings (repository Settings → Secrets and variables → Actions)
 - Secret `GOOGLE_OAUTH_CLIENT`: the Desktop OAuth client JSON from Google Cloud.
-- Variable `COACH_EMAIL`: the Google account the players' "PCS Scans" folders are shared with.
+- No coach address is built into the app. The Coach role comes from the coach's hub key; players without a hub type
+  the coach's Google address in Settings, and their "PCS Scans" folder on Drive is shared with it.

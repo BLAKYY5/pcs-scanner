@@ -710,7 +710,7 @@ def test_update_finisher():
         core.finish_update(str(cur), "999999")             # that process doesn't exist: no waiting
     finally:
         sys.executable, core.spawn_detached = real_exe, real_spawn
-    # started by an older version (no --show) or from the corner message: back in the tray, saying it updated
+    # Update pressed in the corner message or the tray (no --show): back in the tray, saying it updated
     assert cur.read_bytes() == b"MZ new version" and started == [[str(cur), "--background", "--updated"]]
     assert "copied, starting the new version (tray)" in Path(core.UPDATE_LOG).read_text()
     # the player pressed Update in the open window: the window comes back
@@ -721,7 +721,7 @@ def test_update_finisher():
     finally:
         sys.executable, core.spawn_detached = real_exe, real_spawn
     assert started == [[str(cur)]]
-    # copy failed: the old version is started as before, with its window (it doesn't know --updated)
+    # copy failed: the old version is started again, with its window (it wasn't updated)
     assert core.relaunch_args(str(cur), False, False) == [str(cur)]
 
 
@@ -772,6 +772,9 @@ def test_update_relaunch_arguments():
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
     assert "if background and not updated and not" in src and "'--updated' in sys.argv" in src
     assert "show='--show' in sys.argv" in src
+    # installed versions (1.10.12+) update to a new release with this same protocol: one .exe per release
+    wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "files: dist/PCS-Scanner.exe" in wf and "i = sys.argv.index('--finish-update')" in src
 
 
 def test_update_download_checked():
