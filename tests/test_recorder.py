@@ -5342,6 +5342,10 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    # the clip's thread removes the .part just after it says "Stopped" (clips.Clipper._run's finally): wait for it
+    end = time.time() + 10
+    while list((folder / "Clips").glob("*.part")) and time.time() < end:
+        time.sleep(0.05)
     assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
     # Apex running: refused at once
     try:
