@@ -502,6 +502,25 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   checked with `icons_valid`, a refused asset is not downloaded again; the Team link is then optional), else through
   Settings → Team link (a Google Drive "Anyone with the link" file). Re-checked every 6 hours, saved in the data folder. `drive.file` sign-in can't read a file someone else
   shared, which is why it is a pasted link. No file = no weapon names, scan otherwise unchanged.
+- **Kill-feed lines in Ranked** (20 Nov 2026): the feed's text ends ~85 px in from the box in Ranked (the rank emblem
+  sits further in), ~55 px in pubs; `Feed.read` takes a line whose text ends within `RIGHT` (100) px of the box. Before,
+  only lines ending within 60 px were taken, so a Ranked line was captured only when something bright happened to sit
+  behind its right end: most Ranked kill lines were never read (7 Nov / 17 Nov: our knocks, `[Bleed Out]` kills, badge
+  lines). Our kills that give RP read `[badge] killer [weapon | Bleed Out | ability] [badge] victim +N RP`
+  (`rp_parts`: the number by `pcs_ranked.feed_rp`, the victim's badge by `victim_badge`): the victim's badge is left out
+  of the victim's name (it is blue / teal like a squad name: both sides read 'squad' and the kill was dropped), a gold
+  skull before it = headshot, the green '+N RP' (also a fading one, `green_end`) is cut off so the name's shape matches
+  the same line before its RP showed; a weapon line with '+N RP' is a kill by us (knocks give no RP: a red arrow there
+  is a red screen) and `rp` is kept on the line; a line with no weapon icon (`[Bleed Out]`, `[Finisher]`, an ability)
+  with '+N RP' and the victim's badge is our kill (`rp_kill`, killer colour when read). Captures of one line
+  (`pcs_fights.squad_lines`): each counted line is followed through its captures; a capture is that line again when it
+  fits its LAST capture (same place +-15 px or lower: lines never move up) or has the same enemy name. Same place within
+  10 s: names roughly alike (60 of 144 points) or a thin (half hidden) shape; moved down: the same, the colour may be
+  read 35 degrees off over a red screen; a line on one of us (enemy name left of the weapon, read over scenery): same
+  event and weapon within 10 s (kill: 25 s) at the same place or lower is that line whatever the name; '+N RP' kill
+  lines with the same number are compared without weapon (misread over red) and colour. Lines while the player is dead
+  and spectating (`dead_spans`: 2 s after each `ownDeaths` to his respawn, and 5 s after `tEndGame`) are not ours: the
+  game spectates the killers and colours their names. Measured: see "Fights" and the PR.
 - **Legend select screen**: `pcs_hud.Legends` recognises the squad roster at the top left before a game (ranked:
   rank badges left of the slots; other modes: no badges, roster 114 px further left). A screen seen for 8 s to
   2 min starts a game (`games[].select`: `tFirst`, `tLast`, `ranked`, `squad[]` with `slot`, `legend`, `self`,
@@ -679,13 +698,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   feedLines [t]}] and
   `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
   damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
-  lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
-  has is not ours), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
+  lines (each line once, see "Kill-feed lines in Ranked"; a "squad" name in a colour none of our squad has is not ours,
+  except a '+N RP' kill line whose killer name gave no colour), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
   health lost; joined when < 25 s apart. Result: kills decide (the player's own death in the fight counts as a kill on
   us), then any knock lead, then damage dealt (`damageDealt`: the own damage number's rise from before the fight to 3 s
   after it, values read twice; None when not read) against `damageTaken` when they are `DAMAGE_LEAD` (100) or more
   apart; a squad wiped in it = lost; else even (coach's decision 32, 20 Nov 2026). `decidedBy` = wiped | kills | knocks
-  | damage | "" (even). Third party: more than 3 enemy names, a name first seen
+  | damage | "" (even). The game ending for us within 3 s of a fight's last evidence (`tEndGame`, not the last squad,
+  no respawn after) = the squad went out in it: wiped, and a kill on us when no death was read. Third party: more than
+  3 enemy names (two name shapes within 60 of 144 points are one name: read over scenery they vary), a name first seen
   >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
   median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
   29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
@@ -694,8 +715,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   own card alive only) only widens it: Storm Point's red grass and E-District's red-lit streets tint the strips like the
   ring does. Damage = ticks lasted x tick size. Truths `pcs-handoff\checkset\checkset-fights.json` (dev 7 Nov, held
   17 Nov, labelled on the feed line images + own card, frames for the ring): held fights found 18 / 19, result 18 / 18,
-  third party 12 / 15 (3 false); ring stretches 2 / 2, one false 8 s stretch of 1-point ticks. Weak spot: our own kill
-  lines on a red plate (+RP) are read with both sides 'squad' (pcs_hud.kill_parts): such a fight is missed.
+  third party 12 / 15 (3 false); ring stretches 2 / 2, one false 8 s stretch of 1-point ticks. 20 Nov 2026 (Ranked kill
+  lines read, labels re-checked by eye: 5 corrected where badge / '+RP' / [Bleed Out] lines had been missed): dev result
+  15 -> 18 / 18, third party 18 / 18 both; held found 18 -> 19 / 19, result 14 -> 18, third party 13 / 15 -> 15 / 16
+  (numbers in the PR, also against the old labels). Left: fights joined across two exchanges < 25 s apart (17 Nov 3343
+  reads even: Carbonzai's knock and kill 8 s after our win).
   The review player draws fights as bands on the kill feed lane (green won, grey lost, amber even, dashed = third party)
   and time outside the ring as an orange bar on the rings lane, both in Events.
 - **Highlights** (`pcs_highlights.py`, key plays for the team's media person, 19 Nov 2026): per game `takedowns`

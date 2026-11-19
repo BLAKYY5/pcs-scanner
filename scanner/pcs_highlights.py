@@ -97,17 +97,25 @@ def _bits(a, b):
     return bin(int(a, 16) ^ int(b, 16)).count('1') if a and b else 72
 
 
-def own_lines(lines, t0, t1, squad):
+def own_lines(lines, t0, t1, squad, last=None, dead=None):
     """Kill-feed knocks / kills by our squad inside [t0, t1), each line once (pcs_fights.squad_lines rules) ->
-    [(t, kind, line, who)]: who = 'self' (the player's own colour), 'mate' or None (colour not known)."""
+    [(t, kind, line, who)]: who = 'self' (the player's own colour), 'mate' or None (colour not known).
+    last: a dict that gets each line's last capture by id (pcs_fights.squad_lines)."""
     import pcs_fights            # the same once-per-line rule as the fights (needs numpy: scanner side only)
     out = []
-    for l in pcs_fights.squad_lines(lines, t0, t1, squad or None):
+    for l in pcs_fights.squad_lines(lines, t0, t1, squad or None, last, dead):
         if (l.get('killer') or {}).get('side') != 'squad': continue
         q = _who(l.get('killer'), squad)
         who = None if not squad else ('self' if q and q[2] else 'mate')
         out.append((l['t'], l['event'], l, who))
     return out
+
+
+def _above(l, prev_last):
+    """l was first seen above where an earlier line of ours had already moved to: a new line (lines never move up;
+    17 Nov 2045 / 2048: two knocks by the player with one weapon, the first already pushed down when the second came)."""
+    import pcs_fights
+    return bool(prev_last) and l['t'] > prev_last['t'] and (l.get('y') or 0) < (prev_last.get('y') or 0) - pcs_fights.Y_SAME
 
 
 def counter_reads(reads, key, t0, t1):
@@ -183,7 +191,9 @@ def _damage_rose(dmg, t):
 def takedowns(g, lines, own_reads, t0, t1):
     """The player's confirmed knocks and kills in one game: [{t, kind, sources, enemy?}] in time order."""
     squad = _squad(g)
-    feed = [x for x in own_lines(lines, t0, t1, squad) if x[3] != 'mate']
+    last = {}
+    import pcs_fights
+    feed = [x for x in own_lines(lines, t0, t1, squad, last, pcs_fights.dead_spans(g)) if x[3] != 'mate']
     fights = g.get('fights') or []
     # only the kills number: the strip's third number is not the player's own knocks in Ranked (it rose when teammates
     # knocked enemies the player had hit, 18 Nov by eye), and pubs / Wildcard have no third number at all
@@ -201,7 +211,8 @@ def takedowns(g, lines, own_reads, t0, t1):
     for i, (t, kind, l, who) in enumerate(feed):
         src = {'feed' if who == 'self' else 'squad'}
         at = t
-        if i not in hits and any(t - pt <= DUP_S and pk == kind and pl.get('weapon') == l.get('weapon') for pt, pk, pl in kept):
+        if i not in hits and any(t - pt <= DUP_S and pk == kind and pl.get('weapon') == l.get('weapon')
+                                 and not _above(l, last.get(id(pl))) for pt, pk, pl in kept):
             continue                        # the same line captured again (its name shape read over a moving background)
         kept.append((t, kind, l))
         if i in hits:

@@ -506,14 +506,33 @@ def _name(seg, white, col, run):
     if w > 0.6 * (w + c): return {'side': 'other'}
     return None
 
-def kill_parts(rgb, wp):
-    """rgb: a feed line at full size; wp: the weapon found in it (Weapons.match).
-    -> {'marker': 'arrow' | 'skull' | 'other' | None, 'killer': ..., 'victim': ...} (names as in _name)."""
+def kill_parts(rgb, wp, rank=None):
+    """rgb: a feed line at full size; wp: the weapon found in it (Weapons.match); rank: what rp_parts found in a
+    Ranked kill line ending in '+N RP' ({'rpX', 'badgeX'}), or None.
+    -> {'marker': 'arrow' | 'skull' | 'other' | None, 'killer': ..., 'victim': ...} (names as in _name).
+    A Ranked line that gives us RP reads '[badge] killer [weapon] [badge] victim +N RP': the victim's badge sits where
+    the arrow / skull would be, and the green '+N RP' follows the name. Both are left out of the victim's name (its
+    shape must match the same line captured before the RP showed), and the badge never counts as a coloured name
+    (it is blue / teal, like a squad name: both sides read 'squad' and the kill was dropped)."""
     a = np.asarray(rgb, np.int16); y0 = max(0, wp['y'] - 6); y1 = min(a.shape[0], wp['y'] + wp['h'] + 6)
     out = {'marker': None, 'killer': None, 'victim': None}
-    seg = a[y0:y1, wp['x'] + wp['w'] - 2:]; white, red, col, gold = _feed_masks(seg); anyt = white | red | col
+    xs = wp['x'] + wp['w'] - 2; xe = a.shape[1]
+    if rank and rank.get('rpX') is not None and rank['rpX'] > xs: xe = max(xs + 1, rank['rpX'] - 3)
+    seg = a[y0:y1, xs:xe]; white, red, col, gold = _feed_masks(seg); anyt = white | red | col
     R = _gap_runs(anyt.sum(0) >= 2, 9); k = 0
-    if R and R[0][0] <= 45:
+    bx = None if not rank or rank.get('badgeX') is None else rank['badgeX'] - xs
+    if bx is not None and -4 <= bx <= 60:
+        # the victim's badge: every run it touches goes (a badge and the name can touch at the 9 px gap)
+        keep = []
+        for s, e in R:
+            if e <= bx - 2:                            # between the weapon and the badge: a gold skull (headshot) or nothing
+                n = max(1, int(anyt[:, s:e].sum()))
+                if e - s >= 18 and gold[:, s:e].sum() >= 0.45 * n: out['skull'] = True
+            elif s >= bx + 30: keep.append((s, e))
+            elif e > bx + 30 + 2:                      # the name glued to the badge: keep the name's part, from its ink
+                keep += [(bx + 30 + s2, bx + 30 + e2) for s2, e2 in _gap_runs(anyt[:, bx + 30:e].sum(0) >= 2, 9)]
+        R = keep; out['marker'] = 'rank'
+    elif R and R[0][0] <= 45:
         s, e = R[0]; n = max(1, int(anyt[:, s:e].sum())); w = e - s
         ys = np.nonzero(anyt[:, s:e].sum(1) >= 2)[0]; h = int(ys[-1] - ys[0] + 1) if len(ys) else 0
         if w <= 22 and red[:, s:e].sum() >= 0.5 * n: out['marker'] = 'arrow'; k = 1
@@ -531,6 +550,58 @@ def kill_parts(rgb, wp):
     R = _gap_runs((white | col).sum(0) >= 2, 9)
     if R and seg.shape[1] - R[-1][1] <= 45:
         out['killer'] = _name(seg, white, col, R[-1]); out['killerSig'] = _sig(white | col, R, -1)
+    return out
+
+def rp_parts(rgb):
+    """rgb: a feed line at full size. A Ranked kill line that gives us RP ends in a green '+N RP' and shows the
+    victim's rank badge before the victim's name (pcs_ranked reads both). -> None, or {'rp': N, 'rpX': where the
+    green text starts, 'badgeX': the victim's badge or None, 'badgeY'}."""
+    import pcs_ranked as PR
+    a = np.asarray(rgb)
+    rp = PR.feed_rp(a)
+    if rp is None: return None
+    g = PR._green(a); cols = np.nonzero(g.sum(0) >= 2)[0]
+    if not len(cols): return None
+    x = int(cols[-1])
+    for c in cols[::-1]:                     # the green cluster at the right end ('+', digits, 'RP')
+        if x - c > 24: break              # green only: the white name before it never joins
+        x = int(c)
+    vb = PR.victim_badge(a)
+    out = {'rp': rp, 'rpX': x, 'badgeX': None, 'badgeY': None}
+    if vb and vb[0] < x - 20: out['badgeX'], out['badgeY'] = int(vb[0]), int(vb[1])
+    return out
+
+def green_end(rgb):
+    """Where a green text block at the right end of a feed line starts ('+N RP' whose number was not read: fading, or
+    'All Previous Kill Points Increased' growing it), or None. Only to keep it out of the victim's name shape."""
+    a = np.asarray(rgb, np.int16); r, gg, b = a[..., 0], a[..., 1], a[..., 2]
+    # the RP green (~70, 245, 80), not a lime squad name (~150, 215, 60): red stays low
+    g = (gg > 150) & (r < 130) & (b < 130) & (gg - r > 80)
+    cols = np.nonzero(g.sum(0) >= 2)[0]
+    if len(cols) < 12 or int(g.sum()) < 60: return None
+    x = int(cols[-1])
+    for c in cols[::-1]:
+        if x - c > 24: break
+        x = int(c)
+    return x if cols[-1] - x <= 120 else None
+
+def rp_kill(rgb, rank):
+    """A Ranked kill line with no weapon icon ('[Bleed Out]', '[Finisher]', an ability) that gives us RP: only our
+    squad's kills give RP, so it is our kill. Needs the green '+N RP' read and the victim's badge found.
+    -> {'killer': {'side': 'squad', 'hue'?, 'color'?}, 'victim': {'side': 'other'}, 'victimSig', 'killerSig'?} or None."""
+    import pcs_ranked as PR
+    if not rank or rank.get('badgeX') is None: return None
+    a = np.asarray(rgb, np.int16); bx, rx = rank['badgeX'], rank['rpX']
+    by = rank.get('badgeY') or 0; y0 = max(0, by - 2); y1 = min(a.shape[0], by + 30)
+    seg = a[y0:y1, bx + 30:max(bx + 31, rx - 3)]; white, red, col, gold = _feed_masks(seg)
+    R = _gap_runs((white | col).sum(0) >= 2, 9)
+    if not R: return None
+    out = {'killer': {'side': 'squad'}, 'victim': _name(seg, white, col, R[0]) or {'side': 'other'},
+           'victimSig': _sig(white | col, R, +1)}
+    if out['victim'].get('side') != 'other': return None          # a victim in colour: not an enemy kill line
+    h = PR.killer_hue(np.asarray(rgb), bx)
+    c = None if h is None else next((n for n, lo, hi in SQUAD_HUES if lo <= h < hi), None)
+    if c: out['killer'] = {'side': 'squad', 'hue': round(h), 'color': c}
     return out
 
 def _sig(mask, R, direction):
@@ -597,6 +668,7 @@ class Feed:
     'victim' = {'side': 'squad' or 'other'} with the squad colour ('hue', 'color') for our own squad's names."""
     X0, X1, Y0, Y1 = 1820, 2470, 260, 640
     REVEAL_LOOKS = 4          # later captures of a line without a weapon checked again for the ring console words
+    RIGHT = 100               # a line's text must end within this many px of X1 (Ranked ends ~85 px in, pubs ~55)
     def __init__(self, weapons=None): self.recent = []; self.lines = []; self.weapons = weapons if weapons is not None else Weapons()
     @staticmethod
     def _text(p):
@@ -624,7 +696,10 @@ class Feed:
         self.recent = [r for r in self.recent if t - r[0] < 25]
         for y0, y1 in bands:
             mm = m[y0:y1]; cols = np.nonzero(mm.sum(0))[0]
-            if len(cols) < 20 or cols[-1] < mm.shape[1] - 60 or not self._texty(mm): continue   # right-aligned text only
+            # right-aligned text only. The feed's right edge is not where it was: pubs end their lines at x ~2415, Ranked
+            # at ~2385 (the rank emblem sits further in), so a Ranked line passed only when something bright behind it
+            # happened to reach the last 60 px (most Ranked kill lines were never captured; 20 Nov 2026).
+            if len(cols) < 20 or cols[-1] < mm.shape[1] - self.RIGHT or not self._texty(mm): continue
             x0 = max(0, cols[0] - 6); w = mm.shape[1] - x0
             sig = np.array(Image.fromarray((mm[:, x0:] * 255).astype(np.uint8)).resize((64, 6), Image.BILINEAR)) > 50
             dup = None
@@ -653,17 +728,39 @@ class Feed:
             try:
                 full = reg[max(0, y0 - 12):y1 + 12, x0:]
                 wp = self.weapons.match(full)
+                rank = None; cut = None
+                try: rank = rp_parts(full) if self.weapons.T else None        # same as weapons: no icons file, no kill reads
+                except Exception: rank = None
+                if rank: line['rp'] = rank['rp']
+                elif self.weapons.T:
+                    try:
+                        gx = green_end(full)
+                        if gx is not None: cut = {'rpX': gx, 'badgeX': None}
+                    except Exception: pass
+                if not wp and rank:
+                    rk = rp_kill(full, rank)
+                    if rk:
+                        line.update(event='kill', arrow=False, marker='rank', **rk)
                 if wp:
                     arrow = red_arrow(full, wp['x'] + wp['w'], wp['x'] + wp['w'] + 80)
                     line.update(weapon=wp['weapon'], weaponName=WEAPON_NAMES.get(wp['weapon'], wp['weapon'].replace('_', ' ').title()),
                                 weaponScore=round(wp['score'], 2), arrow=arrow, event='knock' if arrow else 'kill')
                     try:
-                        kp = kill_parts(full, wp)
+                        kp = kill_parts(full, wp, rank or cut)
                         if kp['marker'] == 'arrow' and not arrow: line.update(arrow=True, event='knock')   # arrow fading out
                         if kp['marker'] == 'skull' and not line['arrow']: line['headshot'] = True
                         if kp['marker']: line['marker'] = kp['marker']
                         for key in ('killer', 'victim', 'killerSig', 'victimSig'):
                             if kp.get(key): line[key] = kp[key]
+                        if rank:
+                            # knocks give no RP: a red arrow read on a '+N RP' line is the red screen behind it
+                            line.update(event='kill', arrow=False)
+                            if line.get('marker') in (None, 'arrow'): line['marker'] = 'rank'
+                            if kp.get('skull'): line['headshot'] = True
+                            # '+N RP': only our squad's kills give RP, so the killer is ours
+                            # (his name may be cut off or unreadable) and the victim is an enemy
+                            if (line.get('killer') or {}).get('side') != 'squad': line['killer'] = {'side': 'squad'}
+                            if (line.get('victim') or {}).get('side') != 'other': line['victim'] = {'side': 'other'}
                     except Exception: pass
             except Exception: pass
             if 'weapon' not in line:

@@ -5314,6 +5314,112 @@ def test_apex_crash_events_read():
     assert stitch.ended_in_game(str(TMP / "nothing.mp4"), None) is None
 
 
+def test_feed_ranked_kill_lines():
+    """Ranked kill lines (20 Nov 2026): the feed's right edge sits ~85 px in from the box (pubs ~55), so a line ending
+    there is captured; a line '[badge] killer [weapon] [badge] victim +N RP' reads killer = ours, victim = enemy (the
+    victim's badge is no squad-coloured name) with the victim's name shaped as on the same line before the RP showed;
+    a line with no weapon icon ('[Bleed Out]', an ability) that ends in '+N RP' with the victim's badge is our kill.
+    pcs_fights: one enemy line on one of us captured again lower in the feed counts once whatever its enemy name's
+    shape (read over the scenery), two of our knocks on different enemies still count twice."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    import pcs_ranked as R
+    import pcs_fights as F
+    from PIL import Image
+    rng = np.random.default_rng(5)
+    s = (rng.random((10, 18)) > 0.45).repeat(2, 0).repeat(3, 1)[:20, :54]
+    gun = np.pad((s * 255).astype(np.uint8), ((2, 2), (3, 3)))
+    f = TMP / "weapons_ranked.npz"
+    np.savez_compressed(f, alpha_gun=gun)
+    GREEN, ORANGE, WHITE = (70, 245, 80), (255, 165, 40), (235, 235, 235)
+
+    def digit(ch, w, h):
+        row = next(r for r in R._T["feedDigits"] if r[0] == ch)
+        a = np.array([int(c, 16) / 15.0 for c in row[1]], np.float32).reshape(18, 12)
+        return np.asarray(Image.fromarray((a * 255).astype(np.uint8)).resize((w, h), Image.BILINEAR)) / 255.0
+
+    def name(img, x, y, n, colour):                                  # stands in for a name: short strokes
+        for k in range(n):
+            img[y + (0 if k % 2 else 9):y + (11 if k % 2 else 20), x + 7 * k:x + 7 * k + 3] = colour
+        return x + 7 * n
+
+    def line(y, rp=None, weapon=True, badge=True, end=2384, killer=ORANGE, victim_n=12, arrow=False):
+        """Right-aligned at `end` (Ranked's edge). Left to right: killer, weapon (or '[Bleed Out]'), badge, victim, +N RP."""
+        img = np.full((1440, 2560, 3), 30, np.uint8)
+        x = end
+        if rp is not None:                                            # '+N RP' in green, as pcs_ranked reads it
+            x -= 14; img[y:y + 20, x:x + 14] = GREEN; x -= 17; img[y:y + 20, x:x + 14] = GREEN; x -= 10
+            for ch in reversed(str(rp)):
+                r = next(r for r in R._T["feedDigits"] if r[0] == ch); w = int(round((r[2] + r[3]) / 2)); x -= w
+                d = digit(ch, w, 20); reg = img[y:y + 20, x:x + w].astype(np.float32)
+                img[y:y + 20, x:x + w] = (reg * (1 - d[..., None]) + np.array(GREEN) * d[..., None]).astype(np.uint8); x -= 2
+            x -= 12; img[y + 9:y + 11, x:x + 10] = GREEN; img[y + 5:y + 15, x + 4:x + 6] = GREEN
+            x -= 12
+        x -= 7 * victim_n; name(img, x, y, victim_n, WHITE)
+        if badge:
+            T = R.BADGES["diamond"]; v = (T - T.min()) / (T.max() - T.min())
+            x -= 34; img[y - 4:y + 24, x:x + 28] = (40 + 200 * v[..., None] * np.array((0.45, 0.7, 1.0))).astype(np.uint8)
+        if arrow: x -= 30; img[y + 1:y + 19, x:x + 12] = (230, 40, 30)
+        if weapon:
+            x -= gun.shape[1] + 20; img[y - 2:y - 2 + gun.shape[0], x:x + gun.shape[1]] = gun[..., None]
+        else:                                                         # '[Bleed Out]': white words
+            x -= 100; name(img, x, y, 13, WHITE)
+        x -= 18 + 7 * 10; name(img, x, y, 10, killer)
+        return img
+
+    W = HUD.Weapons(str(f))
+    # 1. the Ranked edge: a plain kill line ending 86 px in from the box is captured (before: only with something
+    # bright in the last 60 px)
+    feed = HUD.Feed(W)
+    feed.read(line(300, badge=False), 10.0)
+    assert len(feed.lines) == 1 and feed.lines[0].get("event") == "kill", feed.lines
+    plain = feed.lines[0]
+    assert plain["killer"]["side"] == "squad" and plain["victim"] == {"side": "other"}, plain
+    # 2. the same kill once its RP shows: badge + '+7 RP' around the victim's name
+    feed = HUD.Feed(W)
+    feed.read(line(300, rp=7), 20.0)
+    L = feed.lines[0]
+    assert L["event"] == "kill" and L["rp"] == 7 and L["marker"] == "rank", L
+    assert L["killer"]["side"] == "squad" and L["killer"]["color"] == "orange" and L["victim"] == {"side": "other"}, L
+    assert HUD._same_sig(L["victimSig"], plain["victimSig"]), (L["victimSig"], plain["victimSig"])
+    # 3. no weapon icon ('[Bleed Out]'), '+5 RP' and the victim's badge: our kill, killer's colour read
+    feed = HUD.Feed(W)
+    feed.read(line(300, rp=5, weapon=False), 30.0)
+    B = feed.lines[0]
+    assert B["event"] == "kill" and B["rp"] == 5 and "weapon" not in B, B
+    assert B["killer"]["side"] == "squad" and B["killer"]["color"] == "orange" and B["victim"] == {"side": "other"}, B
+    # ... but a white line with no RP and no weapon is no kill, and without the icons file nothing changes
+    feed = HUD.Feed(W)
+    feed.read(line(300, weapon=False, badge=False, killer=WHITE), 40.0)
+    assert "event" not in feed.lines[0], feed.lines[0]
+    feed = HUD.Feed(HUD.Weapons(str(TMP / "no-such-file.npz")))
+    feed.read(line(300, rp=5, weapon=False), 50.0)
+    assert set(feed.lines[0]) == {"t", "y", "jpg"}, feed.lines[0]
+
+    # pcs_fights: captures of one line as the feed scrolls
+    sq = lambda hue: {"side": "squad", "hue": hue}
+    other = {"side": "other"}
+    ln = lambda t, ev, k, v, ks=None, vs=None, y=290, **kw: dict({"t": float(t), "event": ev, "weapon": "r301", "killer": k,
+                                                                  "victim": v, "killerSig": ks, "victimSig": vs, "y": y}, **kw)
+    squad = [(1, 40, True), (2, 77, False), (3, 179, False)]
+    a, b, c = "fda1ef95a129c5e12975edef95a16bf5a129", "0000000020c5e000f7f0007fe600f7c00000", "5fc0007fdf1fffdf9fafcfff0fdd1f0fc000"
+    # one knock on us, captured at 290, 416 and 457 with three unlike enemy-name shapes (17 Nov 6526 / 6528 / 6532)
+    on_us = [ln(100, "knock", other, sq(40), ks=a, y=290), ln(102, "knock", other, sq(40), ks=b, y=416),
+             ln(106, "knock", other, sq(40), ks=c, y=457)]
+    assert len(F.squad_lines(on_us, 0, 900, squad)) == 1
+    # two of our knocks on two enemies with one weapon, the second first captured lower: both count
+    v1, v2 = "f0" * 18, "0f" * 18                                  # two names: 144 points apart
+    ours = [ln(200, "knock", sq(77), other, vs=v1, y=290), ln(203, "knock", sq(77), other, vs=v2, y=330)]
+    assert len(F.squad_lines(ours, 0, 900, squad)) == 2
+    # a '+N RP' kill line whose killer name was cut off (no colour) is ours; captured twice it counts once
+    rp = [ln(300, "kill", {"side": "squad"}, other, vs=v1, y=290, rp=12, marker="rank", weapon=None),
+          ln(302, "kill", {"side": "squad"}, other, vs=v1, y=330, rp=12, marker="rank", weapon=None)]
+    assert len(F.squad_lines(rp, 0, 900, squad)) == 1
+    # a coloured name in none of our colours and no RP is still not ours
+    assert F.squad_lines([ln(400, "kill", sq(220), other, vs=v1)], 0, 900, squad) == []
+
+
 def test_ranked_rp_and_badges():
     """Ranked: the green '+N RP' at the end of our kill lines (and Team Eliminated / Previous Kill Points lines), the
     victim's rank badge, and the game's RP counter under the rank emblem. Digits are drawn from the table's own shapes."""
