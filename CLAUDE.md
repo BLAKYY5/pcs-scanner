@@ -42,7 +42,8 @@ app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types),
                         hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
-                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord)
+                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord),
+                        games (which game runs: Apex or any other)
 app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
 app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
                         review-extras.js, clip.js/.css (no build step, no framework)
@@ -239,6 +240,21 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
   review asks for a track that isn't there: `/audio/<id>/<n>` answers 503 "preparing" at once and the page asks again
   (a 3 h recording takes minutes to cut: the coach once heard no game sound because the request waited for it).
   Written as `.part.m4a`, renamed when complete; stale `.part` files removed at start.
+- **Any game pauses heavy work** (`pcs_recorder/games.py`, coach's request 19 Nov 2026: "pause any intensive or
+  demanding processes" while he plays e.g. Deadlock or The Finals). Only Apex is recorded, and Watch together and review
+  talk still only care about Apex. Everything else that says "never while Apex runs" in these notes now waits for any
+  game (`core.game_running()`: "Apex", another game's name, or ""): the recorder's scans (stopped, resumed from chunks),
+  joins, the scan prompt (queued instead: nothing on screen), hub and YouTube uploads (`Recorder.holding()` between
+  parts), night uploads / shutdown, track cutting (`tracks.Cutter`), scans by hand, clips, the hub backup copy,
+  teammates' tracks and transcripts (`_backup_busy`), map downloads; corner messages become Activity lines while
+  another game runs (`UI.notify`). What counts as a game: the player's "never counted" list wins, then the player's own
+  programs, the built-in `KNOWN` exe names, Windows' own game list (`HKCU\System\GameConfigStore\Children`
+  `MatchedExeFullPath`, re-read every 6 h, Java / launchers / clients left out), and, off by default, a full-screen
+  window in front that isn't a browser or video player. One process snapshot (`CreateToolhelp32Snapshot`: names only,
+  no process opened, ~4 ms on the coach's PC) serves every caller for 2 s (`games.DETECTOR`); `core.apex_running` uses
+  it too. Settings → Games: "Pause heavy work while any game runs" (`game_pause`, on), the games found, Add / Remove
+  (`game_exes`, `game_ignore`), "Also count any full-screen program" (`game_fullscreen`, off). Home and Activity show
+  "Paused while a game runs (<name>)"; the window goes quiet (`S.game`) as for Apex. Tests replace the detector's reads.
 - **Single instance**: named mutex + a local port to ask the running instance to show its window.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).

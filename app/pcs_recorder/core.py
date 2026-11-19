@@ -8,6 +8,8 @@ Every few seconds `tick()` looks at whether Apex is running:
                       when Apex closes (finished chunks are kept on disk by the scanner).
 Nothing is uploaded while Apex is running, so the player's connection is never shared
 with an upload mid-game. Old recordings are cleaned up after each session.
+Any other game (games.py: Deadlock, The Finals...) holds the same heavy work as Apex (scans stopped and resumed,
+joins, uploads, YouTube, the scan prompt) while "Pause heavy work while any game runs" is on; only Apex is recorded.
 """
 from __future__ import annotations
 
@@ -19,24 +21,31 @@ import threading
 import time
 from pathlib import Path
 
-from . import crash, retention, stitch
+from . import crash, games, retention, stitch
 from .settings import Settings
 
 log = logging.getLogger("recorder")
 RECORDING_CHECK_S = 30          # after a recording starts, OBS must say it records (else a crash report)
-APEX_EXES = {"r5apex_dx12.exe", "r5apex.exe"}
+APEX_EXES = games.APEX_EXES
 CRASH_LOOKBACK_S = 300          # a crash sign this long before Apex was seen closed counts for that recording
 
 
 def apex_running() -> bool:
-    import psutil
-    for p in psutil.process_iter(["name"]):
-        try:
-            if (p.info["name"] or "").lower() in APEX_EXES:
-                return True
-        except psutil.Error:
-            pass
-    return False
+    """Apex runs (one process snapshot shared by every caller, games.DETECTOR)."""
+    return games.apex_running()
+
+
+def game_running() -> str:
+    """What holds the heavy work now: "Apex", another game's name (while the player wants heavy work paused for
+    any game), or "" (no game). Apex goes through `apex_running` so a test's fake Apex counts."""
+    if apex_running():
+        return games.APEX
+    return games.other_game()
+
+
+def paused_line(game: str) -> str:
+    """The quiet line shown while another game holds the heavy work (Activity, Settings, Home)."""
+    return f"Paused while a game runs ({game})"
 
 
 def stop_tree(proc, wait_s: float = 10) -> None:
@@ -110,11 +119,18 @@ class NoHub(ConnectionError):
 
 
 class Recorder:
-    def __init__(self, s: Settings, obs, hub, ui, start_scan, is_apex_running=apex_running, clock=time.time):
-        """start_scan(video_path, out_dir) -> subprocess.Popen running the scanner on that file."""
+    def __init__(self, s: Settings, obs, hub, ui, start_scan, is_apex_running=apex_running, clock=time.time,
+                 other_game=None):
+        """start_scan(video_path, out_dir) -> subprocess.Popen running the scanner on that file.
+        other_game() -> the name of a game other than Apex that runs ("" = none); by default games.other_game, or
+        never when a test gives its own fake Apex."""
         self.s, self.obs, self.hub, self.ui = s, obs, hub, ui
         self.start_scan = start_scan
         self.is_apex_running, self.clock = is_apex_running, clock
+        if other_game is None:
+            other_game = games.other_game if is_apex_running is apex_running else (lambda: "")
+        self.other_game = other_game
+        self.game = ""                           # another game (not Apex) seen at the last tick(): heavy work waits
         self.idx = retention.load_index()
         self.current: str | None = None          # index key of the recording in progress
         self.scan_proc: subprocess.Popen | None = None
@@ -126,6 +142,7 @@ class Recorder:
         self.queue: list[str] = []               # recordings waiting for the scanner (one scan at a time)
         self.status = "Waiting for Apex"
         self.apex = False                        # Apex running at the last tick()
+        self.hold = False                        # Apex or another game at the last tick(): no heavy work
         self.lock = threading.RLock()
         self.youtube = None                      # youtube.Uploader, attached by the app
         self.talk = None                         # talk.Talk (review talk of a Watch together session), by the app
@@ -159,11 +176,27 @@ class Recorder:
         retention.save_index(self.idx)
         self._load_joins()
 
+    def holding(self) -> str:
+        """What holds the heavy work right now: "Apex", another game's name, or "" (for uploads in their own
+        thread: asked between parts)."""
+        if self.is_apex_running():
+            return games.APEX
+        return self.other_game() or ""
+
     # ---------------------------------------------------------- main loop step
     def tick(self) -> None:
         with self.lock:
+            games.configure(self.s)              # the player's Games settings (cheap: a few fields)
             apex = self.is_apex_running()
             self.apex = apex                     # read by the window (it polls less often during games)
+            game = "" if apex else (self.other_game() or "")
+            if game != self.game:
+                if game:
+                    log.info("%s runs: heavy work waits until it closes", game)
+                    self._activity(paused_line(game))
+                self.game = game
+            hold = apex or bool(game)            # Apex is recorded; any game holds the heavy work
+            self.hold = hold
             if not apex and self.check is not None:
                 self.check.apex_closed()             # next Apex session: the check may tell again
             if apex and self.talk is not None and self.talk.active:
@@ -178,13 +211,13 @@ class Recorder:
             elif apex and self.current is not None:
                 self._check_recording()
             try:
-                self._join_tick(apex)
+                self._join_tick(apex, hold)
             except Exception:
                 log.exception("short / crash check failed")
-            self._manage_scan(apex)
+            self._manage_scan(hold)
             if self.scan_proc is None:
-                self._next_in_queue(apex)
-            if not apex and self.scan_proc is None:
+                self._next_in_queue(hold)
+            if not hold and self.scan_proc is None:
                 self._kick_uploads()             # own thread: never holds the tick (a game start)
                 if self.youtube:
                     try:
@@ -193,7 +226,7 @@ class Recorder:
                         log.exception("youtube tick failed")
             if self.night:
                 try:
-                    self.night.tick(apex)
+                    self.night.tick(hold)
                 except Exception:
                     log.exception("night tick failed")
 
@@ -304,9 +337,10 @@ class Recorder:
         self.cleanup()
 
     def _offer_scan(self, key: str, minutes: float | None = None) -> None:
-        """The scan prompt after a session (Apex closed), or the queue when Apex runs again meanwhile."""
+        """The scan prompt after a session (Apex closed), or the queue when Apex (or another game) runs meanwhile:
+        no prompt on the screen during a game."""
         e = self.idx[key]
-        if self.apex:
+        if self.apex or self.game:
             if self.s.auto_scan:
                 e.status = "waiting"
                 if key not in self.queue:
@@ -471,8 +505,10 @@ class Recorder:
             out |= set(c)
         return out
 
-    def _join_tick(self, apex: bool) -> None:
-        """Holds that ran out (no restart in time), then the joins: one at a time, never while Apex runs."""
+    def _join_tick(self, apex: bool, hold: bool | None = None) -> None:
+        """Holds that ran out (no restart in time), then the joins: one at a time, never while Apex (or, `hold`,
+        any game) runs."""
+        hold = apex if hold is None else hold
         now = self.clock()
         if not apex:
             for k, h in list(self.js["holds"].items()):
@@ -491,7 +527,7 @@ class Recorder:
                 stitch.save_state(self.js)
         job = self.join_job
         if job is not None:
-            if apex:                                     # never while Apex runs: again from the start afterwards
+            if hold:                                     # never during a game: again from the start afterwards
                 try:
                     job["proc"].kill()
                     job["proc"].wait(timeout=10)
@@ -505,7 +541,7 @@ class Recorder:
             self.join_job = None
             self._finish_join(job)
             return
-        if apex or not self.js["joins"]:
+        if hold or not self.js["joins"]:
             return
         chain = self.js["joins"][0]
         parts = [self.idx[k].path for k in chain if k in self.idx]
@@ -738,7 +774,7 @@ class Recorder:
         if apex and self.scan_proc is not None and self.scan_proc.poll() is None:
             key = self.scan_key
             stop_tree(self.scan_proc)
-            log.info("scan stopped while Apex runs; it goes on when Apex closes")
+            log.info("scan stopped while %s runs; it goes on when it closes", self.game or "Apex")
             self.scan_proc, self.scan_key = None, None
             if key in self.idx:
                 self.idx[key].status = "waiting"
@@ -750,7 +786,7 @@ class Recorder:
             self.paused = True
         if self.paused:
             if apex:
-                self.status = "Scan paused while Apex runs"
+                self.status = paused_line(self.game) if self.game else "Scan paused while Apex runs"
                 return
             self.paused = False
             self.status = "Scanning last session"

@@ -28,6 +28,11 @@ except ImportError:                      # Linux without Tk: the recorder's wind
 import pcs_core as core  # noqa: E402
 import pcs_server  # noqa: E402
 
+from pcs_recorder import games as _games  # noqa: E402
+# Tests never read this PC's programs or Windows' game list: no game runs unless a test says so (a game the
+# developer plays while the tests run must not change their results).
+_games.DETECTOR.procs, _games.DETECTOR.registry, _games.DETECTOR.foreground = (lambda: {}), (lambda: {}), (lambda: None)
+
 VIDEO = TMP / "vods" / "Apex Legends_2026.11.02-09.03.mp4"
 DATA = bytes(range(256)) * 4096          # 1 MB with a recognisable pattern
 
@@ -4578,7 +4583,7 @@ def test_hub_uploads_resume():
             hub.upload(fake.url, [scan, feed, mic], stop=apex)
             raise AssertionError("not paused")
         except hub.HubError as e:
-            assert e.kind == "paused" and hub.reason(e) == "Waits for Apex to close", e
+            assert e.kind == "paused" and hub.reason(e) == "Waits for the game to close", e
         assert len(fake.puts()) == 1 and not fake.oneshot[1:]           # scan and feed wait for the mic track
         kept = hub.UPLOADS_FILE.read_text(encoding="utf-8")
         assert "up-" in kept and GOOD_KEY not in kept
@@ -5151,6 +5156,81 @@ def test_language_switch_changes_the_page():
         srv.stop()
         core.SETTINGS.clear(); core.SETTINGS.update(old); core.save_settings()
         pcs_i18n.reset()
+
+
+def test_any_game_holds_server_work():
+    """A fake Deadlock running holds a scan by hand, clips, the hub backup copy / teammates' tracks / transcripts
+    (`_backup_busy`) and the map downloads; the state shows it; Watch together still only cares about Apex; the
+    switch off lets them run; /api/games lists the games for Settings."""
+    import subprocess
+    from pcs_recorder import games
+    real = games.DETECTOR
+    procs = {9: "deadlock.exe"}
+    games.DETECTOR = games.Detector(procs=lambda: dict(procs), registry=lambda: {}, foreground=lambda: None)
+    b = pcs_server.Backend(_Auto(str(TMP / "gamerecs")))
+    b._apex_running = lambda: False
+    stopped = []
+    from pcs_recorder import core as rcore
+    real_stop = rcore.stop_tree
+    rcore.stop_tree = lambda p, **k: stopped.append(p)
+    try:
+        assert b._busy_reason() == "Deadlock is running"
+        assert b._clip_busy() == "Deadlock is running. Close Deadlock to make a clip"
+        assert b._backup_busy() == "Deadlock is running"
+        assert b.game_now() == "Deadlock" and b.state()["game"] == "Deadlock"
+        b.auto.s.hub_url = "http://hub.invalid:8420"
+        assert b.minimaps_tick() == 0
+        b.auto.s.hub_url = ""
+
+        class P:
+            def wait(self, timeout=None):
+                raise subprocess.TimeoutExpired("scan", timeout)
+        p = P()
+        assert b._run_scan(p, every_s=0.01) is None and stopped == [p] and b._scan_held_by == "Deadlock"
+        assert b._game_running() == "Deadlock"
+        b._apex_running = lambda: True
+        assert b._game_running() == "Apex" and b._busy_reason() == "Apex is running"
+        b._apex_running = lambda: False
+        b.auto.s.game_pause = False                          # the switch off: other games hold nothing
+        assert b._busy_reason() is None and b._backup_busy() is None and b._clip_busy() is None
+        b.auto.s.game_pause = True
+        info = b.games_info()
+        assert info["pause"] is True and any(g["exe"] == "deadlock.exe" and g["running"] for g in info["games"]), info
+        procs.clear(); games.DETECTOR._snap_at = float("-inf")
+        assert b._busy_reason() is None
+    finally:
+        games.DETECTOR = real
+        rcore.stop_tree = real_stop
+
+
+def test_games_settings_saved_through_api():
+    """Settings → Games: the switches and lists go through /api/settings and reach the detector at once."""
+    from pcs_recorder import settings as st, games
+    b = pcs_server.Backend(_Auto(str(TMP / "gamerecs2")))
+    st_save = st.save
+    st.save = lambda s: None
+    real = games.DETECTOR
+    games.DETECTOR = games.Detector(procs=lambda: {}, registry=lambda: {}, foreground=lambda: None)
+    try:
+        b.save_settings({"game_pause": False, "game_fullscreen": True, "game_exes": ["mygame.exe"],
+                         "game_ignore": ["peak.exe"]})
+        s = b.auto.s
+        assert s.game_pause is False and s.game_fullscreen is True and s.game_exes == ["mygame.exe"]
+        d = games.DETECTOR
+        assert d.pause is False and d.fullscreen is True and d.extra == ["mygame.exe"] and d.ignore == ["peak.exe"]
+        assert b.state()["recorder"]["settings"]["game_exes"] == ["mygame.exe"]
+    finally:
+        st.save = st_save
+        games.DETECTOR = real
+
+
+def test_settings_page_has_games_section():
+    """The Games section and its switch go through t() and are sent with Save changes."""
+    js = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+    for k in ("t('Games')", "f-game_pause", "f-game_fullscreen", "body.game_exes", "/api/games",
+              "t('Paused while a game runs ({game})'"):
+        assert k in js, k
+    assert "gaming()" in js and "S.game" in js
 
 
 if __name__ == "__main__":

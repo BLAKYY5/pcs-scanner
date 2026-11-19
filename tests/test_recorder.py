@@ -14,6 +14,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "app"))
 from pcs_recorder import retention, settings  # noqa: E402
 from pcs_recorder.core import Recorder  # noqa: E402
 
+from pcs_recorder import games as _games  # noqa: E402
+# Tests never read this PC's programs or Windows' game list: no game runs unless a test says so (a game the
+# developer plays while the tests run must not change their results).
+_games.DETECTOR.procs, _games.DETECTOR.registry, _games.DETECTOR.foreground = (lambda: {}), (lambda: {}), (lambda: None)
+
 GB = 1024 ** 3
 UNIT = 1024 ** 2      # tests use MB-sized files (Windows has no sparse files) and scale the limit to match
 
@@ -5716,6 +5721,220 @@ def test_transcribe_worker_parts_and_clean_text():
     from pcs_recorder import comms
     assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
     assert not comms.is_comms_file("a.scan.json")
+
+
+def _fake_detector(procs, registry=None, fg=None, clock=None):
+    from pcs_recorder import games
+    calls = {"procs": 0, "registry": 0}
+
+    def p():
+        calls["procs"] += 1
+        return dict(procs)
+
+    def r():
+        calls["registry"] += 1
+        return dict(registry or {})
+    d = games.Detector(procs=p, registry=r, foreground=lambda: fg, clock=clock or (lambda: 0.0))
+    return d, calls
+
+
+def test_games_detection():
+    """Any game, not only Apex: the built-in list, Windows' game list (launchers and Java left out), the player's own
+    programs, the player's "not a game" list, the full-screen fallback (off by default). One process snapshot per
+    2 s for every caller, Windows' list read again only after hours."""
+    from pcs_recorder import games
+    clock = {"t": 100.0}
+    reg = {"deadlock.exe": r"C:\Steam\Deadlock\game\bin\win64\deadlock.exe",
+           "javaw.exe": r"C:\Badlion\javaw.exe", "df_launcher.exe": r"D:\Delta Force\Launcher\df_launcher.exe",
+           "peak.exe": r"D:\SteamLibrary\steamapps\common\PEAK\PEAK.exe",
+           "r5apex_dx12.exe": r"C:\Steam\Apex Legends\r5apex_dx12.exe"}
+    procs = {4: "system", 100: "explorer.exe", 200: "chrome.exe"}
+    d, calls = _fake_detector(procs, reg, clock=lambda: clock["t"])
+    assert d.other() == "" and not d.apex() and d.holding() == ""
+    procs[300] = "deadlock.exe"; clock["t"] += 3
+    assert d.other() == "Deadlock" and d.holding() == "Deadlock" and d.last == "Deadlock"
+    n = calls["procs"]
+    for _ in range(5):
+        d.other(); d.apex()                                    # within 2 s: the same snapshot, no new read
+    assert calls["procs"] == n
+    del procs[300]; procs[301] = "discovery-d.exe"; clock["t"] += 3      # The Finals (built in)
+    assert d.other() == "The Finals"
+    del procs[301]; procs[302] = "javaw.exe"; procs[303] = "df_launcher.exe"; clock["t"] += 3
+    assert d.other() == "", "Java and launchers in Windows' list are no game"
+    procs[304] = "PEAK.exe".lower(); clock["t"] += 3           # only in Windows' list
+    assert d.other() == "PEAK"
+    d.ignore = ["peak.exe"]; assert d.other() == ""            # Remove = never a game
+    procs[305] = "mygame.exe"; clock["t"] += 3
+    assert d.other() == ""
+    d.extra = ["mygame.exe"]; assert d.other() == "mygame"     # Add
+    d.pause = False; assert d.other() == "" and d.last == ""   # the switch off: no other game counts
+    d.pause, d.extra = True, []
+    procs[1] = "r5apex_dx12.exe"; clock["t"] += 3
+    assert d.apex() and d.other() == "" and d.holding() == games.APEX    # Apex is never "another game"
+    del procs[1]
+    # full-screen fallback: off by default; never a browser or video player; on = the program in front counts
+    procs[400] = "vlc.exe"; procs[401] = "indie.exe"; clock["t"] += 3
+    d.foreground = lambda: 401
+    assert d.other() == ""
+    d.fullscreen = True
+    assert d.other() == "indie"
+    d.foreground = lambda: 400
+    assert d.other() == ""
+    d.foreground = lambda: 200                                 # chrome in front, full screen (a video)
+    assert d.other() == ""
+    # Windows' list: read once, again after REGISTRY_S
+    assert calls["registry"] == 1
+    clock["t"] += games.REGISTRY_S + 1; d.other()
+    assert calls["registry"] == 2
+    # a failing read is no game, never an error
+    d2 = games.Detector(procs=lambda: 1 / 0, registry=lambda: 1 / 0, foreground=lambda: None)
+    assert d2.other() == "" and not d2.apex()
+    # program names: file names only, lower case, Apex refused
+    assert games.valid_exe("Deadlock.exe") == "deadlock.exe" and games.valid_exe(r"C:\x\Game.exe") == "game.exe"
+    assert games.valid_exe("r5apex.exe") is None and games.valid_exe("notepad") is None and games.valid_exe("a;b.exe") is None
+    assert games.pretty("Marvel-Win64-Shipping.exe") == "Marvel Rivals"
+    assert games.pretty("Strange-Win64-Shipping.exe") == "Strange"
+    pub = d.public()
+    assert "Deadlock" in pub["builtIn"] and any(g["exe"] == "deadlock.exe" for g in pub["games"]), pub
+    assert {"exe": "peak.exe", "name": "PEAK"} in pub["ignored"]
+
+
+def test_games_process_snapshot_real():
+    """The real Windows process snapshot reads names only (no process opened) and finds this test's own Python."""
+    from pcs_recorder import games
+    if sys.platform != "win32":
+        return
+    names = games.process_names()
+    me = names.get(os.getpid(), "")
+    assert me.endswith(".exe") and "python" in me, me
+    assert isinstance(games.registry_games(), dict)
+
+
+def test_games_settings_old_file_loads():
+    """Settings saved before Games existed load with the defaults: pause on, full-screen off, empty lists; saved
+    lists are cleaned (names only, no repeats, Apex never)."""
+    import json
+    before = settings.SETTINGS_FILE.read_text(encoding="utf-8") if settings.SETTINGS_FILE.exists() else None
+    try:
+        settings.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        settings.SETTINGS_FILE.write_text(json.dumps({"enabled": True, "keep_days": 5}), encoding="utf-8")
+        s = settings.load()
+        assert s.game_pause is True and s.game_fullscreen is False and s.game_exes == [] and s.game_ignore == []
+        assert s.keep_days == 5
+        s.game_exes = ["Foo.exe", "foo.exe", "C:/x/bar.exe", "r5apex.exe", "nope"]
+        s.game_ignore = ["foo.exe", "Peak.exe"]
+        settings.save(s)
+        s2 = settings.load()
+        assert s2.game_exes == ["foo.exe", "bar.exe"] and s2.game_ignore == ["peak.exe"], (s2.game_exes, s2.game_ignore)
+    finally:
+        if before is None:
+            settings.SETTINGS_FILE.unlink(missing_ok=True)
+        else:
+            settings.SETTINGS_FILE.write_text(before, encoding="utf-8")
+
+
+def test_other_game_holds_heavy_work_apex_still_records():
+    """Deadlock running: nothing is recorded (only Apex is), the scan prompt doesn't show, the scan waits, nothing
+    is uploaded; a running scan is stopped and goes on once the game closes. Apex is still recorded."""
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load()
+    s.folder = str(TMP / f"vids-{time.time_ns()}")
+    s.enabled = True
+    apex, other = {"on": False}, {"g": ""}
+    hub, ui = FakeHub(), FakeUI(True)
+    obs = FakeOBS(s.folder_path)
+    r = Recorder(s, obs, hub, ui, fake_scan, is_apex_running=lambda: apex["on"], other_game=lambda: other["g"])
+    r._final_file = lambda p, wait_s=0: p
+    lines = []
+    ui.activity = lines.append
+    other["g"] = "Deadlock"; r.tick()
+    assert not obs.rec and r.current is None, "only Apex is recorded"
+    assert r.game == "Deadlock" and r.hold and "Paused while a game runs (Deadlock)" in lines, lines
+    other["g"] = ""; apex["on"] = True; r.tick()
+    assert obs.rec and r.status == "Recording Apex", "Apex still records"
+    apex["on"] = False; other["g"] = "Deadlock"; r.tick()      # Apex closed, Deadlock opened: no prompt, scan waits
+    assert not obs.rec and ui.asked == 0 and r.scan_proc is None and len(r.queue) == 1, (ui.asked, r.queue)
+    key = r.queue[0]
+    assert r.idx[key].status == "waiting"
+    for _ in range(3):
+        r.tick()
+    assert r.scan_proc is None and hub.uploads == [] and not any(n[0].startswith("Scanning") for n in ui.notes)
+    other["g"] = ""; r.tick()                                  # Deadlock closed: the scan starts
+    assert r.scan_proc is not None and r.scan_key == key and not r.hold
+    time.sleep(0.8)
+    other["g"] = "The Finals"; r.tick()                       # another game starts mid-scan: stopped, first in line
+    assert r.scan_proc is None and r.queue == [key] and r.status == "Paused while a game runs (The Finals)", r.status
+    assert r.idx[key].status == "waiting" and hub.uploads == []
+    other["g"] = ""
+    for _ in range(120):
+        r.tick(); time.sleep(0.5)
+        if hub.uploads:
+            break
+    assert len(hub.uploads) == 1 and r.idx[key].status == "uploaded", (hub.uploads, vars(r.idx[key]))
+
+
+def test_recorder_default_other_game_and_holding():
+    """The app's Recorder asks games.other_game; a test's fake Apex alone never sees a real game. holding() is what
+    the hub upload thread and YouTube ask between parts."""
+    from pcs_recorder import core, games
+    s = settings.Settings(folder=str(TMP / "hold"))
+    r = Recorder(s, FakeOBS(Path(s.folder)), FakeHub(), FakeUI(), fake_scan)
+    assert r.other_game is games.other_game
+    r2 = Recorder(s, FakeOBS(Path(s.folder)), FakeHub(), FakeUI(), fake_scan, is_apex_running=lambda: False)
+    assert r2.other_game() == "" and r2.holding() == ""
+    r2.other_game = lambda: "Valorant"
+    assert r2.holding() == "Valorant"
+    r2.is_apex_running = lambda: True
+    assert r2.holding() == "Apex"
+    # core.game_running: Apex first, then the shared detector
+    real = games.DETECTOR
+    games.DETECTOR, calls = _fake_detector({7: "cs2.exe"})
+    try:
+        assert core.game_running() == "Counter-Strike 2" and not core.apex_running()
+        games.DETECTOR.pause = False
+        assert core.game_running() == ""
+        games.DETECTOR, _ = _fake_detector({7: "r5apex.exe"})
+        assert core.game_running() == "Apex" and core.apex_running()
+    finally:
+        games.DETECTOR = real
+
+
+def test_youtube_and_tracks_wait_for_any_game():
+    """YouTube uploads and the review track cuts wait for any game, not only Apex."""
+    from pcs_recorder import youtube, tracks
+    up = youtube.Uploader.__new__(youtube.Uploader)
+    up.is_apex_running = lambda: "Deadlock"
+    assert up._game() == "Deadlock"
+    up.is_apex_running = lambda: True
+    assert up._game() == "Apex"
+    up.is_apex_running = lambda: ""
+    assert up._game() == ""
+    c = tracks.Cutter(is_apex_running=lambda: "Overwatch")
+    assert c._apex() is True
+    c = tracks.Cutter(is_apex_running=None)                   # default: core.game_running (no game in tests)
+    assert c._apex() is False
+
+
+def test_corner_messages_hidden_during_other_game():
+    """While another game runs, a corner message is only written to Activity: nothing appears on the screen."""
+    from pcs_recorder import games, runtime
+    shown, logged = [], []
+
+    class Root:
+        def after(self, ms, fn):
+            pass
+    ui = runtime.UI(Root(), logged.append)
+    ui.on_main = shown.append
+    real = games.DETECTOR.last
+    try:
+        games.DETECTOR.last = "Deadlock"
+        ui.notify("Scan finished", "2 games")
+        assert shown == [] and logged == ["[Auto-record] Scan finished: 2 games"], (shown, logged)
+        games.DETECTOR.last = ""
+        ui.notify("Scan finished", "2 games")
+        assert len(shown) == 1
+    finally:
+        games.DETECTOR.last = real
 
 
 if __name__ == "__main__":
