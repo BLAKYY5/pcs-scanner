@@ -3375,6 +3375,51 @@ def test_hub_retried_when_only_drive_took_it():
     assert len(hub.hub_calls) == 3
 
 
+def test_hub_requests_say_the_app_version():
+    """Every hub request carries `X-PCS-App: <version>` (the coach's health page: who runs an old app); an odd
+    or unknown version is not sent. Never the key in it."""
+    import json as _json
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import pcs_core
+    from pcs_recorder import hub
+    seen = []
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do_GET(self):
+            seen.append(self.headers.get("X-PCS-App"))
+            data = _json.dumps({"name": "Moe", "role": "player"}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{srv.server_address[1]}"
+    real = dict(pcs_core.BUILD)
+    try:
+        hub.set_key("pcs_" + "K" * 43)
+        hub.reset()
+        for version, sent in (("1.12.0", "1.12.0"), ("dev-291", "dev-291"), ("1.0 <x>", None), ("", None),
+                              ("x" * 40, None)):
+            pcs_core.BUILD["version"] = version
+            assert hub.app_version() == (sent or "")
+            assert hub.request(url, "GET", "/api/me").json()["name"] == "Moe"
+            assert seen[-1] == sent, (version, seen)
+        assert all("pcs_" not in (v or "") for v in seen)
+    finally:
+        pcs_core.BUILD.clear()
+        pcs_core.BUILD.update(real)
+        hub.set_key(None)
+        hub.reset()
+        srv.shutdown()
+
+
 def test_hub_key_refused_then_fixed():
     """A refused key: nothing is tried while the key stays the same ("Key refused" shown); a new key = sent."""
     r, hub, ui, clock = _hub_recorder(n=2)
