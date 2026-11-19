@@ -2285,6 +2285,8 @@ def test_squads_left_counter():
     own = [(t, {"kills": 1, "damage": 100 + t}) for t in range(10, 20)] + [(t, {"kills": 2, "assists": 1, "damage": 400}) for t in (40, 41, 42)]
     games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
     SCAN.timeline(games, [], own=own)
+    dr = games[0]["own"].pop("damageReads")                # change points of the damage reads + the last read (decision 35)
+    assert dr == [[float(t), 100 + t] for t in range(10, 20)] + [[40, 400], [42, 400]], dr
     assert games[0]["own"] == {"kills": 2, "killsAt": 40, "killsLastRead": 42, "assists": 1, "assistsAt": 40, "assistsLastRead": 42,
                                "damage": 400, "damageAt": 40, "damageLastRead": 42, "damageSingleRead": False}, games[0]["own"]
     own += [(43, {"kills": 3, "assists": 1, "damage": 455})]                  # last second: damage and kills read once
@@ -2293,6 +2295,12 @@ def test_squads_left_counter():
     o = games[0]["own"]
     assert (o["damage"], o["damageAt"], o["damageSingleRead"]) == (455, 43, True) and "kills" not in o, o
     assert o["damagePrevReadAt"] == 42, o                   # where the sound check looks for the hits
+    assert o["damageReads"][-2:] == [[40, 400], [43, 455]], o["damageReads"]
+    # change points: one entry per new value, the last read added when the value didn't change
+    assert SCAN.change_reads([(1, {"damage": 0}), (2, {"damage": 0}), (3, {}), (4, {"damage": 50}), (5, {"damage": 50}),
+                              (6, {"damage": 50}), (9, {"damage": 80})], "damage", 0, 100) == [[1, 0], [4, 50], [9, 80]]
+    assert SCAN.change_reads([(1, {"damage": 7}), (2, {"damage": 7})], "damage", 0, 100) == [[1, 7], [2, 7]]
+    assert SCAN.change_reads([(1, {"damage": 7})], "damage", 5, 100) == [] and SCAN.change_reads(None, "damage", 0, 9) == []
 
 
 def test_game_end_time():
@@ -2790,7 +2798,7 @@ def test_fights_and_ring_damage():
     assert f1['opponents'] == 2 and not f1['thirdParty'] and f1['t0'] <= 100 <= 112 <= f1['t1'] < 130, f1
     assert f2['theirs'] == {'knocks': 1, 'kills': 1} and f2['result'] == 'lost', f2                     # he died in it
     assert F.verdict({'knocks': 3, 'kills': 0}, {'knocks': 1, 'kills': 0}) == 'won'
-    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'even'
+    assert F.verdict({'knocks': 1, 'kills': 0}, {'knocks': 0, 'kills': 0}) == 'won'      # any knock lead (decision 32)
     assert F.verdict({'knocks': 2, 'kills': 2}, {'knocks': 0, 'kills': 0}, wiped=True) == 'lost'
     # third party: a fourth enemy name in one fight
     sigs = ['0' * 36, 'f' * 36, '0f' * 18, 'f0' * 18]
@@ -2804,6 +2812,51 @@ def test_fights_and_ring_damage():
     F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
     f = g[0]['fights'][0]
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
+def test_fights_even_rule_decision_32():
+    """Coach's decision 32 (20 Nov 2026): a fight is even unless a side knocks; kills first, then any knock lead, then a
+    large damage difference (damage dealt = the own damage number's rise during the fight, against damage taken). No
+    knock and no large difference = even. The damage number read once, misread (going down) or not read = no figure."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_fights as F
+    z = {'knocks': 0, 'kills': 0}
+    k = lambda n, m=0: {'knocks': n, 'kills': m}
+    assert F.KNOCK_LEAD == 1 and F.DAMAGE_LEAD == 100
+    assert F.verdict(k(0, 1), k(3, 0)) == 'won' and F.decided_by(k(0, 1), k(3, 0)) == 'kills'     # kills first
+    assert F.verdict(k(0), k(1), dealt=400, taken=0) == 'lost'                                  # then any knock
+    assert F.verdict(k(2), k(1)) == 'won' and F.decided_by(k(2), k(1)) == 'knocks'
+    assert F.verdict(z, z, dealt=180, taken=60) == 'won' and F.decided_by(z, z, dealt=180, taken=60) == 'damage'
+    assert F.verdict(z, z, dealt=20, taken=150) == 'lost'
+    assert F.verdict(k(1), k(1), dealt=0, taken=100) == 'lost'                                  # exactly the lead
+    assert F.verdict(z, z, dealt=150, taken=60) == 'even' and F.decided_by(z, z, dealt=150, taken=60) == ''
+    assert F.verdict(z, z, dealt=None, taken=500) == 'even'                                     # no figure: no damage rule
+    assert F.verdict(k(3, 1), z, wiped=True) == 'lost' and F.decided_by(k(3, 1), z, wiped=True) == 'wiped'
+    # damage dealt from the own stats strip: values read twice; the plate missing before the first read = 0
+    reads = [(float(t), {'kills': 0}) for t in range(100, 104)] + [(float(t), {'damage': 0 if t < 110 else 75 if t < 120 else 230})
+                                                         for t in range(104, 140)]
+    vals = F.damage_values(reads, 90, 200)
+    assert [v for _, _, v in vals] == [0, 75, 230], vals
+    assert F.damage_dealt(vals, 108, 125) == 230 and F.damage_dealt(vals, 112, 115) == 0
+    assert F.damage_dealt(vals, 112, 117) == 155                                                # DEALT_AFTER: 3 s later
+    assert F.damage_dealt(vals, 50, 60) is None and F.damage_dealt([], 100, 110) is None
+    assert F.damage_values(reads + [(140.0, {'damage': 99}), (141.0, {'damage': 99})], 90, 200) is None   # went down
+    # through attach: a fight with hits only (no feed line, no knock) and a big damage lead = won; small = even
+    A = lambda t, s, h: (float(t), {'state': 'alive', 'tier': 'blue', 'shield': s, 'health': h}, [], False)
+    bars = [A(t, 75, 100) for t in range(100, 110)] + [A(110, 15, 100), A(111, 15, 100)] + \
+           [A(t, 75, 100) for t in range(112, 130)]
+    g = [{'tStart': 0.0, 'tEndGame': 900.0}]
+    own = [(float(t), {'damage': 10 if t < 111 else 250}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageTaken'] == 60 and f['damageDealt'] == 240 and f['result'] == 'won' and f['decidedBy'] == 'damage', f
+    own = [(float(t), {'damage': 10 if t < 111 else 90}) for t in range(100, 130)]
+    F.attach(g, [], bars, [], own_stats=own)
+    f, = g[0]['fights']
+    assert f['damageDealt'] == 80 and f['result'] == 'even' and f['decidedBy'] == '', f
+    F.attach(g, [], bars, [])                                                                    # no strip reads
+    f, = g[0]['fights']
+    assert f['damageDealt'] is None and f['result'] == 'even', f
 
 
 def _usage_frame(item=None, bar=(40, 140, 240), p=0.4, tac=None, ult=None):

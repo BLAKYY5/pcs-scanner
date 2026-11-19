@@ -487,7 +487,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   plate behind them) and dark shapes on bright plates, and each number is found next to its icon (damage digits end at
   x = 2336). Digits are compared as grey 12 x 18 cells, each at its own contrast, with the shapes in `pcs_banner.json`
   (`strip`: per size 'S' 17 px, 'B' 22 px, 'K' knocks; 'X' = not a digit); a doubtful digit = no number. Kills need
-  the skull icon left of them. `games[].own` = for each number the value of the last two reads of the game, which must
+  the skull icon left of them. `games[].own` (+ `damageReads` = [[t, value], ...]: the damage reads as change points plus the last read, for the
+  hub's damage per life, decision 35) = for each number the value of the last two reads of the game, which must
   agree (+ `...At`, `...LastRead`); none when values read twice went down, or when the number stopped being read
   > 10 s before the strip did. Damage often grows in the last second of a game (final fight), read once: by the
   coach's decision (16 Nov 2026) that last read counts when it is above every earlier read of the game and at most
@@ -601,13 +602,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   square head on the kill feed lane, "You were knocked" in Events with "back up after m:ss" / "did not get up").
 - **Fights and ring damage** (`pcs_fights.py`, plan items 3, 4, 12; numbers in the PR): per game `fights` = [{t0, t1,
   opponents (enemy names told apart by shape), opponentNames (the shapes), ours {knocks, kills}, theirs {knocks, kills},
-  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, feedLines [t]}] and
+  result won | lost | even, thirdParty, thirdPartyAt?, thirdPartyWhy?, wiped?, damageTaken, damageDealt, decidedBy,
+  feedLines [t]}] and
   `ringDamage` = {seconds, damage (estimate), measured (health drops read), segments [{t0, t1, seconds, ticks, perTick,
   damage, measured, round, how}]} (None when the own card was never read). Evidence of a fight: our squad's kill-feed
   lines (a line captured again lower in the feed within 10 s counts once; a "squad" name in a colour none of our squad
   has is not ours), own knocks (and their end; a knock within 8 s after a stretch outside is the ring's), shield +
   health lost; joined when < 25 s apart. Result: kills decide (the player's own death in the fight counts as a kill on
-  us), then a lead of 2 knocks; a squad wiped in it = lost. Third party: more than 3 enemy names, a name first seen
+  us), then any knock lead, then damage dealt (`damageDealt`: the own damage number's rise from before the fight to 3 s
+  after it, values read twice; None when not read) against `damageTaken` when they are `DAMAGE_LEAD` (100) or more
+  apart; a squad wiped in it = lost; else even (coach's decision 32, 20 Nov 2026). `decidedBy` = wiped | kills | knocks
+  | damage | "" (even). Third party: more than 3 enemy names, a name first seen
   >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
   median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
   29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
