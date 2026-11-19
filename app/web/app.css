@@ -383,3 +383,7 @@ input:disabled{opacity:.5}
 .commsbar input{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid #3a3833;background:#1c1b19;color:inherit;font:inherit}
 .ev.cline span{white-space:normal;overflow-wrap:anywhere}
 .commsnote{padding:8px 4px;font-size:12px}
+/* Settings → Games: one line per game, wraps at 900 px */
+.gamelist{display:flex;flex-direction:column;gap:6px}
+.gamerow{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;padding:6px 0;border-bottom:1px solid var(--line)}
+.gamerow .row{gap:6px}
