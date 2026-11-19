@@ -5027,7 +5027,7 @@ def test_clip_in_review_page():
 # ------------------------------------------------------------------ languages (app/web/i18n, pcs_i18n)
 
 GAME_WORDS = ("knock", "third party", "ring", "care package", "harvester", "banner", "beacon", "Ranked", "Pubs", "Wildcard",
-              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical")
+              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical", "shield", "health")
 
 
 def _i18n_tables():
@@ -5059,8 +5059,11 @@ def test_language_tables_match():
             if re.search(r"(?<![A-Za-z])" + re.escape(w), k, re.I):
                 assert re.search(re.escape(w), fr[k], re.I), (w, k, fr[k])
     gloss = (Path(pcs_server.WEB) / "i18n" / "glossary.md").read_text(encoding="utf-8")
-    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard"):
+    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard",
+              "shield", "health", "purple"):
         assert w in gloss, w
+    for c in ("white", "blue", "purple", "red", "gold"):     # armour colours are game words (coach, 20 Nov 2026)
+        assert fr[c] == c, (c, fr[c])
 
 
 def _web_leftovers(src):
