@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo
 
 VERSION = '1.10.15'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
@@ -555,6 +555,9 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 try: us = pcs_usage.read(img, t, perf)                   # heal panel, ult and tactical icons
                 except Exception: us = None
                 if us: perf.setdefault('_usage', []).append(us)
+                try: am = pcs_ammo.read(img, t)                         # ammo in hand, heals carried
+                except Exception: am = None
+                if am: perf.setdefault('_ammo', []).append(am)
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -666,11 +669,12 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
+        ammo += pf.pop('_ammo', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
             gid = labels.id(rep); labels.n[gid] += n - 1; remap[i] = gid
@@ -687,6 +691,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     perf['_bars'] = sorted(bars, key=lambda r: r[0])
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
+    perf['_ammo'] = sorted(ammo, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
     return events, samples, labels, perf
@@ -917,6 +922,8 @@ def main():
             except Exception as e: perf['rankedError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_fights.attach(games, feed_lines, bar_reads, perf.pop('_storm', []), loud)    # fights, ring damage taken
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
+        except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},

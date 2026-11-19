@@ -201,6 +201,8 @@ select.label:disabled{opacity:.5;cursor:default}
 .ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
 .mk.heal,.mk.ult,.mk.tac{width:8px;height:8px;border-width:1px;top:78%;font-size:0}   /* heals and abilities: small, low in the lane */
 .mk.heal{background:#5fd0c8}.mk.ult{background:#4aa3ff;width:10px;height:10px;border-radius:2px;transform:translate(-50%,-50%) rotate(45deg)}.mk.tac{background:#9db8d9;top:22%}
+.mk.lowammo,.mk.noheals{width:8px;height:8px;border-width:1px;top:50%;font-size:0;border-radius:1px}   /* ammo / heals (pcs_ammo) */
+.mk.lowammo{background:#e6ad45}.mk.noheals{background:#e0623a}
 .mk.ult:hover,.mk.ult:focus-visible{transform:translate(-50%,-50%) rotate(45deg) scale(1.25)}
 .mk.after{opacity:.45}                 /* a ring time after the game ended for this recording */
 /* theatre: the video across the whole window, the side panel below it */
@@ -368,3 +370,10 @@ input:disabled{opacity:.5}
 .reccheck .ck.bad .fix{color:#f3b3ad}.reccheck .ck.warn .fix{color:#f0d29a}
 .reccheck .rc-hint{margin:6px 0 0;font-size:13px}
 .reccheck .row{flex-wrap:wrap}
+/* comms transcript (own mic): one bar per line on its lane, a searchable list in the side panel */
+.tick.comms{background:#6aa0ff;opacity:.6;min-width:3px;margin-left:0;top:7px;bottom:7px}
+.tick.comms:hover{opacity:1;box-shadow:0 0 0 2px rgba(106,160,255,.35)}
+.commsbar{position:sticky;top:0;background:var(--card, var(--bg));padding:6px 0 8px;z-index:1}
+.commsbar input{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid #3a3833;background:#1c1b19;color:inherit;font:inherit}
+.ev.cline span{white-space:normal;overflow-wrap:anywhere}
+.commsnote{padding:8px 4px;font-size:12px}

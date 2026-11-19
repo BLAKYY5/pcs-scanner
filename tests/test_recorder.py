@@ -70,8 +70,7 @@ class FakeHub:
 
     def upload(self, files):
         if self.down:
-            from pcs_recorder.core import NeedsSignIn
-            raise NeedsSignIn("Your Google sign-in has expired")
+            raise ConnectionError("the team hub didn't answer")
         self.uploads.append([f.name for f in files])
         return ["the team hub"]
 
@@ -850,7 +849,7 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
-    assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
+    assert fails[0][3] is None and "didn't answer" in fails[0][1]
     hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
@@ -985,7 +984,7 @@ def test_upload_part_never_delays_a_recording():
         mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
         apex = {"on": False}
         obs, ui = FakeOBS(s.folder_path), FakeUI()
-        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        sender = Sender(s, stop=lambda: apex["on"])
         r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
         r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
         r.tick()                                                 # the upload starts in its own thread
@@ -2757,6 +2756,78 @@ def test_usage_heals_and_abilities():
     assert leg == 'seer' and iou == 1.0, (leg, iou, margin)
 
 
+def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
+    """A 1440p frame with the ammo panel and heal slot drawn from the reader's own digit shapes (pcs_banner.json 'ammo'):
+    mag 2 cells, reserve 3 (leading zeros dim), heal count right-aligned at x 717."""
+    import numpy as np
+    from PIL import Image
+    import pcs_ammo as A
+    a = np.full((1440, 2560, 3), 25, np.uint8)
+    def put(font, lab, box, ink=230, back=30):
+        labels, S = A.T[font]
+        g = S[list(labels).index(lab)].reshape(18, 12)
+        x0, x1, y0, y1 = box
+        im = np.asarray(Image.fromarray((g * 255).astype(np.uint8)).resize((x1 - x0, y1 - y0), Image.BILINEAR)) / 255.0
+        a[y0:y1, x0:x1] = (back + im * (ink - back))[..., None].astype(np.uint8)
+    B = A.cell_boxes(a)
+    if mag is not None:
+        for k, ch in enumerate(f'{mag:02d}'): put('M', ch, B['M'][k], 120 if (k == 0 and ch == '0' and mag) else 230)
+    if res is not None:
+        s = f'{res:03d}'; lead = len(s) - len(s.lstrip('0'))
+        for k, ch in enumerate(s): put('R', ch, B['R'][k], 55 if k < lead and k < 2 else 200)
+    if heal is not None:
+        x = 717
+        for ch in reversed(str(heal)):
+            w = 7 if ch == '1' else 12
+            put('H', ch, (x - w - 1, x + 1, A.HEAL_ROWS[0], A.HEAL_ROWS[1]), 245, 30); x -= w + 4
+    if item == 'shield': a[1322:1360, 656:684] = (40, 70, 200)
+    if hint: a[1380:1406, 673:701] = 235
+    if slot == 2: a[1390:1402, 2300:2420:2] = 240
+    if slot == 1: a[1390:1402, 2080:2240:2] = 240
+    return a
+
+
+def test_ammo_reader_and_events():
+    """Ammo panel and heal slot (pcs_ammo): magazine, reserve (dim leading zeros), heal count and item; an empty heal
+    slot only with the key hint and the ammo read; nothing on an empty frame. Per game: a fight that starts with less
+    than a magazine in reserve is a low-ammo fight; the heal slot empty twice after having heals = out of heals."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ammo as A
+    assert set(A.T) == {'M', 'R', 'H'}, list(A.T)
+    assert A.read(np.zeros((1440, 2560, 3), np.uint8), 1.0) is None
+    r = A.read(_ammo_frame(24, 72, 12, 'shield'), 5.0)
+    assert r == (5.0, 24, 72, 'shield', 12, 2), r
+    r = A.read(_ammo_frame(8, 140, 3, 'shield', slot=1), 6.0)
+    assert r == (6.0, 8, 140, 'shield', 3, 1), r
+    assert A.read(_ammo_frame(30, 210, hint=True), 7.0)[3:5] == ('none', 0)             # heal slot empty
+    assert A.read(_ammo_frame(hint=True), 7.0) is None                                  # no ammo read: not trusted
+    assert A.read(_ammo_frame(30, 210), 7.0)[3:5] == (None, None)                        # no key hint: unknown
+    # per game
+    rows = [(10.0, 28, 200, 'shield', 4, 1), (20.0, 28, 180, 'shield', 4, 1), (21.0, 28, 180, 'shield', 4, 1),   # fight 1 at 25: fine
+            (40.0, 28, 20, 'medkit', 1, 1),                                              # fight 2 at 45: 20 left < 28
+            (50.0, 12, 20, 'none', 0, 1), (52.0, 12, 20, 'none', 0, 1),                  # out of heals at 50 ...
+            (70.0, 28, 20, 'syringe', 2, 1),                                             # ... until 70
+            (90.0, 28, 0, None, None, 2),                                                # spectating: left out
+            (130.0, 6, 0, 'none', 0, 1), (131.0, 6, 0, 'none', 0, 1)]                    # next game: never had heals
+    bars = [(90.0, {'state': 'spectating'}, [], True)]
+    games = [{'tStart': 0.0, 'tEndGame': 100.0, 'fights': [{'t0': 25.0, 't1': 35.0}, {'t0': 45.0, 't1': 48.0}]},
+             {'tStart': 120.0, 'fights': [{'t0': 132.0, 't1': 140.0}]}]
+    A.attach(games, rows, bars)
+    g = games[0]
+    assert [e['kind'] for e in g['ammoEvents']] == ['lowAmmoFight', 'outOfHeals'], g['ammoEvents']
+    assert g['ammoEvents'][0]['t'] == 45.0 and g['ammoEvents'][0]['reserve'] == 20 and g['ammoEvents'][0]['magFull'] == 28
+    assert g['ammoEvents'][1] == {'t': 50.0, 'kind': 'outOfHeals', 'end': 70.0}, g['ammoEvents'][1]
+    assert g['fights'][0]['ammoAtStart']['low'] is False and g['fights'][1]['ammoAtStart']['low'] is True
+    assert g['ammoSummary'] == {'reads': 7, 'healReads': 7, 'fightsChecked': 2, 'lowAmmoFights': 1, 'outOfHeals': 1,
+                                'outOfHealsSeconds': 20.0}, g['ammoSummary']
+    assert [r[0] for r in g['ammoTimeline']['rows']] == [10.0, 20.0, 40.0, 50.0, 70.0], g['ammoTimeline']   # same reads kept once
+    assert g['healTimeline']['rows'][0] == [10.0, 'shield', 4]
+    h = games[1]
+    assert h['ammoEvents'] == [{'t': 132.0, 'kind': 'lowAmmoFight', 'mag': 6, 'reserve': 0, 'magFull': 6, 'fightEnd': 140.0}], h['ammoEvents']
+    assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
@@ -3007,7 +3078,8 @@ def test_hub_answer_shown_on_recording():
 
 
 class HubThenDrive(FakeHub):
-    """A Sender stand-in: Drive takes the results, the hub fails with `fail` (a HubError kind) until it is None.
+    """A Sender stand-in for results an older version sent to Google Drive only: the first upload "goes through"
+    without the hub (hub_ok False = "Not on hub yet"), the hub fails with `fail` (a HubError kind) until it is None.
     `blocked` = what Sender.hub_blocked() would say (refused key, 429 wait)."""
 
     def __init__(self):
@@ -3017,7 +3089,7 @@ class HubThenDrive(FakeHub):
     def upload(self, files):
         from pcs_recorder.runtime import Sent
         out = Sent(["Google Drive"])
-        out.drive_ok, out.hub_ok, out.hub_why = True, False, "Hub not reachable"
+        out.hub_ok, out.hub_why = False, "Hub not reachable"
         out.hub_note = "Not sent to hub: the team hub didn't answer"
         return out
 
@@ -3058,7 +3130,7 @@ def test_hub_retried_when_only_drive_took_it():
     r._retry_uploads()
     assert r.idx["k0"].status == "uploaded" and r.hub_state("k0") == {"hub": "pending", "why": "Hub not reachable"}
     assert any(t == "Results sent" and "by itself" in m for t, m, *_ in ui.notes), ui.notes
-    assert retention.load_sent(r.idx)["k0"]["drive"] == "sent"                         # kept on disk
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                        # kept on disk
     r._retry_hub()
     assert len(hub.hub_calls) == 1 and r.hub_state("k0")["hub"] == "pending"
     r._retry_hub(); r._retry_hub()
@@ -3145,18 +3217,52 @@ def test_hub_and_drive_both_fine_or_no_hub():
     r, hub, ui, clock = _hub_recorder()
 
     def both(files):
-        out = Sent(["the team hub", "Google Drive"])
-        out.hub_ok, out.drive_ok, out.hub_note = True, True, "Sent to hub: 2 games"
+        out = Sent(["the team hub"])
+        out.hub_ok, out.hub_note = True, "Sent to hub: 2 games"
         return out
     hub.upload = both
     r._retry_uploads()
-    assert r.sent["k0"] == {"hub": "sent", "why": "", "drive": "sent"}
+    assert r.sent["k0"] == {"hub": "sent", "why": ""}
     r._retry_hub()
     assert not hub.hub_calls
     r, hub, ui, clock = _hub_recorder()
-    hub.upload = lambda files: Sent(["Google Drive"])                                  # no hub address
+    hub.upload = lambda files: Sent(["somewhere else"])                                # hub not tried
     r._retry_uploads()
     assert r.hub_state("k0")["hub"] == ""
+
+
+def test_no_hub_results_stay_on_pc():
+    """No hub address (Google Drive results removed): the results stay on this PC, the player is told once in
+    Activity (no pop-up), the recording says why; joining the hub sends them. An old sent.json with a "drive" field
+    still loads."""
+    from pcs_recorder.core import NoHub
+    from pcs_recorder.runtime import Sender, Sent
+    r, hub, ui, clock = _hub_recorder(n=2)
+    r.s.hub_url = ""
+    sender = Sender(r.s)
+    try:
+        sender.upload([Path("x.scan.json")])
+        raise AssertionError("no NoHub")
+    except NoHub as e:
+        assert "No team hub yet" in str(e) and "stay on this PC" in str(e)
+    said = []
+    ui.activity = said.append
+    r.hub = sender
+    for _ in range(3):
+        r.next_upload = 0
+        r._retry_uploads()
+    assert all(e.status == "scanned" for e in r.idx.values())
+    assert r.idx["k0"].note == "not sent yet: no team hub"
+    assert len(said) == 1 and "No team hub yet" in said[0] and not ui.notes, (said, ui.notes)   # once, no pop-up
+    r.s.hub_url = "http://hub.test:8420"                                              # joined
+    hub.upload = lambda files: (lambda o: (setattr(o, "hub_ok", True), o)[1])(Sent(["the team hub"]))
+    r.hub = hub
+    r.next_upload = 0
+    r._retry_uploads(); r._retry_uploads()
+    assert all(e.status == "uploaded" for e in r.idx.values()), r.idx
+    import json
+    retention.SENT_FILE.write_text(json.dumps({"k0": {"hub": "pending", "why": "", "drive": "sent"}}))
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                       # older file still read
 
 
 def _silence_recorder(levels, tracks=("game", "discord", "mic"), consent=True, mutes=()):
@@ -4782,6 +4888,493 @@ def test_scanner_speedups_give_the_same_numbers():
         new = np.where(wl < 999, np.where(after.any(1), after.argmax(1) - wl, white.shape[1] - wl), 0)
         assert np.array_equal(old, new)
         assert R.read_cards(a) is not None
+
+
+
+# ------------------------------------------------------------------ clips for Discord (pcs_recorder/clips.py)
+def test_clip_size_rules():
+    """Discord clips stay under 10 MB: bitrate from the length, picture smaller and 30 fps as the bitrate drops,
+    too long refused; H.264 on the card the recorder uses (NVENC / AMF / Quick Sync), else x264."""
+    from pcs_recorder import clips
+    assert clips.DISCORD_TARGET < clips.DISCORD_BYTES <= 10_000_000
+    k30 = clips.discord_video_kbps(30, 1)
+    assert 2000 < k30 < 2500 and (k30 + 96) * 30 * 1000 / 8 < clips.DISCORD_TARGET
+    assert clips.discord_video_kbps(60, 0) > clips.discord_video_kbps(60, 2)       # no sound = more for the picture
+    m = clips.discord_max_s(1)
+    assert clips.discord_video_kbps(m, 1) >= clips.MIN_VIDEO_KBPS > clips.discord_video_kbps(m + 5, 1)
+    assert clips.out_format(2560, 1440, 60, "discord", 8000) == (1920, 1080, 60)
+    assert clips.out_format(2560, 1440, 60, "discord", 2256) == (1280, 720, 30)
+    assert clips.out_format(2560, 1440, 60, "discord", 734) == (854, 480, 30)
+    assert clips.out_format(1280, 720, 60, "discord", 8000) == (1280, 720, 60)      # never larger than the recording
+    assert clips.out_format(1440, 1080, 60, "discord", 2256) == (960, 720, 30)      # 4:3 stays 4:3
+    assert clips.out_format(2560, 1440, 60, "full", None) == (2560, 1440, 60)
+    assert clips.full_kbps(2560, 1440, 60) == 20000 and 12000 < clips.full_kbps(1920, 1080, 60) < 14000
+    assert [clips.hw_encoder(e) for e in ("jim_av1_nvenc", "obs_nvenc_hevc_tex", "av1_texture_amf", "obs_qsv11_v2", "")] == \
+        ["h264_nvenc", "h264_nvenc", "h264_amf", "h264_qsv", "libx264"]
+    for enc in ("h264_nvenc", "h264_amf", "h264_qsv", "libx264"):
+        a = clips.encoder_args(enc, "discord", 2000)
+        assert a[a.index("-c:v") + 1] == enc and "-maxrate" in a and "3000k" in a
+        assert "-maxrate" in clips.encoder_args(enc, "full", 20000)                 # full quality has a ceiling too
+
+
+def test_clip_note_spans():
+    """Coach notes in clip time, as the review player shows them (t - 0.05 to t + dur); notes without text or
+    drawing are skipped; same notes side by side are one picture."""
+    from pcs_recorder import clips
+    a = {"t": 10, "dur": 5, "text": "Push", "drawings": []}
+    b = {"t": 12, "dur": 10, "text": "", "drawings": [{"kind": "pen", "color": "#fff", "pts": [[0, 0]]}]}
+    empty = {"t": 11, "dur": 5, "text": " ", "drawings": []}
+    far = {"t": 100, "dur": 5, "text": "later"}
+    sp = clips.note_spans([a, b, empty, far], 8, 20)
+    assert [(round(x, 2), round(y, 2), [n is a for n in on]) for x, y, on in sp] == \
+        [(1.95, 3.95, [True]), (3.95, 7.0, [True, False]), (7.0, 12.0, [False])], sp
+    assert clips.note_spans([a], 16, 30) == [] and clips.note_spans([], 0, 5) == []
+    many = [{"t": i, "dur": 0.5, "text": str(i)} for i in range(100)]
+    assert len(clips.note_spans(many, 0, 100)) == clips.MAX_OVERLAYS
+
+
+def test_clip_teammate_offsets():
+    """A teammate's track: their time = this recording's time + off, only inside the game part it belongs to."""
+    from pcs_recorder import clips
+    parts = [{"start": 50, "end": 1550, "off": 140}, {"start": 1550, "end": None, "off": 140}]
+    assert clips.team_inputs(parts, 100, 130) == [(240, 30, 0)]
+    assert clips.team_inputs(parts, 1540, 1560) == [(1680, 10, 0), (1690, 10, 10)]       # across two games
+    assert clips.team_inputs([{"start": 0, "end": None, "off": -20}], 10, 40) == [(0, 20, 10)]   # they started later
+    assert clips.team_inputs([{"start": 0, "end": 30, "off": 5}], 40, 60) == []
+
+
+def test_clip_ffmpeg_command():
+    """One ffmpeg run: video cut at the range, notes laid over for their time, chosen tracks mixed at their levels
+    with teammates' tracks delayed to their place; no tracks = no sound."""
+    from pcs_recorder import clips
+    src = {"codec": "av1", "w": 2560, "h": 1440, "fps": 60}
+    cmd = clips.build_cmd("rec.mp4", "out.part", 100, 130, w=1280, h=720, fps=30, src=src, own=[0, 2],
+                          team=[("zed.m4a", [{"start": 0, "end": None, "off": -110}])],
+                          overlays=[("n0.png", 2, 5)], enc="h264_amf", size="discord", vkbps=2000, hwdec=False)
+    s = " ".join(cmd)
+    assert "-hwaccel" not in cmd and cmd[cmd.index("-ss") + 1] == "100.000" and cmd[-1] == "out.part"
+    fc = cmd[cmd.index("-filter_complex") + 1]
+    assert "scale=1280:720" in fc and "fps=30" in fc and "between(t,2.000,5.000)" in fc
+    assert "[0:a:0]" in fc and "[0:a:2]" in fc and "[0:a:1]" not in fc                 # track 2 (voice app) not chosen
+    assert "adelay=10000|10000" in fc and "amix=inputs=4:duration=first:normalize=0" in fc   # silence + 3 tracks
+    assert "-ss 0.000 -t 20.000 -i zed.m4a" in s and "-b:a 96k" in s and "-movflags +faststart" in s
+    quiet = clips.build_cmd("rec.mp4", "o", 0, 5, w=2560, h=1440, fps=60, src=src, own=[], team=[], overlays=[],
+                            enc="libx264", size="full", vkbps=20000, hwdec=True)
+    assert "-an" in quiet and "amix" not in " ".join(quiet)
+    fc = quiet[quiet.index("-filter_complex") + 1]
+    assert "scale" not in fc and "fps=" not in fc                               # full: the recording's size
+    if os.name == "nt":
+        i = quiet.index("-hwaccel")
+        assert quiet[i + 1:i + 4] == ["d3d11va", "-c:v", "av1"]
+
+
+def test_clip_note_picture():
+    """The coach's drawing and note text drawn at the clip's size: lines where they are, see-through elsewhere."""
+    from PIL import Image
+    from pcs_recorder import clips
+    out = TMP / "clipnote" / "n.png"
+    note = {"t": 0, "dur": 5, "text": "Rotate now, ring is closing", "drawings": [
+        {"kind": "arrow", "color": "#ff3b30", "pts": [[0.1, 0.5], [0.5, 0.5]]},
+        {"kind": "rect", "color": "#0a84ff", "pts": [[0.1, 0.7], [0.3, 0.9]]}]}
+    clips.render_notes([note], 640, 360, out)
+    im = Image.open(out).convert("RGBA")
+    assert im.size == (640, 360)
+    r, g, b, a = im.getpixel((192, 180))                  # on the arrow
+    assert a == 255 and r > 200 and g < 120, (r, g, b, a)
+    assert im.getpixel((5, 350))[3] == 0                  # nothing there
+    r, g, b, a = im.getpixel((int(0.1 * 640), 290))      # left side of the box
+    assert a == 255 and b > 200, (r, g, b, a)
+    top_right = [im.getpixel((x, y)) for x in range(400, 640) for y in range(0, 60)]
+    assert any(p[0] > 240 and p[1] > 200 and p[2] < 60 and p[3] == 255 for p in top_right)   # the yellow bar
+    clips.render_notes([{"text": "x" * 3000, "drawings": [{"kind": "bogus", "color": "nope", "pts": [[2, 2]]}]}],
+                       320, 180, out)                     # odd input doesn't break it
+
+
+def test_clip_clipboard_data():
+    """Copy file: the clipboard gets the file as Explorer copies it (CF_HDROP, wide names, ends with two NULs)."""
+    import struct
+    from pcs_recorder import clips
+    p = str(TMP / "Clips" / "a clip.mp4")
+    d = clips.hdrop([p])
+    assert struct.unpack("<IiiII", d[:20]) == (20, 0, 0, 0, 1)
+    assert d[20:].decode("utf-16-le") == os.path.abspath(p) + "\0\0"
+    if os.name == "nt" and os.environ.get("CI"):          # the real clipboard only on CI (not a player's clipboard)
+        import ctypes
+        Path(p).parent.mkdir(parents=True, exist_ok=True)
+        Path(p).write_bytes(b"x")
+        clips.copy_files_to_clipboard([p])
+        u32, sh = ctypes.windll.user32, ctypes.windll.shell32
+        u32.GetClipboardData.restype = ctypes.c_void_p
+        sh.DragQueryFileW.argtypes = [ctypes.c_void_p, ctypes.c_uint, ctypes.c_wchar_p, ctypes.c_uint]
+        assert u32.OpenClipboard(None)
+        try:
+            h = u32.GetClipboardData(15)
+            buf = ctypes.create_unicode_buffer(520)
+            assert h and sh.DragQueryFileW(h, 0, buf, 520) and buf.value == os.path.abspath(p)
+        finally:
+            u32.CloseClipboard()
+
+
+def _clip_source(folder, secs=8):
+    import subprocess
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "Apex Legends_clip-test.mp4"
+    tones = []
+    for f in (300, 500, 700):
+        tones += ["-f", "lavfi", "-i", f"sine=f={f}:d={secs}"]
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"testsrc2=s=640x360:r=30:d={secs}"]
+                   + tones + ["-map", "0", "-map", "1", "-map", "2", "-map", "3", "-c:v", "libx264", "-preset",
+                              "ultrafast", "-c:a", "aac", str(v)], check=True)
+    mate = folder / "mate.m4a"
+    subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", f"sine=f=900:d={secs + 5}", "-c:a", "aac",
+                    str(mate)], check=True)
+    return v, mate
+
+
+def _clip_wait(c, s=120):
+    end = time.time() + s
+    while c.state()["running"] and time.time() < end:
+        time.sleep(0.05)
+    return c.state()
+
+
+def test_clip_made_with_ffmpeg():
+    """A real clip: saved in Clips next to the recording as H.264 + AAC MP4 (plays in Discord), the range's length,
+    one mixed sound track, coach note burned in; under 10 MB; no .part or temp files left; Show / Copy only on it."""
+    import json as _json
+    import shutil
+    import subprocess
+    from pcs_recorder import clips
+    if not (shutil.which("ffmpeg") and shutil.which("ffprobe")):
+        print("  (skipped: no ffmpeg)")
+        return
+    v, mate = _clip_source(TMP / "cliprec")
+    c = clips.Clipper()
+    note = {"t": 3, "dur": 2, "text": "Here", "drawings": [{"kind": "circle", "color": "#ffd60a", "pts": [[.3, .3], [.7, .7]]}]}
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "discord", "own": [0, 2],
+             "team": [(str(mate), [{"start": 0, "end": None, "off": 2}], "Zed")], "notes": [note], "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and not st["error"], st
+    f = Path(st["file"])
+    assert f.parent == v.parent / "Clips" and f.name == "Apex Legends_clip-test clip 0m01s-0m06s.mp4"
+    assert f.stat().st_size < clips.DISCORD_BYTES and st["encoder"] == "libx264"
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                                     "stream=codec_type,codec_name,pix_fmt,channels:format=duration", "-of", "json",
+                                     str(f)], capture_output=True, text=True).stdout)
+    kinds = [(x["codec_type"], x["codec_name"]) for x in pr["streams"]]
+    assert kinds == [("video", "h264"), ("audio", "aac")], kinds
+    assert pr["streams"][0]["pix_fmt"] == "yuv420p" and pr["streams"][1]["channels"] == 2
+    assert abs(float(pr["format"]["duration"]) - 5.0) < 0.15, pr["format"]
+    frame = subprocess.run(["ffmpeg", "-v", "error", "-ss", "2", "-i", str(f), "-frames:v", "1", "-f", "rawvideo",
+                            "-pix_fmt", "rgb24", "-"], capture_output=True).stdout          # clip 2 s = recording 3.5 s
+
+    def px(x, y):
+        i = (y * 640 + x) * 3
+        return frame[i:i + 3]
+    assert any(p[0] > 200 and p[1] > 170 and p[2] < 90 for p in (px(x, 180) for x in range(185, 200))), "no circle"
+    assert not list(f.parent.glob("*.part")) and not list(Path(tempfile.gettempdir()).glob("pcs-clip-*"))
+    assert c.own_clip(str(f)) == str(f) and c.own_clip(str(v)) is None                 # Show / Copy: only its clips
+    # no sound chosen: no sound track; same name again gets (2)
+    c.start({"video": str(v), "start": 1.5, "end": 6.5, "size": "full", "own": [], "team": [], "notes": [],
+             "obs_encoder": ""})
+    st = _clip_wait(c)
+    assert st["name"].endswith(" (2).mp4"), st
+    pr = _json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "json",
+                                     st["file"]], capture_output=True, text=True).stdout)
+    assert [x["codec_type"] for x in pr["streams"]] == ["video"]
+
+
+def test_clip_stops_and_falls_back():
+    """Apex starting stops the clip (nothing left behind); a graphics card encoder that fails falls back to the CPU;
+    a Discord clip that came out too big is made again smaller."""
+    from pcs_recorder import clips
+    folder = TMP / "clipfake"
+    folder.mkdir(parents=True, exist_ok=True)
+    v = folder / "rec.mp4"
+    v.write_bytes(b"video")
+    src = {"codec": "hevc", "w": 2560, "h": 1440, "fps": 60, "dur": 600}
+    busy = {"why": None}
+    runs = []
+    script = {}
+
+    def run(cmd, length):
+        runs.append(cmd)
+        enc = cmd[cmd.index("-c:v", cmd.index("-filter_complex")) + 1]
+        if enc == "h264_nvenc" and "-hwaccel" in cmd:
+            return 1, "decoder failed"
+        if script.get("apex"):
+            busy["why"] = "Apex is running"
+        Path(cmd[-1]).write_bytes(b"x" * script["sizes"].pop(0))
+        return 0, ""
+    c = clips.Clipper(lambda: busy["why"], run=run)
+    spec = {"video": str(v), "start": 10, "end": 40, "size": "discord", "src": src, "own": [0], "team": [], "notes": [],
+            "obs_encoder": "jim_nvenc"}
+    # card encoder with card decoding fails -> same encoder, CPU decoding; first file too big -> made again lower
+    script.update(sizes=[12_000_000, 9_000_000])
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Done" and st["mb"] == 9.0 and not st["over"], st
+    rates = [int(r[r.index("-b:v") + 1].rstrip("k")) for r in runs]
+    if os.name == "nt":
+        assert len(runs) == 3 and "-hwaccel" in runs[0] and "-hwaccel" not in runs[1], runs
+    assert rates[2] < rates[1] * 0.8, rates
+    # Apex starts during the clip: stopped, no file, no .part
+    runs.clear()
+    script.update(sizes=[5_000_000], apex=True)
+    spec["end"] = 20
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Stopped" and "Apex" in st["error"] and not st["file"], st
+    assert not list((folder / "Clips").glob("*0m10s-0m20s*")) and not list((folder / "Clips").glob("*.part"))
+    # Apex running: refused at once
+    try:
+        c.start(spec)
+        raise AssertionError("not refused")
+    except RuntimeError as e:
+        assert "Apex" in str(e)
+    busy["why"] = None
+    script["apex"] = False
+    # too long for 10 MB: said so, nothing made
+    spec.update(start=0, end=500)
+    c.start(spec)
+    st = _clip_wait(c)
+    assert st["step"] == "Failed" and "Too long for 10 MB" in st["error"], st
+
+# ---------------------------------------------------------------- comms transcripts (pcs_recorder/comms.py)
+
+def _comms_setup(name, mic=True, consent=True):
+    """A scanned recording with an events.json, settings with the given answers, and a Comms job on it."""
+    import json
+    from pcs_recorder import comms
+    d = TMP / name
+    d.mkdir(parents=True, exist_ok=True)
+    rec = d / "Apex Legends_2026.11.19-20.00.mp4"
+    rec.write_bytes(b"x" * 100)
+    rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"] if mic else ["game"]}))
+    (d / (rec.stem + ".scan")).mkdir(exist_ok=True)
+    s = settings.Settings()
+    s.player, s.comms_consent, s.mic_audio, s.transcript_consent, s.hub_url = "tester", True, True, consent, "http://hub"
+    idx = {"k1": retention.Entry(path=str(rec), started=time.time() - 600, status="uploaded")}
+    sent = []
+    job = comms.Comms(lambda: s, lambda: idx, lambda: None, lambda files: sent.append([Path(f).name for f in files]))
+    job.st = {"recs": {}}
+    return comms, job, s, idx, rec, sent
+
+
+FAKE_WORKER = r'''
+import json, sys, time
+a = sys.argv[1:]
+out = a[a.index("--out") + 1]
+if a[0].endswith("sleep.mp4"):
+    time.sleep(60)
+print(json.dumps({"done": 10, "total": 20}), flush=True)
+json.dump({"v": 1, "kind": "comms", "speaker": a[a.index("--speaker") + 1], "audioSeconds": 20, "seconds": 1,
+           "language": "fr", "segments": [{"start": 1.5, "end": 3.0, "text": "il est one shot", "speaker":
+           a[a.index("--speaker") + 1], "p": -0.2}]}, open(out, "w"))
+print(json.dumps({"finished": True}), flush=True)
+'''
+
+
+def _fake_worker(comms, sleep=False):
+    w = TMP / "fake_worker.py"
+    w.write_text(FAKE_WORKER)
+    comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
+    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None: TMP
+
+
+def test_comms_only_with_the_players_yes():
+    """No transcript without the yes (or without the team's comms consent / the mic), and only recordings with a mic
+    track; the transcript never goes to Drive with the results."""
+    comms, job, s, idx, rec, _ = _comms_setup("comms-consent", consent=False)
+    assert not comms.eligible(s) and job.tick() is False and not job.running
+    s.transcript_consent = True
+    assert comms.eligible(s)
+    s.comms_consent = False
+    assert not comms.eligible(s)
+    s.comms_consent, s.mic_audio = True, False
+    assert not comms.eligible(s)
+    s.mic_audio = True
+    assert job.todo() == [("k1", str(rec))]
+    assert comms.mic_stream(rec) == 2
+    idx["k1"].status = "recorded"                      # not scanned yet: waits
+    assert job.todo() == []
+    idx["k1"].status = "scanned"
+    idx["k1"].started = time.time() - 5 * 86400        # too old
+    assert job.todo() == []
+    # the transcript and its kept parts stay out of the scan's results (Drive, re-sends)
+    from pcs_recorder.core import result_files
+    out = rec.with_suffix(".scan")
+    (out / (rec.stem + ".scan.json")).write_text("{}")
+    (out / (rec.stem + ".comms.json")).write_text("{}")
+    (out / (rec.stem + ".comms.partial.json")).write_text("{}")
+    assert [p.name for p in result_files(out)] == [rec.stem + ".scan.json"]
+
+
+def test_comms_transcribes_and_sends_to_hub():
+    comms, job, s, idx, rec, sent = _comms_setup("comms-run")
+    _fake_worker(comms)
+    out = job.transcribe(str(rec))
+    assert out == comms.comms_path(rec) and out.is_file()
+    d = comms.transcript_of(rec)
+    assert d["speaker"] == "tester" and d["segments"][0]["text"] == "il est one shot" and d["segments"][0]["start"] == 1.5
+    r = job.st["recs"][rec.stem]
+    assert r["status"] == "done" and r["segments"] == 1 and r["sent"]
+    assert sent == [[rec.stem + ".comms.json"]]
+    assert job.todo() == []                             # done once
+    # no mic track: nothing to transcribe, never asked again
+    comms2, job2, *_ , rec2, sent2 = _comms_setup("comms-nomic", mic=False)
+    assert job2.transcribe(str(rec2)) is None and job2.st["recs"][rec2.stem]["status"] == "no_mic" and job2.todo() == []
+    # said no after it was made: not sent
+    comms3, job3, s3, idx3, rec3, sent3 = _comms_setup("comms-no-after")
+    _fake_worker(comms3)
+    s3.hub_url = ""
+    job3.transcribe(str(rec3))
+    assert sent3 == [] and job3.unsent() == []
+    s3.hub_url, s3.transcript_consent = "http://hub", False
+    assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
+
+
+def test_comms_not_sent_to_a_hub_without_comms():
+    """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
+    can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-old-hub")
+    _fake_worker(comms)
+    ok = [False]
+    job.hub_ok = lambda: ok[0]
+    job.transcribe(str(rec))
+    assert sent == [] and job.st["recs"][rec.stem]["sendNote"] == comms.HUB_TOO_OLD
+    assert job.unsent() == [comms.comms_path(rec)]
+    ok[0] = True
+    assert job._send(comms.comms_path(rec)) is True and sent == [[rec.stem + ".comms.json"]]
+
+
+def test_hub_has_feature():
+    from pcs_recorder import hub
+    calls = []
+
+    class R:
+        def __init__(self, ok, body): self.ok, self._b = ok, body
+        def json(self): return self._b
+    answers = {"http://new": R(True, {"features": ["comms"]}), "http://old": R(True, {"name": "x"}),
+               "http://down": None}
+
+    def fake(url, method, path, **kw):
+        calls.append(url)
+        if answers[url] is None:
+            raise hub.HubError("no answer", "network")
+        return answers[url]
+    real, hub.request = hub.request, fake
+    try:
+        hub._features.clear()
+        assert hub.has_feature("http://new", "comms") and hub.has_feature("http://new", "comms")
+        assert calls.count("http://new") == 1                      # cached
+        assert not hub.has_feature("http://old", "comms") and not hub.has_feature("http://down", "comms")
+        assert not hub.has_feature("", "comms")
+    finally:
+        hub.request = real
+        hub._features.clear()
+
+
+def test_comms_stops_when_apex_starts():
+    """Apex starting stops the transcriber within seconds; the stop is not counted as a failed try."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-apex")
+    slow = rec.with_name("sleep.mp4")
+    rec.rename(slow)
+    rec.with_suffix(".events.json").rename(slow.with_suffix(".events.json"))
+    _fake_worker(comms, sleep=True)
+    comms.BUSY_EVERY_S = 0.2
+    t0 = time.time()
+    job.busy = lambda: "Apex is running" if time.time() - t0 > 1 else None
+    try:
+        job.transcribe(str(slow))
+        raise AssertionError("not stopped")
+    except comms.Busy:
+        pass
+    finally:
+        comms.BUSY_EVERY_S = 3
+    assert time.time() - t0 < 20 and job.proc is None
+    assert job.st["recs"]["sleep"]["tries"] == 0 and not comms.comms_path(slow).exists()
+
+
+def test_comms_downloads_are_checked():
+    """Model and component: https only, size and SHA-256 must match the pinned values, zip paths stay inside."""
+    import hashlib
+    import io
+    import zipfile
+    import requests
+    from pcs_recorder import comms
+    dest = TMP / "dl" / "model.bin"
+    try:
+        comms.fetch("http://huggingface.co/x", dest, "0" * 64, 1)
+        raise AssertionError("http accepted")
+    except comms.Unavailable:
+        pass
+    try:
+        comms.fetch("https://example.com/x", dest, "0" * 64, 1)
+        raise AssertionError("other host accepted")
+    except comms.Unavailable:
+        pass
+    body = b"model bytes"
+
+    class R:
+        url, history = "https://cdn.example/x", []
+        def raise_for_status(self): pass
+        def iter_content(self, n): yield body
+    orig = requests.Session.get
+    requests.Session.get = lambda self, *a, **k: R()
+    try:
+        try:
+            comms.fetch("https://huggingface.co/x", dest, "0" * 64, len(body))
+            raise AssertionError("wrong SHA-256 accepted")
+        except comms.Unavailable:
+            pass
+        assert not dest.exists() and not dest.with_name("model.bin.part").exists()
+        comms.fetch("https://huggingface.co/x", dest, hashlib.sha256(body).hexdigest(), len(body))
+        assert dest.read_bytes() == body
+    finally:
+        requests.Session.get = orig
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.txt", "x")
+    try:
+        comms.safe_extract(zipfile.ZipFile(buf), TMP / "zx")
+        raise AssertionError("path outside accepted")
+    except comms.Unavailable:
+        pass
+    assert not (TMP / "evil.txt").exists()
+    # nothing published yet: says so, downloads nothing
+    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+        try:
+            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            raise AssertionError("no component, yet it ran")
+        except comms.Unavailable as e:
+            assert "isn't published" in str(e)
+    # the pinned model is the turbo model's five files
+    assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
+    assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_transcribe_worker_parts_and_clean_text():
+    """The worker cuts long tracks at a quiet moment, fixes Apex words and drops Whisper's filler lines."""
+    import numpy as np
+    import pcs_transcribe as T
+    rate = T.RATE
+    pcm = (np.random.default_rng(1).normal(0, 3000, rate * 1500)).astype(np.int16)
+    pcm[rate * 590:rate * 591] = 0                     # a quiet second inside the last 30 s of part 1
+    ps = T.parts(pcm)
+    assert ps[0][0] == 0 and ps[-1][1] == len(pcm) and all(a[1] == b[0] for a, b in zip(ps, ps[1:]))
+    assert rate * 590 <= ps[0][1] <= rate * 591, ps[0][1] / rate
+    assert len(T.parts(pcm[:rate * 200])) == 1
+    assert T.fix_text("  le  Watson est a Northpad ") == "le Wattson est a North Pad"
+    assert not T.keep_segment("Sous-titrage ST' 501", -0.2, 0.1, [])
+    assert not T.keep_segment("Merci d'avoir regardé cette vidéo", -0.2, 0.1, [])
+    assert not T.keep_segment("euh", -1.5, 0.9, [])
+    assert not T.keep_segment("full", -0.2, 0.1, ["full", "full"])
+    assert T.keep_segment("il est one shot", -0.3, 0.1, ["full"])
+    from pcs_recorder import comms
+    assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
+    assert not comms.is_comms_file("a.scan.json")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 Scans Apex Legends recordings for Project Conquerors (PCS): drop spots, landing, ring timings, EVO harvesters,
 ranked/scrim mode and the kill feed. Results go to the team hub (the coach's own server) and from there into the
-Conquerors Loot Book. Google Drive is optional and only gets the small result files, never voice or video.
+Conquerors Loot Book. The app doesn't use Google Drive (older versions could send results there).
 
 ## Install (players)
 
@@ -12,14 +12,16 @@ Conquerors Loot Book. Google Drive is optional and only gets the small result fi
 2. **Open it.** If your browser asks whether to keep the file, click **Keep**. Windows may say "Windows protected
    your PC": click **More info**, then **Run anyway** (only the first time). Leave the file where it is or move it
    to your Desktop first: the app updates this file by itself, so don't delete it.
-3. **Follow "Get set up" on the Home page.** Four steps, about two minutes:
+3. **Follow "Get set up" on the Home page.** Three steps, about two minutes:
    1. **Your EEC name**: type it, **Save**.
-   2. **Record Apex by itself**: **Turn on**. The recorder is set up in the background (about a minute); go on.
-   3. **Join the team hub**: paste the link your coach sent you, **Join**. The hub is reached through
-      [Tailscale](https://tailscale.com/download/windows): if the app says so, install it, sign in with the invite
-      from your coach, and press **Join** again.
-   4. **Google** (optional once you're on the hub; needed only for YouTube uploads or without a hub): **Sign in with Google**. Google may say "Google hasn't
-      verified this app": click **Advanced**, then the **Go to …** link, then **Continue**.
+   2. **Your choices**: record Apex by itself (the recorder is set up in the background, about a minute), share
+      mic tracks, comms transcripts.
+   3. **Join the team hub**: paste the link your coach sent you, **Join**. If the app says the hub is reached through
+      [Tailscale](https://tailscale.com/download/windows), install it, sign in with the invite from your coach, and
+      press **Join** again. Until you join, your results stay on your PC.
+
+   YouTube uploads (optional): Settings → YouTube, **Sign in to the team channel**. Google may say "Google hasn't verified this app":
+   click **Advanced**, then the **Go to …** link, then **Continue**.
 4. **Play Apex.** Recording starts and stops by itself. The app waits in the tray (bottom right) and starts with
    Windows; closing the window keeps it there, **Quit** is in the tray menu.
 
@@ -79,23 +81,21 @@ and tests your graphics card for a few seconds. From then on:
 - **Video quality**: constant bitrate, default 12 Mbit/s (about 5.4 GB per hour at 1440p60), from 8 to 60.
   8 is the lowest that keeps the HUD readable for the scanner; Twitch VODs are usually 8-10.
 
-Google Drive (optional): the app only has Google's `drive.file` permission, so it can see and change only the
-files it creates (a "PCS Scans" folder in your Drive with the small result files, shared read-only with the coach's
-address you typed in Settings). Your mic track never goes to Drive: with "Send my mic track" on it goes to the team
-hub only. See [PRIVACY.md](PRIVACY.md).
+Results and, with "Send my mic track" on, your mic track go to the team hub only. Older versions could put
+results in a "PCS Scans" folder in your Google Drive; this version no longer does (you may delete that folder).
+See [PRIVACY.md](PRIVACY.md).
 
 ## Layout
 - `scanner/` — the scanner (`pcs_scan.py`, `pcs_hud.py`) and its data files. Also runs from the command line:
   `python scanner/pcs_scan.py recording.mp4 --out results`
 - `app/` — the Windows app. `pcs_app.py` starts it (native window via pywebview/Edge WebView2, tray, scan mode),
-  `pcs_core.py` has paths, settings, Google Drive, updates; `pcs_server.py` is the local server the window talks
+  `pcs_core.py` has paths, settings, YouTube sign-in, updates; `pcs_server.py` is the local server the window talks
   to (127.0.0.1, random port and token); `web/` is the interface. API tests: `python tests/test_ui.py`.
 - `app/pcs_recorder/` — Auto-record: Apex detection, private OBS driven over obs-websocket, scan prompt,
-  folder limits, uploads to the team hub (or to Drive when no hub is set). Logic tests: `python tests/test_recorder.py`.
+  folder limits, uploads to the team hub. Logic tests: `python tests/test_recorder.py`.
 - `.github/workflows/build.yml` — builds `PCS-Scanner.exe` on every push; a push to `main` with a new version (or a
   `v*` tag) publishes a release.
 
 ## Build settings (repository Settings → Secrets and variables → Actions)
 - Secret `GOOGLE_OAUTH_CLIENT`: the Desktop OAuth client JSON from Google Cloud.
-- No coach address is built into the app. The Coach role comes from the coach's hub key; players without a hub type
-  the coach's Google address in Settings, and their "PCS Scans" folder on Drive is shared with it.
+- No coach address is built into the app. The Coach role comes from the coach's hub key.

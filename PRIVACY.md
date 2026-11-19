@@ -1,6 +1,6 @@
 # PCS Scanner: privacy policy
 
-_Last updated: 18 November 2026_
+_Last updated: 19 November 2026_
 
 PCS Scanner is a free Windows app used by the players of the PCS Apex Legends team to record their
 games, scan the recordings for coaching, and share the results with their coach. It is not sold and
@@ -11,11 +11,8 @@ has no ads.
 You sign in with Google only if you want to use these features, and you can sign out at any time by
 removing PCS Scanner from <https://myaccount.google.com/permissions>.
 
-- **Google Drive** (`drive.file`): the app creates a "PCS Scans" folder in your Drive and uploads the
-  scan results it made (small text files only: never your microphone track, voice or video). It can only
-  see and change files it created itself, never your other files. The folder is shared read-only with
-  the coach's Google address you typed in Settings, if any. Once you are on your team's hub, Drive is not
-  needed.
+- **Google Drive**: not used any more. Older versions could put scan results in a "PCS Scans" folder in
+  your Drive; this version never opens Drive. You may delete that folder yourself (the app never deletes it).
 - **YouTube** (`youtube.upload`): if you turn on YouTube upload, the app uploads the videos of your scrim
   blocks to the YouTube channel you pick when signing in, with a title and description. It cannot read,
   change or delete any video.
