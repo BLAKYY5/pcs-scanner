@@ -909,7 +909,7 @@ class Backend:
             raise RuntimeError("Auto-record isn't available in this build")
         if getattr(a, "_setting_up", False):
             raise RuntimeError("Wait for the recorder set-up to finish.")
-        c.start()
+        c.start(manual=True)                              # may start OBS; closed again if it wasn't running
         return c.public()
 
     # ------------------------------------------------------------- team hub

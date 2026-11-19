@@ -764,7 +764,7 @@ class AutoRecorder:
         def first_check():                           # the recording check on Home, once Auto-record runs
             time.sleep(self.CHECK_DELAY_S)
             if self.s.enabled and self.s.encoder and not getattr(self, "_setting_up", False) and self.check.at is None:
-                self.check.start()
+                self.check.start()                   # automatic: never starts OBS
         threading.Thread(target=first_check, daemon=True, name="rec-check-start").start()
 
         def loop():
@@ -845,5 +845,5 @@ class AutoRecorder:
             finally:
                 self._setting_up = False
             if ok:
-                self.check.start()                       # the setup's result on Home: the recording check
+                self.check.start(manual=True)            # the setup's result on Home (OBS left as it was)
         threading.Thread(target=go, daemon=True).start()

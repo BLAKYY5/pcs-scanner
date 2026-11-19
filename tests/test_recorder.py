@@ -4069,6 +4069,8 @@ def test_rec_check_items():
     assert pc.game_item(_check_settings(game_audio=False), True)["state"] == "off"
     # voice app and mic
     assert pc.voice_item(s, set())["state"] == "bad" and "Discord isn't open" in pc.voice_item(s, set())["text"]
+    early = pc.voice_item(s, set(), apex=False)                                         # before Apex: normal, grey
+    assert early["state"] == "wait" and "checked when Apex starts" in early["text"]
     assert pc.voice_item(s, {"discord.exe"}, 0.3)["state"] == "ok"
     assert pc.voice_item(s, {"discord.exe"}, 0.0)["state"] == "wait"                   # nobody talks: not red
     assert pc.voice_item(settings.Settings().clamp(), set())["state"] == "off"          # no team consent
@@ -4086,13 +4088,17 @@ def test_rec_check_items():
 
 
 class _FakeAdapter:
-    def __init__(self, fail=None):
-        self.fail, self.calls = fail, 0
+    """Stands in for runtime.ObsAdapter: ensure_ready() starts OBS (obs["on"]) when it isn't running."""
+    def __init__(self, fail=None, obs=None):
+        self.fail, self.calls, self.ready = fail, 0, False
+        self.obs = obs if obs is not None else {"on": False}
 
     def ensure_ready(self):
         self.calls += 1
+        self.obs["on"] = True
         if self.fail:
             raise RuntimeError(self.fail)
+        self.ready = True
 
 
 def _check_for(s, rec=None, adapter=None, ui=None, procs=(), peaks=None):
@@ -4105,6 +4111,11 @@ def _check_for(s, rec=None, adapter=None, ui=None, procs=(), peaks=None):
     c.mic_blocked = c.amd_replay = c.gamebar = lambda: False
     c.installed = lambda: True
     c.read_gpu = lambda: "amd radeon rx 9070 xt"
+    ad = c.adapter
+    obs_ = ad.obs if isinstance(ad, _FakeAdapter) else {"on": False}
+    c.obs_state, c.closes = obs_, []
+    c.obs_running = lambda: obs_["on"]
+    c.close_obs = lambda: (c.closes.append(1), obs_.update(on=False))
     c.listened = []
 
     def listen(s_, names, seconds, stop=lambda: False, enough=lambda p: False):
@@ -4120,20 +4131,61 @@ def test_rec_check_full_run():
     s = _check_settings()
     ad = _FakeAdapter()
     c = _check_for(s, adapter=ad, procs=[("Discord.exe", "")], peaks={"discord": 0.2, "mic": 0.0})
-    assert c.start()
+    assert c.start(manual=True)
     pub = c.public()
     st_ = {i["id"]: i["state"] for i in pub["items"]}
     assert ad.calls == 1 and not pub["running"] and pub["at"], pub
+    assert c.closes == [1] and not c.obs_state["on"]                       # started by the check: closed again
     assert st_ == {"obs": "ok", "encoder": "ok", "game": "wait", "voice": "ok", "mic": "warn", "disk": "ok",
                    "apps": "ok"}, st_
     assert c.listened == [(["discord", "mic"], c.listen_s)]                 # game sound is not listened before Apex
     assert pub["red"] == 0
     # OBS doesn't answer: red with a fix, the meters aren't asked
     c2 = _check_for(s, adapter=_FakeAdapter("OBS didn't answer on port 4466: refused"), procs=[("Discord.exe", "")])
-    c2.start()
+    c2.start(manual=True)
     obs_ = c2.public()["items"][0]
     assert obs_["id"] == "obs" and obs_["state"] == "bad" and "Check again" in obs_["fix"] and c2.listened == []
     assert c2.public()["red"] == 1
+
+
+def test_rec_check_leaves_obs_as_found():
+    """The automatic run (app start, Windows logon) never starts OBS; Check again starts it only to check and closes
+    it again when it wasn't running, never while Apex runs or the encoder test runs."""
+    s = _check_settings()
+
+    class _R:
+        apex, current = False, None
+        idx = {}
+    rec = _R()
+    ad = _FakeAdapter()
+    c = _check_for(s, rec=rec, adapter=ad, peaks={"discord": 0.1, "mic": 0.1})
+    c.start()                                                                    # automatic, OBS not running
+    st_ = {i["id"]: i for i in c.public()["items"]}
+    assert ad.calls == 0 and not c.obs_state["on"] and c.closes == [] and c.listened == []
+    assert st_["obs"]["state"] == "wait" and st_["obs"]["text"] == "Checked when Apex starts"
+    assert st_["voice"]["state"] == "wait" and st_["game"]["state"] == "wait"   # Discord not open yet: grey
+    from pcs_recorder import precheck as pc
+    c.last_start = pc_item = pc.item("obs", "ok", "Started fine")
+    c.start()
+    assert c.public()["items"][0] == pc_item and ad.calls == 0                  # the last real start's result
+    c.obs_state["on"] = True                                                     # OBS already running: asked, kept
+    c.start()
+    assert ad.calls == 0 and c.public()["items"][0]["text"] == "Running" and c.closes == [] and c.listened
+    c.start(manual=True)
+    assert ad.calls == 1 and c.closes == [] and c.obs_state["on"]               # was running: left running
+    c.obs_state["on"] = False
+    rec.apex = True                                                              # Apex runs (not recording yet)
+    c.start(manual=True)
+    assert ad.calls == 1 and not c.obs_state["on"] and c.closes == []
+    rec.apex = False
+    c.setting_up = lambda: True                                                  # encoder test running
+    c.start(manual=True)
+    assert ad.calls == 1 and c.public()["items"][0]["state"] == "wait"
+    c.setting_up = lambda: False
+    # Apex starts while Check again listens: OBS stays open for the recording
+    c.listen = lambda *a, **k: (setattr(rec, "apex", True), {})[1]
+    c.start(manual=True)
+    assert ad.calls == 2 and c.obs_state["on"] and c.closes == []
 
 
 def test_rec_check_at_apex_start():

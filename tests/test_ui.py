@@ -3202,7 +3202,7 @@ def test_recording_check_on_home():
     c = pc.RecCheck(s, None, a.rec)
     c.threaded = False
     runs = []
-    c._run = lambda: (runs.append(1), c._set({"apps": pc.apps_item([("Medal.exe", "")]),
+    c._run = lambda manual=False: (runs.append(manual), c._set({"apps": pc.apps_item([("Medal.exe", "")]),
                                              "disk": pc.item("disk", "ok", "500 GB free")}),
                       setattr(c, "running", False))
     a.check = c
@@ -3213,13 +3213,13 @@ def test_recording_check_on_home():
         code, state, _ = call(srv, "/api/state")
         assert code == 200 and state["recorder"]["check"] == {"running": False, "at": None, "items": [], "red": 0}
         code, r, _ = call(srv, "/api/reccheck", {})
-        assert code == 200 and runs == [1] and r["check"]["red"] == 1, r
+        assert code == 200 and runs == [True] and r["check"]["red"] == 1, r         # Check again = manual
         assert [i["id"] for i in r["check"]["items"]] == ["disk", "apps"]           # shown in a fixed order
         apps = r["check"]["items"][1]
         assert apps["state"] == "bad" and apps["label"] == "Other capture apps" and apps["fix"].startswith("Close Medal")
         a._setting_up = True                                                        # encoder test running: refused
         code, r, _ = call(srv, "/api/reccheck", {})
-        assert code == 500 and "set-up" in r["error"] and runs == [1]
+        assert code == 500 and "set-up" in r["error"] and runs == [True]
         a._setting_up = False
         b2 = pcs_server.Backend(_Auto(str(TMP / "recs")))                         # no check (older stand-in): None
         assert b2.rec_check() is None

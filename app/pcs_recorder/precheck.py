@@ -189,14 +189,18 @@ def game_item(s, apex: bool, peak: float | None = None, done: bool = False) -> d
     return item("game", "wait", "Checking in the first minutes of the recording…")
 
 
-def voice_item(s, procs: set[str], peak: float | None = None) -> dict:
+def voice_item(s, procs: set[str], peak: float | None = None, apex: bool = True) -> dict:
+    """Not open before Apex runs is normal (people open it later): grey then, red only once Apex runs."""
     if "discord" not in s.tracks():
         return item("voice", "off", "Off in Settings" if s.comms_consent else "Off (team consent not given)")
     name = s.voice_name()
     it = item("voice", "ok", "")
     it["label"] = name
     if not any(e.lower() in procs for e in s.voice_exes()):
-        it.update(state="bad", text=f"{name} isn't open", fix=f"Open {name} before the game.")
+        if apex:
+            it.update(state="bad", text=f"{name} isn't open", fix=f"Open {name} before the game.")
+        else:
+            it.update(state="wait", text="Not open yet · checked when Apex starts")
     elif peak is None:
         it.update(state="wait", text=f"{name} is open")
     elif peak > SIGNAL:
@@ -303,6 +307,9 @@ class RecCheck:
         self.amd_replay = amd_instant_replay
         self.gamebar = gamebar_background
         self.installed = obsmod.installed
+        self.obs_running = obsmod.is_running
+        self.close_obs = obsmod.close
+        self.last_start: dict | None = None     # the OBS item of the last real start (Apex), shown by automatic runs
         self.listen = listen_levels
         self.gpu: str | None = None             # graphics card names, read once (PowerShell, about a second)
         self.read_gpu = obsmod.gpu_names
@@ -341,7 +348,7 @@ class RecCheck:
             "encoder": encoder_item(self.s, self.gpu, self.setting_up(), self._last_failed()),
             "game": game_item(self.s, apex) if not (apex and prev.get("game", {}).get("state") in ("ok", "bad"))
             else prev["game"],
-            "voice": voice_item(self.s, names),
+            "voice": voice_item(self.s, names, apex=apex),
             "mic": mic_item(self.s, mics, self._safe(self.mic_blocked)),
             "disk": disk_item(self.s, self.disk),
             "apps": apps_item(procs, self._safe(self.amd_replay), self._safe(self.gamebar)),
@@ -386,16 +393,19 @@ class RecCheck:
             fn(*a)
 
     # -- the full check
-    def start(self) -> bool:
-        """Run the full check in the background. False when one runs already."""
+    def start(self, manual: bool = False) -> bool:
+        """Run the full check in the background. False when one runs already.
+        Automatic runs (app start) never start OBS. manual (Check again, end of the setup) may start it, and closes it
+        again afterwards when it wasn't running before."""
         with self.lock:
             if self.running:
                 return False
             self.running = True
-        self._go(self._run)
+        self._go(self._run, manual)
         return True
 
-    def _run(self) -> None:
+    def _run(self, manual: bool = False) -> None:
+        opened = False
         try:
             if self.gpu is None:
                 try:
@@ -404,9 +414,12 @@ class RecCheck:
                     self.gpu = ""
             apex = self._apex()
             items = self._quick(apex)
-            items["obs"] = self._obs()
+            if manual:
+                items["obs"], opened = self._obs()
+            else:
+                items["obs"] = self._obs_auto()
             self._set(items)
-            if items["obs"]["state"] == "ok":
+            if items["obs"]["state"] == "ok" and (manual or self._recording() or self._safe(self.obs_running)):
                 names = input_names(self.s)
                 listen = {n: t for n, t in names.items() if t in ("discord", "mic")}
                 if listen:
@@ -420,6 +433,8 @@ class RecCheck:
         except Exception:
             log.exception("recording check failed")
         finally:
+            if opened:
+                self._close_if_ours()
             with self.lock:
                 self.running = False
                 self.at = time.time()
@@ -428,7 +443,7 @@ class RecCheck:
         out = {}
         names = getattr(self, "_names", set())
         if "discord" in peaks:
-            out["voice"] = voice_item(self.s, names, peaks["discord"])
+            out["voice"] = voice_item(self.s, names, peaks["discord"], apex)
         if "mic" in peaks:
             out["mic"] = mic_item(self.s, None, False, peaks["mic"])
             if self.items.get("mic", {}).get("state") == "bad":       # blocked / unplugged stays red
@@ -437,26 +452,65 @@ class RecCheck:
             out["game"] = game_item(self.s, apex, peaks["game"], done)
         return out
 
-    def _obs(self) -> dict:
-        """Our OBS starts and answers. While a recording runs, it is only asked (nothing restarted)."""
+    def _not_started(self) -> dict:
+        return self.last_start or item("obs", "wait", "Checked when Apex starts")
+
+    def _obs_auto(self) -> dict:
+        """Automatic run: OBS is never started (it costs memory all day). Running = asked by the meters; else the
+        result of the last real start, or "Checked when Apex starts"."""
         if not self.installed():
             return obs_item(False, False)
         if self._recording():
             return obs_item(True, True, recording=True)
-        if self.adapter is None or self.setting_up():
-            return item("obs", "wait", "Set up running…") if self.setting_up() else obs_item(True, False, "no recorder")
+        if self._safe(self.obs_running):
+            return item("obs", "ok", "Running")
+        return self._not_started()
+
+    def _obs(self) -> tuple[dict, bool]:
+        """Check again: our OBS starts and answers. -> (item, True when this check started it). While Apex runs,
+        records, or the encoder test runs, OBS is only asked, never started."""
+        if not self.installed():
+            return obs_item(False, False), False
+        if self._recording():
+            return obs_item(True, True, recording=True), False
+        if self.setting_up():
+            return item("obs", "wait", "Set up running…"), False
+        if self.adapter is None:
+            return obs_item(True, False, "no recorder"), False
+        if self._apex():                               # Apex runs, not recording: the recorder handles OBS
+            return self._not_started(), False
         lock = getattr(self.rec, "lock", None)
         got = lock.acquire(timeout=60) if lock is not None else True
         if not got:
-            return item("obs", "wait", "Busy, press Check again")
+            return item("obs", "wait", "Busy, press Check again"), False
+        was = True
         try:
             if self._recording():
-                return obs_item(True, True, recording=True)
+                return obs_item(True, True, recording=True), False
+            was = self._safe(self.obs_running)
             self.adapter.ensure_ready()            # starts OBS if it isn't running (as at Apex start), else only asks
-            return obs_item(True, True)
+            return obs_item(True, True), not was
         except Exception as e:
             log.info("recording check: OBS didn't answer: %s", e)
-            return obs_item(True, False, str(e))
+            return obs_item(True, False, str(e)), not was
+        finally:
+            if lock is not None:
+                lock.release()
+
+    def _close_if_ours(self) -> None:
+        """OBS was started by this check: close it again, unless Apex runs, records or the encoder test runs."""
+        lock = getattr(self.rec, "lock", None)
+        if lock is not None and not lock.acquire(timeout=60):
+            return
+        try:
+            if self._recording() or self._apex() or self.setting_up():
+                return
+            self.close_obs()
+            if self.adapter is not None:
+                self.adapter.ready = False
+            log.info("recording check: OBS closed again (it wasn't running before the check)")
+        except Exception:
+            log.exception("recording check: OBS not closed")
         finally:
             if lock is not None:
                 lock.release()
@@ -471,7 +525,7 @@ class RecCheck:
     def record_failed(self, error) -> None:
         """Recording didn't start: the quick items now (the crash report carries them), one message with the causes."""
         items = self._quick(True)
-        items["obs"] = obs_item(self.installed(), False, str(error))
+        items["obs"] = self.last_start = obs_item(self.installed(), False, str(error))
         self._set(items)
         self._toast(skip={"obs"})
 
@@ -481,6 +535,7 @@ class RecCheck:
         self.session += 1
         items = self._quick(True)
         items["obs"] = obs_item(True, True, recording=True)
+        self.last_start = item("obs", "ok", "Started fine at the last Apex start")
         items["game"] = game_item(self.s, True)
         self._set(items)
         self._toast()
