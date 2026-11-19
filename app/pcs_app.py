@@ -10,9 +10,8 @@ Command line:  PCS-Scanner.exe                 the window (+ tray)
                PCS-Scanner.exe --scan FILE... [--out DIR]   scan without a window (used for every scan)
                PCS-Scanner.exe --selftest OUT  used by the build to check the .exe
 
-Results (.scan.json + .feed.json) go to the team hub and/or a "PCS Scans" folder in the player's own Drive, shared
-with the coach. The app only asks for Google's drive.file permission: it can see and change only the files it
-created itself.
+Results (.scan.json + .feed.json) go to the team hub. Without a hub address they stay on this PC until the player
+joins the hub (Google Drive results were removed: leaving-Drive plan, 2026). Google sign-in is for YouTube uploads.
 """
 import os, sys, time, threading, traceback, logging, multiprocessing, subprocess, webbrowser
 
@@ -380,8 +379,7 @@ def main():
     def setup(root):
         if not autorec:
             return
-        b.auto = autorec.AutoRecorder(root, core.drive_upload_quiet, b.say,
-                                      signin=lambda: (win.show(), b.signin()),
+        b.auto = autorec.AutoRecorder(root, b.say,
                                       youtube_service=lambda: core.youtube_service(interactive=False),
                                       yt_signin=lambda: (win.show('settings'), b.yt_signin()))
         if not b.auto.s.player:
@@ -471,7 +469,6 @@ def main():
         b.set_start_with_windows(b.auto.s.start_with_windows if b.auto else True)   # keeps the shortcut on this exe
 
     def background_checks():
-        b.check_google()
         b.check_coach()
         b.check_youtube()
         told = None

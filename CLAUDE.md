@@ -2,7 +2,7 @@
 
 Windows app for the Apex Legends team Project Conquerors (PCS), coached by Blakey. It records Apex with its own
 private OBS, scans the recordings (drop, landing, rings, harvesters, kill feed, sound cues), sends the results to
-the team's Drive or hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
+the team hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
 
 Blakey is the coach and the only person who decides what ships. He is a capable Python reader but not the one
 writing this code: explain outcomes in plain words, not internals.
@@ -35,7 +35,7 @@ scanner/pcs_ring.py, pcs_respawn.py, pcs_bars.py, pcs_mapicons.py, pcs_fights.py
 pcs_ranked.py           more readers (ring circles, respawns, own bars, care packages, fights, heals, minimap, RP)
 scanner/pcs_maps.json, pcs_fonts.json, pcs_banner.json, pcs_ranked.json, rank_rp.npy   reference data it ships with
 app/pcs_app.py          entry point: single instance, tray, window (pywebview), Tk toasts, updater finish
-app/pcs_core.py         paths, settings, Google Drive / YouTube sign-in, update check + install, run_scan
+app/pcs_core.py         paths, settings, YouTube sign-in, update check + install, run_scan
 app/pcs_server.py       localhost HTTP API + static web UI (token-protected), Backend class
 app/pcs_levels.py       loudness per track, fight and mic-peak detection for the review player
 app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket), core (Recorder),
@@ -156,12 +156,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
 - **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, "Your choices", team hub (one paste of the
-  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log),
-  Google (optional once on the hub). Choices (coach's decisions 18 Nov 2026), each applied at once by
+  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log).
+  No Google step (no Drive). Choices (coach's decisions 18 Nov 2026), each applied at once by
   `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
   start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
   mic recorded, "Send my mic track" on, `share_tracks`), comms transcripts Yes / No (`transcript_consent`, default
-  off; see "Comms transcripts"). Shown until name + (hub or Google) + both questions answered
+  off; see "Comms transcripts"). Shown until name + hub + both questions answered
   (`share_asked`, `transcript_asked`; changing either switch in Settings counts too), or hidden.
 - **Teammates' mic tracks** (`pcs_recorder/teamtracks.py`, hub `/api/team-tracks`, `PUT /api/me/sharing`): with
   `share_tracks` (plus comms consent, mic on, "Send my mic track" on) the answer goes to the hub and the teammates'
@@ -203,10 +203,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
-- **Results to hub and Drive**: with a hub address set, results go to the hub only (Drive is not used, even signed
-  in: leaving-Drive plan, coach's decision 18 Nov 2026; Home shows "Results: Team hub", setup has no Drive step,
-  Settings hides the Drive sign-in and the coach's address); without one, to Drive. A recording is "uploaded" once its
-  destination took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+- **Results to the hub**: results go to the team hub only. Google Drive results were removed 19 Nov 2026
+  (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
+  Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent
+  yet: no team hub", one Activity line, no pop-up) and are sent once the player joins; Home and Settings show
+  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) and an old `google_token.json` are left
+  alone and never read; `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
@@ -239,10 +241,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   others may be used alone (controller players).
 - **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
   No coach address or account name is built into the exe (a security review found one in `build.json`; removed
-  18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
-  player types in Settings (`coach_email`, once per address: `shared_with`; shown only without a hub, never decides
-  the role): it is how the coach reads the Drive results of players without a hub. Coach-only: importing recordings
-  by hand.
+  18 Nov 2026, `test_no_personal_email_in_app` guards it). The Settings field "Coach's Google email" (`coach_email`)
+  was removed 19 Nov 2026 with the Drive results. Coach-only: importing recordings by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file

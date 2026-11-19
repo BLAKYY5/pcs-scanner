@@ -26,6 +26,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import pcs_core as core
 from pcs_recorder import labels
+from pcs_recorder.core import NoHub
 
 WEB = Path(core.HERE) / "web"
 VIDEO_EXT = (".mp4", ".mkv", ".mov")
@@ -221,8 +222,7 @@ class Backend:
     def __init__(self, auto=None):
         self.auto = auto                                   # pcs_recorder.runtime.AutoRecorder or None
         self.messages = collections.deque(maxlen=200)      # shown on the Home page
-        self.google = "checking"                           # ok | expired | none | checking
-        self.youtube = "checking"                          # same, for the YouTube upload sign-in
+        self.youtube = "checking"                          # ok | expired | none | checking: the YouTube sign-in
         self.update = None                                 # (tag, exe_url, page) when a new version exists
         self._update_lock = threading.Lock()               # one update download at a time
         self.update_state = None                           # the window's "Updating" screen (see install_update)
@@ -245,14 +245,6 @@ class Backend:
     # ------------------------------------------------------------- messages
     def say(self, text: str) -> None:
         self.messages.append({"t": time.time(), "text": str(text)})
-
-    # ------------------------------------------------------------- Google
-    def check_google(self) -> None:
-        try:
-            ok = core.drive_service(interactive=False) is not None
-        except Exception:
-            ok = False
-        self.google = "ok" if ok else ("expired" if os.path.exists(core.TOKEN_F) else "none")
 
     def check_update(self, min_age_s: float = 0) -> None:
         """Ask GitHub for a newer release (60 requests/hour allowed without sign-in: far below what this uses)."""
@@ -520,21 +512,6 @@ class Backend:
             running = []
         return {"current": getattr(s, "voice_app", "discord"), "exe": getattr(s, "voice_exe", ""), "running": running}
 
-    def signin(self) -> None:
-        def go():
-            try:
-                if os.path.exists(core.TOKEN_F) and core.drive_service(interactive=False) is None:
-                    os.remove(core.TOKEN_F)
-                core.drive_service(True)
-                self.google = "ok"
-                self.say("Signed in with Google.")
-                if self.auto:
-                    self.auto.rec.next_upload = 0
-            except Exception as e:
-                self.say(f"Google sign-in failed: {e}")
-        threading.Thread(target=go, daemon=True).start()
-
-    # ------------------------------------------------------------- library
     def library(self) -> list[dict]:
         items: dict[str, dict] = {}
         rec_index = {}
@@ -834,14 +811,15 @@ class Backend:
                 scan, feed = scan_files(p)
                 files = [x for x in (scan, feed) if x]
                 try:
-                    if self.auto:
-                        where = self.auto.sender.upload(files)
-                    else:
-                        where = ["Google Drive"] if core.drive_upload_quiet([str(x) for x in files]) else []
+                    if not self.auto:                    # no recorder in this process: nothing sends results
+                        raise ConnectionError("the recorder isn't running")
+                    where = self.auto.sender.upload(files)
                     note = getattr(where, "hub_note", "")
-                    self.say(f"Scan of {Path(p).name} done" + (f", sent to {' and '.join(where)}." if where else
-                                                                 " (not sent: sign in with Google).")
+                    self.say(f"Scan of {Path(p).name} done, sent to {' and '.join(where) or 'the team hub'}."
                              + (f" {note}." if note else ""))
+                except NoHub:
+                    self.say(f"Scan of {Path(p).name} done. Not sent: no team hub yet. Join your team's hub "
+                             "(Home → Get set up) to send results.")
                 except Exception as e:
                     self.say(f"Scan of {Path(p).name} done, but not sent: {e}")
         except Exception:
@@ -887,8 +865,8 @@ class Backend:
         return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
-                "role": core.SETTINGS.get("role", ""), "google": self.google, "coach": getattr(self, "coach", False),
-                "teamLink": core.SETTINGS.get("team_link", ""), "coachEmail": core.SETTINGS.get("coach_email", ""),
+                "role": core.SETTINGS.get("role", ""), "coach": getattr(self, "coach", False),
+                "teamLink": core.SETTINGS.get("team_link", ""),
                 "icons": os.path.getmtime(core.ICONS_F) if os.path.exists(core.ICONS_F) else None,
                 "iconsFromHub": self.icons_from_hub(),     # then the team link is optional
                 "update": {"tag": self.update[0], "page": self.update[2]} if self.update else None,
@@ -1278,11 +1256,7 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
-        if "coach_email" in body:
-            mail = str(body["coach_email"] or "").strip()
-            if mail and not core.valid_email(mail):
-                raise ValueError("The coach's Google address doesn't look right. Check it and try again.")
-            core.SETTINGS["coach_email"] = mail
+        body.pop("coach_email", None)       # field removed (coach role = hub key); an old page may still send it
         if "team_link" in body:
             link = str(body["team_link"]).strip()
             if link and not core.drive_link_id(link):
@@ -1701,9 +1675,6 @@ class Server:
                         return self._json(b.watch_post(path.rsplit("/", 1)[1], body))
                     if path == "/api/label":
                         return self._json({"label": b.set_label(body.get("id", ""), body.get("label") or None)})
-                    if path == "/api/signin":
-                        b.signin()
-                        return self._json({"ok": True})
                     if path == "/api/update":
                         why = b.start_update(show=True)            # the window's button: the window comes back
                         return self._json({"error": why}, 409) if why else self._json({"ok": True, "updateState": b.update_state})

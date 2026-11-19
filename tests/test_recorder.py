@@ -70,8 +70,7 @@ class FakeHub:
 
     def upload(self, files):
         if self.down:
-            from pcs_recorder.core import NeedsSignIn
-            raise NeedsSignIn("Your Google sign-in has expired")
+            raise ConnectionError("the team hub didn't answer")
         self.uploads.append([f.name for f in files])
         return ["the team hub"]
 
@@ -850,7 +849,7 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
-    assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
+    assert fails[0][3] is None and "didn't answer" in fails[0][1]
     hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
@@ -985,7 +984,7 @@ def test_upload_part_never_delays_a_recording():
         mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
         apex = {"on": False}
         obs, ui = FakeOBS(s.folder_path), FakeUI()
-        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        sender = Sender(s, stop=lambda: apex["on"])
         r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
         r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
         r.tick()                                                 # the upload starts in its own thread
@@ -3007,7 +3006,8 @@ def test_hub_answer_shown_on_recording():
 
 
 class HubThenDrive(FakeHub):
-    """A Sender stand-in: Drive takes the results, the hub fails with `fail` (a HubError kind) until it is None.
+    """A Sender stand-in for results an older version sent to Google Drive only: the first upload "goes through"
+    without the hub (hub_ok False = "Not on hub yet"), the hub fails with `fail` (a HubError kind) until it is None.
     `blocked` = what Sender.hub_blocked() would say (refused key, 429 wait)."""
 
     def __init__(self):
@@ -3017,7 +3017,7 @@ class HubThenDrive(FakeHub):
     def upload(self, files):
         from pcs_recorder.runtime import Sent
         out = Sent(["Google Drive"])
-        out.drive_ok, out.hub_ok, out.hub_why = True, False, "Hub not reachable"
+        out.hub_ok, out.hub_why = False, "Hub not reachable"
         out.hub_note = "Not sent to hub: the team hub didn't answer"
         return out
 
@@ -3058,7 +3058,7 @@ def test_hub_retried_when_only_drive_took_it():
     r._retry_uploads()
     assert r.idx["k0"].status == "uploaded" and r.hub_state("k0") == {"hub": "pending", "why": "Hub not reachable"}
     assert any(t == "Results sent" and "by itself" in m for t, m, *_ in ui.notes), ui.notes
-    assert retention.load_sent(r.idx)["k0"]["drive"] == "sent"                         # kept on disk
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                        # kept on disk
     r._retry_hub()
     assert len(hub.hub_calls) == 1 and r.hub_state("k0")["hub"] == "pending"
     r._retry_hub(); r._retry_hub()
@@ -3145,18 +3145,52 @@ def test_hub_and_drive_both_fine_or_no_hub():
     r, hub, ui, clock = _hub_recorder()
 
     def both(files):
-        out = Sent(["the team hub", "Google Drive"])
-        out.hub_ok, out.drive_ok, out.hub_note = True, True, "Sent to hub: 2 games"
+        out = Sent(["the team hub"])
+        out.hub_ok, out.hub_note = True, "Sent to hub: 2 games"
         return out
     hub.upload = both
     r._retry_uploads()
-    assert r.sent["k0"] == {"hub": "sent", "why": "", "drive": "sent"}
+    assert r.sent["k0"] == {"hub": "sent", "why": ""}
     r._retry_hub()
     assert not hub.hub_calls
     r, hub, ui, clock = _hub_recorder()
-    hub.upload = lambda files: Sent(["Google Drive"])                                  # no hub address
+    hub.upload = lambda files: Sent(["somewhere else"])                                # hub not tried
     r._retry_uploads()
     assert r.hub_state("k0")["hub"] == ""
+
+
+def test_no_hub_results_stay_on_pc():
+    """No hub address (Google Drive results removed): the results stay on this PC, the player is told once in
+    Activity (no pop-up), the recording says why; joining the hub sends them. An old sent.json with a "drive" field
+    still loads."""
+    from pcs_recorder.core import NoHub
+    from pcs_recorder.runtime import Sender, Sent
+    r, hub, ui, clock = _hub_recorder(n=2)
+    r.s.hub_url = ""
+    sender = Sender(r.s)
+    try:
+        sender.upload([Path("x.scan.json")])
+        raise AssertionError("no NoHub")
+    except NoHub as e:
+        assert "No team hub yet" in str(e) and "stay on this PC" in str(e)
+    said = []
+    ui.activity = said.append
+    r.hub = sender
+    for _ in range(3):
+        r.next_upload = 0
+        r._retry_uploads()
+    assert all(e.status == "scanned" for e in r.idx.values())
+    assert r.idx["k0"].note == "not sent yet: no team hub"
+    assert len(said) == 1 and "No team hub yet" in said[0] and not ui.notes, (said, ui.notes)   # once, no pop-up
+    r.s.hub_url = "http://hub.test:8420"                                              # joined
+    hub.upload = lambda files: (lambda o: (setattr(o, "hub_ok", True), o)[1])(Sent(["the team hub"]))
+    r.hub = hub
+    r.next_upload = 0
+    r._retry_uploads(); r._retry_uploads()
+    assert all(e.status == "uploaded" for e in r.idx.values()), r.idx
+    import json
+    retention.SENT_FILE.write_text(json.dumps({"k0": {"hub": "pending", "why": "", "drive": "sent"}}))
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                       # older file still read
 
 
 def _silence_recorder(levels, tracks=("game", "discord", "mic"), consent=True, mutes=()):
