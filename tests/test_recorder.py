@@ -525,7 +525,6 @@ def test_eec_drops_confirm_scrims():
 def test_poi_names_and_aliases():
     """POI names: a name, an old name, an alias or EEC's 'NAME (6)' all resolve to the same POI id (scans keep ids,
     so a rename never splits history); a name two POIs share resolves to none; the EEC check compares ids. Fake map."""
-    import threading
     from pcs_recorder import eec
     keep = eec._POIS, eec._ALIASES
     try:
@@ -545,34 +544,11 @@ def test_poi_names_and_aliases():
         assert eec.compare_drop("ZZ", "Fake Top", "zz-south")[0] == "different"
         assert eec.compare_drop("ZZ", "Glass", "zz-east")[0] == "near"              # unknown name: old rule
         assert eec.compare_drop("ZZ", "Somewhere", "zz-east")[0] is None
-        # shown names: the hub's language only while its English name is ours
-        keys = {"pois:zz-north": ["Fake North", "Nord factice"], "pois:zz-east": ["Old Glass", "Verre"]}
-        shown = eec.shown_names(keys)
-        assert shown["zz-north"] == "Nord factice" and shown["zz-east"] == "Glass Yard"
-        assert eec.shown_names(None)["zz-south"] == "The Fake Mill"
-        # the hub is asked in the background, once per 6 h; the page gets English until then
+        # POI names are game words: English in every app language; the hub is never asked for FR / KO names
         calls = []
-        done, go = threading.Event(), threading.Event()
-
-        def fetch(url, path):
-            calls.append((url, path))
-            go.wait(5)                                                              # the hub answers late
-            done.set()
-            return {"lang": "fr", "keys": keys}
-        eec._HUB_NAMES.update(url="", at=0.0, lang="en", keys={}, busy=False)
-        first = eec.app_poi_names("http://hub.test:8420", fetch)
-        assert first["lang"] == "en" and first["names"]["zz-north"] == "Fake North"   # the page never waits
-        go.set()
-        assert done.wait(5)
-        for _ in range(50):
-            if not eec._HUB_NAMES["busy"]:
-                break
-            time.sleep(0.02)
-        again = eec.app_poi_names("http://hub.test:8420", fetch)
-        assert again["lang"] == "fr" and again["names"]["zz-north"] == "Nord factice"
-        assert calls == [("http://hub.test:8420", "/api/names")]
-        assert eec.app_poi_names("", fetch)["lang"] == "en"                          # no hub: English
-        eec._HUB_NAMES.update(url="", at=0.0, lang="en", keys={}, busy=False)
+        d = eec.app_poi_names("http://hub.test:8420", lambda url, path: calls.append(path) or {"lang": "fr"})
+        assert d["lang"] == "en" and d["names"]["zz-north"] == "Fake North" and d["names"]["zz-south"] == "The Fake Mill"
+        assert calls == [] and not hasattr(eec, "shown_names")
     finally:
         eec._POIS, eec._ALIASES = keep
 

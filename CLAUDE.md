@@ -84,7 +84,7 @@ BtbN deletes daily builds after about two weeks, month-end ones stay. To bump:
 gives the zip name and its `sha256:`; put all three in `build.yml`, and before merging scan a recording with the test
 build and compare it with a scan from the previous build (same games and values).
 
-Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is released).
+Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is released).
 
 ## How the pieces work (things that bit us)
 
@@ -428,9 +428,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
   game doesn't label (Bean, Jurassic, Trident, Canal Plaza...) keep their names. Scans store POI ids, which never
   change, so old scans show the new names and nothing splits. `eec.resolve` finds a POI from any name (EEC's
   'MIRAGE A TROIS (6)', an alias; a name two POIs share = none) and `compare_drop` compares ids. The page asks
-  `/api/pois` for names: the game's English names, or the player's language (FR / KO) from the team hub's names
-  table (`GET /api/names`, asked in the background at most every 6 h) while its English name is ours; French and
-  Korean text is never in this repo. Builder (private): `pcs-handoff\tools\poi\game_pois.py`.
+  `/api/pois` for names: always the game's English names, in every app language (coach's rule 19 Nov 2026: game
+  words stay English; the hub's Loot Book has its own EN / FR / KO switch). The app never asks the hub's names table. Builder (private): `pcs-handoff\tools\poi\game_pois.py`.
 - **Kill-feed weapons**: `pcs_hud.Weapons` compares each new feed line, at full size, with the game's own weapon
   icons (the feed draws them mirrored) and adds `weapon`, `weaponName`, `weaponScore`, `arrow`, `event` to the line
   (red arrow = knock, none = kill). The icons are a private file, `pcs_weapons.npz`: git-ignored, never bundled,

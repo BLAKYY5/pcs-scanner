@@ -25,8 +25,6 @@ from __future__ import annotations
 import json
 import re
 import sys
-import threading
-import time
 import unicodedata
 from pathlib import Path
 
@@ -296,45 +294,11 @@ def resolve(mp: str | None, text: str | None) -> str | None:
     return None
 
 
-HUB_NAMES_EVERY = 6 * 3600
-_HUB_NAMES = {"url": "", "at": 0.0, "lang": "en", "keys": {}, "busy": False}
-
-
-def shown_names(keys: dict | None = None) -> dict:
-    """{poi id: name to show} for the app: our (game) name, or the player's language from the team hub's names table
-    (`GET /api/names` `keys`: {"pois:<id>": [en, name]}) while its English name is still ours (a table made for an
-    older name is not used). French / Korean text comes only from the hub, never from this public repo."""
-    out = {}
-    for _m, ps in pois().items():
-        for pid, name in ps.items():
-            k = (keys or {}).get("pois:" + pid)
-            out[pid] = k[1] if isinstance(k, list) and len(k) == 2 and k[0] == name and isinstance(k[1], str) and k[1] \
-                else name
-    return out
-
-
-def app_poi_names(hub_url: str, fetch=None) -> dict:
-    """{"names": {poi id: name}, "lang"}. The hub's table is asked at most every 6 h, in the background (the page
-    never waits on the hub); no hub = English names."""
-    h = _HUB_NAMES
-    if hub_url != h["url"]:
-        h.update(url=hub_url, at=0.0, lang="en", keys={})
-    if hub_url and not h["busy"] and time.time() - h["at"] > HUB_NAMES_EVERY:
-        h["busy"] = True
-
-        def run():
-            try:
-                from . import hub as _hub
-                d = (fetch or _hub.get_json)(hub_url, "/api/names")
-                if isinstance(d, dict) and h["url"] == hub_url:
-                    h.update(keys=d.get("keys") if isinstance(d.get("keys"), dict) else {},
-                             lang=d.get("lang") if d.get("lang") in ("en", "fr", "ko") else "en")
-            except Exception:                              # old hub (404), no network: English names, ask again later
-                pass
-            finally:
-                h["at"], h["busy"] = time.time(), False
-        threading.Thread(target=run, daemon=True, name="poi-names").start()
-    return {"names": shown_names(h["keys"]), "lang": h["lang"]}
+def app_poi_names(hub_url: str = "", fetch=None) -> dict:
+    """{"names": {poi id: name}, "lang": "en"} for the app's page. POI names are game words: they stay as the game
+    writes them in English in every app language (coach's rule, 19 Nov 2026: "keep any game related terms in
+    English"), so the team hub's FR / KO names table is not asked here (the hub's Loot Book has its own switch)."""
+    return {"names": {pid: name for ps in pois().values() for pid, name in ps.items()}, "lang": "en"}
 
 
 def poi_label(mp: str | None, poi_id: str | None) -> str:

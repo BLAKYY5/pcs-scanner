@@ -1092,8 +1092,7 @@ class Backend:
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
 
     def poi_names(self) -> dict:
-        """POI names for the page: the game's names (pcs_maps.json), in the player's language when the team hub has
-        the names table (pcs_recorder.eec.app_poi_names)."""
+        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words)."""
         from pcs_recorder import eec
         return eec.app_poi_names(self.auto.s.hub_url if self.auto else "")
 
