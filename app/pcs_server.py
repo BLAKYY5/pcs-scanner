@@ -26,6 +26,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
 import pcs_core as core
+import pcs_i18n as i18n
 from pcs_recorder import labels
 from pcs_recorder.core import NoHub
 
@@ -42,9 +43,25 @@ REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "au
               "yt_enabled", "yt_privacy", "yt_audio", "yt_scrims_only", "yt_gap_min",
               "yt_when", "night_from", "night_to", "night_idle_min", "night_shutdown",
               "yt_team", "yt_wait_eec", "yt_wait_eec_h", "nogame_keep_h",
-              "min_record_min")
+              "min_record_min", "hl_chain_s", "hl_multi_min", "hl_double_s")
 TRACK_LABEL = {"game": "Game", "discord": "Discord", "mic": "Microphone"}
 MAX_BODY = 4 << 20                  # largest request body the page may send (bytes)
+
+
+def regroup_highlights(scan_games: list, games: list, s) -> None:
+    """Highlights with the player's own rules (Settings -> Highlights): the scan's takedowns grouped again, so a changed
+    rule shows at once in the review (pcs_highlights.find). Scans without takedowns keep what they have."""
+    try:
+        import pcs_highlights
+        rule = pcs_highlights.parse_rules(s.highlight_rules()) if s is not None else pcs_highlights.rules()
+    except Exception:
+        return
+    for g, out in zip(scan_games, games):
+        if isinstance(g.get("takedowns"), list):
+            try:
+                out["highlights"] = pcs_highlights.find(g["takedowns"], g.get("fights"), g.get("lastAlive"), rule)
+            except Exception:
+                pass
 
 
 def to_recycle_bin(path: str) -> None:
@@ -148,7 +165,8 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "carePackages", "strongholds",
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
                "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
-               "ammoEvents", "ammoSummary")   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
+               "ammoEvents", "ammoSummary",
+               "highlights")             # pcs_highlights: key plays [{t0, t1, kind, count, score...}], best first   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
 
 
 # the game's minimap transform per map (world -> picture), as in scanner/pcs_minimap.MAPS and the hub's minimaps
@@ -416,7 +434,6 @@ class Backend:
         threading.Thread(target=go, daemon=True).start()
 
     # ------------------------------------------------------------- Google account for the team hub
-    GOOGLE_LATER_S = 7 * 86400                         # "Not now" on Home: asked again a week later
 
     def google_to_hub(self, force: bool = False) -> str:
         """Once per hub + key (again after a new sign-in, `force`): send the Google ID token to the hub, which keeps
@@ -459,22 +476,25 @@ class Backend:
 
     def google_ask(self) -> bool:
         """Home asks a player with a YouTube-only sign-in to sign in again, once the hub said it doesn't know their
-        Google account (an older hub never asks), at a calm moment: not while Apex runs or a game records, not
-        within a week of "Not now"."""
+        Google account (an older hub never asks), at a calm moment: not while Apex runs or a game records, and not
+        again after "Not now" until the next app update (coach, 20 Nov 2026: `google_later` = the version that was
+        running when the player pressed it)."""
         if getattr(self, "_signin", None) != "youtube" or getattr(self, "_google_known", None) is not False:
             return False
-        try:
-            if time.time() < float(core.SETTINGS.get("google_later") or 0):
-                return False
-        except (TypeError, ValueError):
-            pass
+        if core.SETTINGS.get("google_later") == self._app_version():
+            return False
         a = self.auto
         if a and getattr(a.rec, "current", None) is not None:
             return False
         return not self.apex_now()
 
+    @staticmethod
+    def _app_version() -> str:
+        return str(core.BUILD.get("version") or "dev")
+
     def google_later(self) -> None:
-        core.SETTINGS["google_later"] = time.time() + self.GOOGLE_LATER_S
+        """Home's "Not now": the notice stays hidden until the app runs another version (the next update)."""
+        core.SETTINGS["google_later"] = self._app_version()
         core.save_settings()
 
     def _rec_key(self, item_id: str) -> str:
@@ -691,6 +711,7 @@ class Backend:
                                 # what the scanner read each second: [t, ring label, spectating, x, y, z, speed]; without
                                 # the debug overlay the HUD minimap's reads every 3 s (seenFrom "minimap")
                                 "seen": seen, "seenFrom": seen_from})
+            regroup_highlights(d.get("games", []), games, self.auto.s if self.auto else None)
             it["games"] = games
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
@@ -933,7 +954,7 @@ class Backend:
                    # the audio tracks' share of gb_per_hour, so the Quality slider shows the same figure as Home
                    "audioKbps": max(0, round(s.gb_per_hour * 8e6 / 3600 - s.bitrate_mbps * 1000))}
         up = getattr(a.rec, "youtube", None) if a else None
-        return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""),
+        return {"version": core.BUILD.get("version"), "player": core.SETTINGS.get("player", ""), "language": i18n.language(),
                 "apex": self.apex_now(),                   # the window polls less often while the game runs
                 "youtube": {"signin": self.youtube, "status": up.status if up else "", "available": up is not None},
                 "accountAsk": self.google_ask(),            # Home: sign in again so the hub knows your Google account
@@ -1108,6 +1129,11 @@ class Backend:
         """The Map panel's picture and transform for a map (pcs_recorder.minimaps): downloaded once with the key."""
         from pcs_recorder import minimaps
         return minimaps.get(self.auto.s.hub_url if self.auto else "", code)
+
+    def poi_names(self) -> dict:
+        """POI names for the page: the game's names (pcs_maps.json), English in every app language (game words)."""
+        from pcs_recorder import eec
+        return eec.app_poi_names(self.auto.s.hub_url if self.auto else "")
 
     def squad_paths(self, q: dict) -> dict:
         """Players' paths in one game from the hub (pcs_recorder.squadpaths): `gameKey`, or our recording `id` + `jump`."""
@@ -1329,6 +1355,18 @@ class Backend:
             bk = hubbackup.validate(bk.get("hub_backup_dir"), bk.get("hub_backup_keep"))
         if "player" in body:
             core.SETTINGS["player"] = str(body["player"]).strip()
+        if "language" in body:                              # the app's language: the page reloads in it
+            code = str(body.pop("language"))
+            if not any(l["code"] == code for l in i18n.languages()):
+                raise ValueError("Unknown language")
+            core.SETTINGS["language"] = code
+            i18n.set_language(code)
+            icon = getattr(getattr(self.auto, "ui", None), "icon", None)
+            if icon:
+                try:
+                    icon.update_menu()                       # the tray menu's words
+                except Exception:
+                    pass
         body.pop("coach_email", None)       # field removed (coach role = hub key); an old page may still send it
         if "team_link" in body:
             link = str(body["team_link"]).strip()
@@ -1755,6 +1793,8 @@ class Server:
                         return self._file(*pic) if pic else self._json({"error": "not found"}, 404)
                     if path.startswith("/api/minimap/"):
                         return self._json(b.minimap(path.split("/")[3]))
+                    if path == "/api/pois":                      # POI names (game names; hub language if any)
+                        return self._json(b.poi_names())
                     if path == "/api/squadpaths":                # teammates' paths on the map (minimap.js)
                         return self._json(b.squad_paths(q))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
@@ -1771,6 +1811,8 @@ class Server:
                         return self._video(path.split("/")[2])
                     if path == "/api/state":
                         return self._json(b.state())
+                    if path == "/api/i18n":                     # the page's string tables (i18n.js, before it draws)
+                        return self._json(i18n.tables())
                     if path == "/api/library":
                         return self._json(b.library())
                     if path == "/api/youtube/queue":

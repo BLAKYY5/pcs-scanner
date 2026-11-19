@@ -468,9 +468,9 @@ def test_eec_drops_confirm_scrims():
     res = eec.results(lobby, "PCS")
     assert [g["drop"] for g in res["games"]] == ["Staging", "Staging", "City Hall", "City Hall"]
     assert eec.compare_drop("WE", "Staging", "we-staging")[0] == "same"
-    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] in ("near", None)
+    assert eec.compare_drop("ED", "Canal", "ed-canal-plaza")[0] == "same"           # an alias in our map table
     assert eec.compare_drop("WE", "Staging", "we-thermal")[0] == "different"
-    assert eec.compare_drop("WE", "Skyhook West", "we-staging")[0] is None          # not in our map table: no verdict
+    assert eec.compare_drop("WE", "Nowhere Plaza", "we-staging")[0] is None         # not in our map table: no verdict
     assert eec.compare_drop("WE", "", "we-staging")[0] is None
 
     folder = TMP / f"eecdrops-{time.time_ns()}"
@@ -515,6 +515,63 @@ def test_eec_drops_confirm_scrims():
     labels.set_label(idx2["b"].path, "ranked")
     assert labels.explain_block([idx2["b"].path], [youtube.scan_of(idx2["b"])], chk2)["source"] == "hand"
     labels.FILE.unlink(missing_ok=True)
+
+
+def test_poi_names_and_aliases():
+    """POI names: a name, an old name, an alias or EEC's 'NAME (6)' all resolve to the same POI id (scans keep ids,
+    so a rename never splits history); a name two POIs share resolves to none; the EEC check compares ids. Fake map."""
+    from pcs_recorder import eec
+    keep = eec._POIS, eec._ALIASES
+    try:
+        eec._POIS = {"ZZ": {"zz-north": "Fake North", "zz-south": "The Fake Mill", "zz-east": "Glass Yard",
+                            "zz-west": "Glass Yards East"}}
+        eec._ALIASES = {"ZZ": {"zz-north": ["Old Fake North", "Fake Top"], "zz-south": [], "zz-east": ["Shared"],
+                               "zz-west": ["Shared"]}}
+        assert eec.resolve("ZZ", "zz-north") == "zz-north"
+        assert eec.resolve("ZZ", "FAKE NORTH (6)") == "zz-north"
+        assert eec.resolve("ZZ", "Old Fake North") == "zz-north"
+        assert eec.resolve("ZZ", "fake top") == "zz-north"
+        assert eec.resolve("ZZ", "Fake Mills") == "zz-south"                       # no 'The', plural s
+        assert eec.resolve("ZZ", "Shared") is None                                  # two POIs: none
+        assert eec.resolve("ZZ", "Somewhere") is None
+        assert eec.resolve("QQ", "Fake North") is None                              # other map
+        assert eec.compare_drop("ZZ", "OLD FAKE NORTH (3)", "zz-north")[0] == "same"
+        assert eec.compare_drop("ZZ", "Fake Top", "zz-south")[0] == "different"
+        assert eec.compare_drop("ZZ", "Glass", "zz-east")[0] == "near"              # unknown name: old rule
+        assert eec.compare_drop("ZZ", "Somewhere", "zz-east")[0] is None
+        # POI names are game words: English in every app language; the hub is never asked for FR / KO names
+        calls = []
+        d = eec.app_poi_names("http://hub.test:8420", lambda url, path: calls.append(path) or {"lang": "fr"})
+        assert d["lang"] == "en" and d["names"]["zz-north"] == "Fake North" and d["names"]["zz-south"] == "The Fake Mill"
+        assert calls == [] and not hasattr(eec, "shown_names")
+    finally:
+        eec._POIS, eec._ALIASES = keep
+
+
+def test_maps_game_names():
+    """pcs_maps.json: every POI has a name, aliases are a list of other names (never the name itself), no two POIs of
+    a map share a name or alias, and the EEC names seen in our lobbies resolve to the right POI."""
+    import json as _json
+    from pcs_recorder import eec
+    maps = _json.loads((Path(__file__).resolve().parent.parent / "scanner" / "pcs_maps.json").read_text(encoding="utf-8"))
+    for mp, d in maps.items():
+        seen = {}
+        for p in d["pois"]:
+            assert p["name"], p["id"]
+            al = p.get("aliases", [])
+            assert isinstance(al, list) and all(isinstance(a, str) and a for a in al), p["id"]
+            assert p["name"] not in al, p["id"]
+            for n in [p["name"], *al]:
+                k = eec.norm(n)
+                assert seen.get(k, p["id"]) == p["id"], f"{mp}: {n} on {seen.get(k)} and {p['id']}"
+                seen[k] = p["id"]
+    for mp, name, pid in [("WE", "SKYHOOK WEST (2)", "we-skyhook"), ("WE", "Skyhook East", "we-skyhook-east"),
+                          ("WE", "MIRAGE A TROIS (6)", "we-mirage"), ("WE", "STACKS (14)", "we-stacks"),
+                          ("ED", "Canal", "ed-canal-plaza"), ("ED", "Uptown", "ed-vibe-isle"),
+                          ("SP", "Mills", "sp-the-mill"), ("SP", "Cascades", "sp-cascade-falls"),
+                          ("SP", "Pylon", "sp-wattsons-pylon"), ("SP", "Zeus Station", "sp-zeus-station"),
+                          ("KC", "Cage", "kc-cage")]:
+        assert eec.resolve(mp, name) == pid, (mp, name)
 
 
 def test_eec_drops_refuse_tournament():
@@ -2611,6 +2668,72 @@ def test_own_bars_and_knocks():
     assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
 
 
+def test_highlights_key_plays():
+    """pcs_highlights: the player's own takedowns need two sources (kill line in his colour + kills number, a fight or
+    damage); a line captured twice counts once; a kill line the kills number did not follow is not his; a knock and its
+    kill are one enemy; chains of 8 s give multi-kills (3+), quick doubles (2 within 5 s), squad wipes (3 kills),
+    clutches (2 enemies while last alive, fight won); Settings regroup them; best first."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_highlights as H
+    assert H.parse_rules("8,3,5") == {'chainS': 8.0, 'multiMin': 3, 'doubleS': 5.0} == H.rules()
+    assert H.parse_rules("") == H.rules() and H.parse_rules("x,y") == H.rules()
+    assert H.parse_rules("99,1,40") == {'chainS': 30.0, 'multiMin': 2, 'doubleS': 30.0}
+    # the kills plate only shows once above 0: reads of the strip without it before count as 0
+    own = [(t, {'damage': 10}) for t in range(100, 110)] + [(t, {'kills': 1, 'damage': 80}) for t in range(112, 120)] + \
+          [(120.0, {'kills': 7, 'damage': 80})] + [(t, {'kills': 3, 'damage': 200}) for t in range(124, 130)]
+    assert H.counter_rises(own, 'kills', 0, 1e9) == [(112, 109, 1), (124, 119, 2)]      # one misread 7 never counts
+    assert H.counter_rises(own + [(131.0, {'kills': 2}), (132.0, {'kills': 2})], 'kills', 0, 1e9) == []   # went down
+    SQ = {'select': {'squad': [{'slot': 1, 'hue': 40, 'self': True}, {'slot': 2, 'hue': 180, 'self': False},
+                               {'slot': 3, 'hue': 77, 'self': False}]}}
+    def line(t, ev, hue=40, sig='a' * 36, weapon='r301', y=300):
+        return {'t': float(t), 'y': y, 'event': ev, 'weapon': weapon, 'killer': {'side': 'squad', 'hue': hue},
+                'victim': {'side': 'other'}, 'victimSig': sig}
+    fight = lambda a, b, res='won': {'t0': a, 't1': b, 'result': res, 'ours': {'knocks': 1, 'kills': 1}}
+    reads = lambda kills: [(float(t), {'kills': v, 'damage': 100 + 50 * v}) for t, v in kills]
+    # two knocks 3 s apart (one captured twice), both killed: a quick double; the teammate's kill line is not ours
+    lines = [line(200, 'knock', sig='1' * 36), line(202, 'knock', sig='3' * 36), line(203, 'knock', sig='2' * 36, weapon='flatline'),
+             line(207, 'kill', sig='1' * 36), line(208, 'kill', sig='2' * 36, weapon='flatline'), line(209, 'kill', hue=180)]
+    k = reads([(t, 0) for t in range(190, 206)] + [(t, 2) for t in range(210, 230)])
+    g = {'tStart': 0.0, **SQ, 'fights': [fight(199, 209)]}
+    td = H.takedowns(g, lines, k, 0, 1e9)
+    assert [(e['t'], e['kind']) for e in td] == [(200, 'knock'), (203, 'knock'), (207, 'kill'), (208, 'kill')], td
+    assert td[2]['sources'] == ['counter', 'damage', 'feed', 'fight']
+    hl = H.find(td, g['fights'], [])
+    assert len(hl) == 1 and hl[0]['kind'] == 'double' and hl[0]['count'] == 2 and hl[0]['t0'] == 200 and hl[0]['t1'] == 208
+    assert hl[0]['gaps'] == [3.0, 4.0, 1.0] and hl[0]['kills'] == 2 and hl[0]['knocks'] == 2
+    assert H.find(td, g['fights'], [], H.rules(8, 3, 2)) == []                            # stricter double: not one
+    # a kill line in our colour while the kills number holds still around it: a teammate's (or misread), dropped
+    still = reads([(t, 1) for t in range(290, 320)])
+    assert H.takedowns(g, [line(300, 'kill')], still, 0, 1e9) == []
+    # a single line with no second source never counts
+    assert H.takedowns({'tStart': 0.0, **SQ}, [line(300, 'knock')], [], 0, 1e9) == []
+    # kills the feed missed: the kills number + damage alone, three in a chain = multi-kill and squad wipe
+    k3 = [(float(t), {'kills': 0, 'damage': 100}) for t in range(380, 392)] + \
+         [(float(t), {'kills': 1, 'damage': 300}) for t in range(394, 398)] + \
+         [(float(t), {'kills': 3, 'damage': 500}) for t in range(401, 410)]
+    td3 = H.takedowns({'tStart': 0.0, **SQ}, [], k3, 0, 1e9)
+    assert [e['sources'] for e in td3] == [['counter', 'damage']] * 3, td3
+    h3 = H.find(td3, [], [])
+    assert h3[0]['kind'] == 'wipe' and h3[0]['tags'] == ['multi', 'wipe'] and h3[0]['count'] == 3
+    assert h3[0]['score'] > hl[0]['score']
+    # clutch: two enemies while no teammate card is alive, in a fight that ends won
+    bars = [(float(t), {'state': 'alive'}, [{'y': 1}, {'y': 2}], False) for t in range(500, 510)] + \
+           [(float(t), {'state': 'alive'}, [], False) for t in range(510, 530)]
+    assert H.last_alive(bars, 0, 1e9) == [[510.0, 529.0]]
+    tdc = [{'t': 515.0, 'kind': 'knock', 'sources': ['feed', 'fight']}, {'t': 519.0, 'kind': 'knock', 'sources': ['feed', 'fight']},
+           {'t': 522.0, 'kind': 'kill', 'sources': ['counter', 'fight']}]
+    assert [h['tags'] for h in H.find(tdc, [fight(512, 524, 'lost')], [[510.0, 529.0]])] == [['double']]   # lost: no clutch
+    hc = H.find(tdc, [fight(512, 524)], [[510.0, 529.0]])
+    assert hc[0]['kind'] == 'clutch' and hc[0]['tags'] == ['double', 'clutch'] and 'cards' in hc[0]['sources'] and hc[0]['t0'] == 510.0
+    # attach adds the fields to every game and never breaks a scan
+    games = [{'tStart': 0.0, **SQ, 'fights': [fight(199, 209)]}, {'tStart': 1000.0}]
+    H.attach(games, lines, k, [])
+    assert games[0]['highlights'][0]['kind'] == 'double' and games[1]['highlights'] == [] and games[1]['takedowns'] == []
+    bad = [{'tStart': 0.0, 'select': 'broken'}]
+    H.attach(bad, lines, k, [])
+    assert bad[0]['highlights'] == [] and 'highlightsError' in bad[0]
+
+
 def test_fights_and_ring_damage():
     """pcs_fights: ring damage from the red screen edges and health ticks (shield untouched); fights from our squad's
     kill-feed lines, own knocks and hits: kills decide, the player's own death counts, a wiped squad lost; one line
@@ -2785,6 +2908,95 @@ def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
     if slot == 2: a[1390:1402, 2300:2420:2] = 240
     if slot == 1: a[1390:1402, 2080:2240:2] = 240
     return a
+
+
+def _ban_tiles(d):
+    """A fake private icons file with two made-up legend tiles (smooth random grey, no game image) -> (path, tiles)."""
+    import numpy as np
+    from PIL import Image
+    rng = np.random.default_rng(7)
+    tiles = {}
+    for n in ('alpha', 'beta'):
+        low = rng.integers(20, 235, (8, 12)).astype(np.uint8)
+        tiles[n] = np.asarray(Image.fromarray(low).resize((95, 64), Image.BICUBIC)).clip(1, 255).astype(np.uint8)
+    p = os.path.join(d, 'icons.npz')
+    np.savez(p, **{'legend_' + k: v for k, v in tiles.items()}, legend_dummie=tiles['alpha'], r99=np.ones((5, 5), np.uint8))
+    return p, tiles
+
+
+def _ban_frame(a, tile, x0, y0, w, tag=False, sign=True):
+    """Draw a banned portrait as the game does: orange-red frame (top edge at y0, x0..x0+w), the tile inside at the
+    frame's scale, the round "no" sign under the middle, optionally a chance tag above (a roll candidate)."""
+    import numpy as np
+    from PIL import Image
+    import pcs_bans as B
+    OR = (232, 79, 60)
+    k = B.TILE / (w / B.SRC_W); h = int(w * 0.95)
+    up = np.asarray(Image.fromarray(tile).resize((int(tile.shape[1] / k), int(tile.shape[0] / k)), Image.BICUBIC))
+    box = a[y0 + 6:y0 + h, x0 + 6:x0 + w - 6]
+    ph, pw = min(box.shape[0], up.shape[0]), min(box.shape[1], up.shape[1])
+    box[:ph, :pw] = up[:ph, :pw, None]
+    a[y0:y0 + 4, x0:x0 + w] = OR; a[y0:y0 + h, x0:x0 + 4] = OR; a[y0:y0 + h, x0 + w - 4:x0 + w] = OR
+    if tag: a[y0 - 28:y0 - 6, x0:x0 + w] = OR
+    if sign:
+        xm, yc, R = x0 + w // 2, y0 + int(w * 1.12), int(w * 0.2)
+        yy, xx = np.ogrid[-R:R, -R:R]; rr = np.hypot(yy, xx)
+        reg = a[yc - R:yc + R, xm - R:xm + R]
+        reg[rr < R * 0.95] = OR; reg[rr < R * 0.7] = (5, 0, 0)
+    return a
+
+
+def test_legend_bans_reader():
+    """Legend bans (pcs_bans): a banned portrait (orange-red frame + "no" sign) in the legend select grid and in the
+    BANNED! box is found and named from the icons file's legend tiles; a roll candidate (chance tag above) and a frame
+    without the sign are not bans; nothing on an empty frame; the ban phase's bottom bar is told. Per game: 2 reads
+    make a ban, `bans` None = not read (no select screen), [] = select screen without bans."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_bans as B
+    with tempfile.TemporaryDirectory() as d:
+        path, tiles = _ban_tiles(d)
+        R = B.Bans(path)
+        assert sorted(n for n, *_ in R.T) == ['alpha', 'beta'], [n for n, *_ in R.T]
+        empty = np.full((1440, 2560, 3), 40, np.uint8)
+        assert B.frames(empty) == [] and R.read_if(empty, True) is None and not B.ban_phase(empty)
+        a = np.full((1440, 2560, 3), 40, np.uint8)
+        _ban_frame(a, tiles['alpha'], 478, 1116, 102)                      # legend select grid
+        _ban_frame(a, tiles['beta'], 920, 1116, 102)
+        _ban_frame(a, tiles['beta'], 1300, 1116, 102, tag=True)           # a roll candidate: not a ban
+        _ban_frame(a, tiles['alpha'], 1600, 935, 102, sign=False)         # no sign: not a ban
+        got = sorted((h, n) for h, n, sc, x, y in R.read(a))
+        assert got == [('banned-portrait', 'alpha'), ('banned-portrait', 'beta')], got
+        b = np.full((1440, 2560, 3), 40, np.uint8)
+        _ban_frame(b, tiles['beta'], 1136, 706, 128)                       # the BANNED! box
+        b[1340:1418] = (232, 79, 60)                                         # the ban phase's red bar
+        assert B.ban_phase(b) and not B.ban_phase(a)
+        r = R.read_if(b, False)
+        assert r and [(h, n) for h, n, sc, x, y in r] == [('ban-screen', 'beta')], r
+        assert R.read_if(b[:, :, :], False) and R.read_if(a, False) is None    # grid without bar: only with the select screen
+        assert B.Bans(os.path.join(d, 'none.npz')).read(a) and all(n is None for _, n, *_ in B.Bans(os.path.join(d, 'none.npz')).read(a))
+    reads = [(100.0, [('ban-screen', 'beta', 0.9, 1136)]), (101.0, [('ban-screen', 'beta', 0.9, 1136)]),
+             (110.0, [('banned-portrait', 'alpha', 0.9, 478), ('banned-portrait', 'beta', 0.9, 920)]),
+             (111.0, [('banned-portrait', 'alpha', 0.9, 478), ('banned-portrait', 'beta', 0.9, 920)]),
+             (112.0, [('banned-portrait', 'gamma', 0.6, 1300)]),               # one read only: not a ban
+             (900.0, [('banned-portrait', 'alpha', 0.9, 478)])]                 # after the game started: not its ban
+    games = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}},
+             {'tStart': 800.0, 'select': {'tFirst': 770.0, 'tLast': 800.0}},
+             {'tStart': 1500.0}]
+    B.attach(games, reads)
+    g0 = {e['legend']: (e['how'], e['reads']) for e in games[0]['bans']}
+    assert g0 == {'beta': ('ban-screen', 4), 'alpha': ('banned-portrait', 2)}, games[0]['bans']
+    assert games[0]['bansSeen'] is True
+    assert games[1]['bans'] == [] and games[1]['bansSeen'] is False         # select screen, no bans shown
+    assert games[2]['bans'] is None and games[2]['bansSeen'] is False       # no select screen: not read
+    g = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}}]
+    B.attach(g, reads, stretched=True)
+    assert g[0]['bans'] is None
+    # two banned cells in one column of the grid (rows 1 and 2): two bans, not one
+    g = [{'tStart': 140.0, 'select': {'tFirst': 112.0, 'tLast': 140.0}}]
+    col = [(t, [('banned-portrait', 'alpha', 0.9, 700, 935), ('banned-portrait', 'beta', 0.9, 705, 1116)]) for t in (120.0, 121.0)]
+    B.attach(g, col)
+    assert sorted(e['legend'] for e in g[0]['bans']) == ['alpha', 'beta'], g[0]['bans']
 
 
 def test_ammo_reader_and_events():
@@ -5179,8 +5391,9 @@ def _fake_worker(comms, sleep=False):
     w = TMP / "fake_worker.py"
     w.write_text(FAKE_WORKER)
     comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
-    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
-    comms.get_model = lambda busy=None: TMP
+    comms.__dict__.setdefault("_real_get_model", comms.get_model)
+    comms.get_runtime = lambda busy=None, component=None, progress=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None, progress=None: TMP
 
 
 def test_comms_only_with_the_players_yes():
@@ -5343,16 +5556,120 @@ def test_comms_downloads_are_checked():
     except comms.Unavailable:
         pass
     assert not (TMP / "evil.txt").exists()
-    # nothing published yet: says so, downloads nothing
-    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+    # no component pinned (an older build): says so, downloads nothing
+    if comms.runtime_cmd() is None:
         try:
-            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            getattr(comms, "_real_get_runtime", comms.get_runtime)(component={})
             raise AssertionError("no component, yet it ran")
         except comms.Unavailable as e:
             assert "isn't published" in str(e)
     # the pinned model is the turbo model's five files
     assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
     assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_comms_component_pinned():
+    """The Transcripts component is pinned to one published zip of this repo: https, a release tag the app updater can
+    never take (not v..., a prerelease never "latest"), its SHA-256 and size; downloaded from github.com only."""
+    import io
+    import json
+    import re
+    import urllib.request
+    from pcs_recorder import comms
+    c = comms.COMPONENT
+    assert c and set(c) == {"url", "sha256", "size"}
+    m = re.fullmatch(r"https://github\.com/BLAKYY5/pcs-scanner/releases/download/([^/]+)/PCS-Transcripts\.zip", c["url"])
+    assert m and not m.group(1).startswith("v"), c["url"]          # a v tag would build and publish an app release
+    assert re.fullmatch(r"[0-9a-f]{64}", c["sha256"]) and isinstance(c["size"], int) and 10 << 20 < c["size"] < 200 << 20
+    assert comms._https_ok(c["url"], ("github.com",))
+    # the app's updater reads only the latest release and takes only a v<version> .exe: this release is never offered
+    import pcs_core
+    calls = []
+
+    class Resp(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    rel = {"tag_name": "transcripts-1", "prerelease": True, "html_url": "https://github.com/x",
+           "assets": [{"name": "PCS-Transcripts.zip", "browser_download_url": c["url"], "size": c["size"]}]}
+    real = urllib.request.urlopen, dict(pcs_core.BUILD)
+    urllib.request.urlopen = lambda req, timeout=None: (calls.append(req.full_url), Resp(json.dumps(rel).encode()))[1]
+    try:
+        for b in ({"version": "1.11.0"}, {"version": "dev-5", "base": "1.11.0"}, {"version": "1.10.12"}):
+            pcs_core.BUILD.clear()
+            pcs_core.BUILD.update(b, repo="BLAKYY5/pcs-scanner")
+            assert pcs_core.check_update() is None, b
+    finally:
+        urllib.request.urlopen = real[0]
+        pcs_core.BUILD.clear()
+        pcs_core.BUILD.update(real[1])
+    assert calls and all(u.endswith("/repos/BLAKYY5/pcs-scanner/releases/latest") for u in calls)
+
+
+def test_comms_first_download_after_yes_with_progress():
+    """Said no: nothing is downloaded. Said yes: the first transcript downloads the component zip (github.com) and
+    then the model (Hugging Face), and Settings sees how far (bytes done of the total); nothing left half-way."""
+    import io
+    import shutil
+    import zipfile
+    from pcs_recorder import comms
+    comms_, job, s, idx, rec, sent = _comms_setup("comms-first-dl", consent=False)
+    saved = (comms.get_runtime, comms.get_model, comms.fetch, os.environ.pop("PCS_TRANSCRIBE_PY", None),
+             os.environ.pop("PCS_WHISPER_MODEL", None))
+    comms.get_runtime = getattr(comms, "_real_get_runtime", comms.get_runtime)
+    comms.get_model = getattr(comms, "_real_get_model", comms.get_model)
+    shutil.rmtree(comms.base_dir(), ignore_errors=True)
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("pcs-transcribe/pcs-transcribe.exe", b"MZ fake")
+    got, seen = [], []
+
+    def fake_fetch(url, dest, sha256, size, busy=None, hosts=comms.MODEL_HOSTS, progress=None):
+        got.append((url, hosts))
+        if url == comms.COMPONENT["url"]:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(buf.getvalue())
+        if progress:
+            progress(size // 2)
+            seen.append(job.public()["download"])
+            progress(size - size // 2)
+    comms.fetch = fake_fetch
+    total = comms.COMPONENT["size"] + sum(size for _, size, _ in comms.MODEL_FILES)
+    try:
+        assert comms.missing_bytes() == total
+        # said no: the app's minute tick does nothing, nothing downloaded
+        assert job.tick() is False and got == [] and job.public()["download"] is None and not job.public()["on"]
+        # said yes: component first (github.com only), then the model's five files (Hugging Face)
+        s.transcript_consent = True
+        stop = [False]
+        job.busy = lambda: "test stop" if stop[0] else None
+        real_model = comms.get_model
+
+        def model_then_stop(busy=None, progress=None):
+            d = real_model(busy, progress=progress)
+            stop[0] = True                                    # stop before the (fake) transcriber would start
+            return d
+        comms.get_model = model_then_stop
+        try:
+            job.transcribe(str(rec))
+            raise AssertionError("should stop")
+        except comms.Busy:
+            pass
+        assert got[0] == (comms.COMPONENT["url"], ("github.com",))
+        assert [u for u, _ in got[1:]] == [comms.MODEL_URL + n for n, *_ in comms.MODEL_FILES]
+        assert all(h == comms.MODEL_HOSTS for _, h in got[1:])
+        assert seen[0] == {"done": comms.COMPONENT["size"] // 2, "total": total}
+        assert seen[-1]["done"] < total and all(a["done"] < b["done"] for a, b in zip(seen, seen[1:]))
+        assert comms.runtime_cmd() and job.public()["download"] is None and job.public()["available"]
+        assert job.st["recs"][rec.stem].get("tries", 0) == 0            # a stop before the transcriber is no try
+    finally:
+        comms.get_runtime, comms.get_model, comms.fetch = saved[:3]
+        for k, v in (("PCS_TRANSCRIBE_PY", saved[3]), ("PCS_WHISPER_MODEL", saved[4])):
+            if v is not None:
+                os.environ[k] = v
+        shutil.rmtree(comms.base_dir(), ignore_errors=True)
+    page = (Path(__file__).resolve().parent.parent / "app" / "web" / "app.js").read_text(encoding="utf-8")
+    assert "tr.download" in page and "syncTranscript()" in page
+    assert "t('Downloading for transcripts (first time only): {pct} % of {gb} GB.'" in page
 
 
 def test_transcribe_worker_parts_and_clean_text():

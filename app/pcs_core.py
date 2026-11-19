@@ -499,8 +499,13 @@ def clean_old_unpacked(tmp=None, current=None, min_age_s=600, now=None):
 def run_scan(files, log, out=OUT):
     import pcs_scan
     argv = sys.argv
+    try:                                 # the player's highlight rules (Settings -> Highlights)
+        from pcs_recorder import settings as rec_settings
+        rules = ['--highlights', rec_settings.saved_highlight_rules()]
+    except Exception:
+        rules = []
     try:
-        sys.argv = ['pcs_scan'] + list(files) + ['--out', out]
+        sys.argv = ['pcs_scan'] + list(files) + ['--out', out] + rules
         pcs_scan.main()
     finally:
         sys.argv = argv
