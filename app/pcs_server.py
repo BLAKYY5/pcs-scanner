@@ -145,7 +145,8 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "ownKnocks",   # own knocks [{t, end, reads, outcome}], shown like respawns
                "carePackages", "strongholds",
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
-               "heals", "abilities")     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
+               "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
+               "ammoEvents", "ammoSummary")   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
 
 
 # the game's minimap transform per map (world -> picture), as in scanner/pcs_minimap.MAPS and the hub's minimaps

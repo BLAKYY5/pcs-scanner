@@ -2757,6 +2757,78 @@ def test_usage_heals_and_abilities():
     assert leg == 'seer' and iou == 1.0, (leg, iou, margin)
 
 
+def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
+    """A 1440p frame with the ammo panel and heal slot drawn from the reader's own digit shapes (pcs_banner.json 'ammo'):
+    mag 2 cells, reserve 3 (leading zeros dim), heal count right-aligned at x 717."""
+    import numpy as np
+    from PIL import Image
+    import pcs_ammo as A
+    a = np.full((1440, 2560, 3), 25, np.uint8)
+    def put(font, lab, box, ink=230, back=30):
+        labels, S = A.T[font]
+        g = S[list(labels).index(lab)].reshape(18, 12)
+        x0, x1, y0, y1 = box
+        im = np.asarray(Image.fromarray((g * 255).astype(np.uint8)).resize((x1 - x0, y1 - y0), Image.BILINEAR)) / 255.0
+        a[y0:y1, x0:x1] = (back + im * (ink - back))[..., None].astype(np.uint8)
+    B = A.cell_boxes(a)
+    if mag is not None:
+        for k, ch in enumerate(f'{mag:02d}'): put('M', ch, B['M'][k], 120 if (k == 0 and ch == '0' and mag) else 230)
+    if res is not None:
+        s = f'{res:03d}'; lead = len(s) - len(s.lstrip('0'))
+        for k, ch in enumerate(s): put('R', ch, B['R'][k], 55 if k < lead and k < 2 else 200)
+    if heal is not None:
+        x = 717
+        for ch in reversed(str(heal)):
+            w = 7 if ch == '1' else 12
+            put('H', ch, (x - w - 1, x + 1, A.HEAL_ROWS[0], A.HEAL_ROWS[1]), 245, 30); x -= w + 4
+    if item == 'shield': a[1322:1360, 656:684] = (40, 70, 200)
+    if hint: a[1380:1406, 673:701] = 235
+    if slot == 2: a[1390:1402, 2300:2420:2] = 240
+    if slot == 1: a[1390:1402, 2080:2240:2] = 240
+    return a
+
+
+def test_ammo_reader_and_events():
+    """Ammo panel and heal slot (pcs_ammo): magazine, reserve (dim leading zeros), heal count and item; an empty heal
+    slot only with the key hint and the ammo read; nothing on an empty frame. Per game: a fight that starts with less
+    than a magazine in reserve is a low-ammo fight; the heal slot empty twice after having heals = out of heals."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ammo as A
+    assert set(A.T) == {'M', 'R', 'H'}, list(A.T)
+    assert A.read(np.zeros((1440, 2560, 3), np.uint8), 1.0) is None
+    r = A.read(_ammo_frame(24, 72, 12, 'shield'), 5.0)
+    assert r == (5.0, 24, 72, 'shield', 12, 2), r
+    r = A.read(_ammo_frame(8, 140, 3, 'shield', slot=1), 6.0)
+    assert r == (6.0, 8, 140, 'shield', 3, 1), r
+    assert A.read(_ammo_frame(30, 210, hint=True), 7.0)[3:5] == ('none', 0)             # heal slot empty
+    assert A.read(_ammo_frame(hint=True), 7.0) is None                                  # no ammo read: not trusted
+    assert A.read(_ammo_frame(30, 210), 7.0)[3:5] == (None, None)                        # no key hint: unknown
+    # per game
+    rows = [(10.0, 28, 200, 'shield', 4, 1), (20.0, 28, 180, 'shield', 4, 1), (21.0, 28, 180, 'shield', 4, 1),   # fight 1 at 25: fine
+            (40.0, 28, 20, 'medkit', 1, 1),                                              # fight 2 at 45: 20 left < 28
+            (50.0, 12, 20, 'none', 0, 1), (52.0, 12, 20, 'none', 0, 1),                  # out of heals at 50 ...
+            (70.0, 28, 20, 'syringe', 2, 1),                                             # ... until 70
+            (90.0, 28, 0, None, None, 2),                                                # spectating: left out
+            (130.0, 6, 0, 'none', 0, 1), (131.0, 6, 0, 'none', 0, 1)]                    # next game: never had heals
+    bars = [(90.0, {'state': 'spectating'}, [], True)]
+    games = [{'tStart': 0.0, 'tEndGame': 100.0, 'fights': [{'t0': 25.0, 't1': 35.0}, {'t0': 45.0, 't1': 48.0}]},
+             {'tStart': 120.0, 'fights': [{'t0': 132.0, 't1': 140.0}]}]
+    A.attach(games, rows, bars)
+    g = games[0]
+    assert [e['kind'] for e in g['ammoEvents']] == ['lowAmmoFight', 'outOfHeals'], g['ammoEvents']
+    assert g['ammoEvents'][0]['t'] == 45.0 and g['ammoEvents'][0]['reserve'] == 20 and g['ammoEvents'][0]['magFull'] == 28
+    assert g['ammoEvents'][1] == {'t': 50.0, 'kind': 'outOfHeals', 'end': 70.0}, g['ammoEvents'][1]
+    assert g['fights'][0]['ammoAtStart']['low'] is False and g['fights'][1]['ammoAtStart']['low'] is True
+    assert g['ammoSummary'] == {'reads': 7, 'healReads': 7, 'fightsChecked': 2, 'lowAmmoFights': 1, 'outOfHeals': 1,
+                                'outOfHealsSeconds': 20.0}, g['ammoSummary']
+    assert [r[0] for r in g['ammoTimeline']['rows']] == [10.0, 20.0, 40.0, 50.0, 70.0], g['ammoTimeline']   # same reads kept once
+    assert g['healTimeline']['rows'][0] == [10.0, 'shield', 4]
+    h = games[1]
+    assert h['ammoEvents'] == [{'t': 132.0, 'kind': 'lowAmmoFight', 'mag': 6, 'reserve': 0, 'magFull': 6, 'fightEnd': 140.0}], h['ammoEvents']
+    assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
+
+
 def test_scanner_build_stamp():
     """Results say which build made them ('scannerBuild'): a test build between releases is VERSION+dev.N, a release
     build exactly VERSION; 'scanner' stays VERSION (the hub shows it)."""
