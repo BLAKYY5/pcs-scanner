@@ -85,7 +85,9 @@ def set_start_with_windows(on: bool) -> None:
         lnk.unlink(missing_ok=True)
         return
     if getattr(sys, "frozen", False):
-        target, args, wd = sys.executable, "--background", str(Path(sys.executable).parent)
+        import pcs_core
+        exe = pcs_core.own_exe()                       # installed as a folder: the launcher, never a version folder
+        target, args, wd = exe, "--background", str(Path(exe).parent)
     else:
         target = str(Path(sys.executable).with_name("pythonw.exe"))
         script = str(Path(__file__).resolve().parent.parent / "pcs_app.py")
