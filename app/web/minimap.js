@@ -31,19 +31,19 @@ function minimapSetup(d, v) {
   const side = $('.review .side'); if (!side) return;
   const box = document.createElement('div');
   box.className = 'mm'; box.id = 'mmPanel'; box.hidden = !MM.on;
-  box.innerHTML = `<div class="mm-head"><b>Map</b><span class="mm-cap faint" id="mmCap"></span>
-      <button class="btn small ghost${MM.squad ? ' on' : ''}" id="mmSquadBtn" title="Your teammates' paths, from the team hub">Squad</button>
-      <button class="btn small ghost" id="mmReset" title="Back to the whole path">Reset</button>
-      <button class="btn small ghost" id="mmHide" title="Hide the map (M)">Hide</button></div>
+  box.innerHTML = `<div class="mm-head"><b>${t('Map')}</b><span class="mm-cap faint" id="mmCap"></span>
+      <button class="btn small ghost${MM.squad ? ' on' : ''}" id="mmSquadBtn" title="${t('Your teammates\' paths, from the team hub')}">${t('Squad')}</button>
+      <button class="btn small ghost" id="mmReset" title="${t('Back to the whole path')}">${t('Reset')}</button>
+      <button class="btn small ghost" id="mmHide" title="${t('Hide the map (M)')}">${t('Hide')}</button></div>
     <div class="mm-box" id="mmBox"><canvas id="mmCv"></canvas><div class="mm-msg" id="mmMsg" hidden></div></div>
     <div class="mm-squad faint" id="mmSquad" hidden></div>
-    <div class="mm-legend faint" id="mmLegend"><span><i class="mm-k now"></i>Now</span><span><i class="mm-k land"></i>Landing</span><span><i class="mm-k harv"></i>Harvester</span><span><i class="mm-k ring"></i>Ring</span><span><i class="mm-k care"></i>Care package</span><span><i class="mm-k sh"></i>Stronghold</span><span><i class="mm-k kill"></i>Knock / kill</span><span><i class="mm-k down"></i>We went down</span><span><i class="mm-k note"></i>Coach note</span><span>Click the path or a mark to go there · wheel to zoom · drag to move</span></div>`;
+    <div class="mm-legend faint" id="mmLegend"><span><i class="mm-k now"></i>${t('Now')}</span><span><i class="mm-k land"></i>${t('Landing')}</span><span><i class="mm-k harv"></i>${t('Harvester')}</span><span><i class="mm-k ring"></i>${t('Ring')}</span><span><i class="mm-k care"></i>${t('Care package')}</span><span><i class="mm-k sh"></i>${t('Stronghold')}</span><span><i class="mm-k kill"></i>${t('Knock / kill')}</span><span><i class="mm-k down"></i>${t('We went down')}</span><span><i class="mm-k note"></i>${t('Coach note')}</span><span>${t('Click the path or a mark to go there · wheel to zoom · drag to move')}</span></div>`;
   side.prepend(box);
   // the Map button beside Theatre / Full screen
   const th = $('#rvTheatre');
   if (th && !$('#rvMap')) {
     const b = document.createElement('button');
-    b.className = 'btn small' + (MM.on ? ' brand' : ''); b.id = 'rvMap'; b.title = 'Your path on the map (M)'; b.textContent = 'Map';
+    b.className = 'btn small' + (MM.on ? ' brand' : ''); b.id = 'rvMap'; b.title = t('Your path on the map (M)'); b.textContent = t('Map');
     b.onclick = () => minimapToggle();
     th.before(b);
   }
@@ -97,7 +97,7 @@ document.addEventListener('visibilitychange', () => {
 
 function mmMsg(text) {
   const m = $('#mmMsg'); if (!m) return;
-  m.hidden = !text; m.textContent = text || '';
+  m.hidden = !text; m.textContent = tx(text) || '';   // tx: reasons from the app ("Minimap needs the team hub")
   const lg = $('#mmLegend'); if (lg) lg.hidden = !!text;
 }
 
@@ -106,7 +106,7 @@ async function mmInfo(map) {
   let info = MM.info[map];
   if (!info) {
     try { info = await api('/api/minimap/' + encodeURIComponent(map)); }
-    catch (e) { info = {available: false, reason: 'hub', text: 'Minimap needs the team hub'}; }
+    catch (e) { info = {available: false, reason: 'hub', text: t('Minimap needs the team hub')}; }
     if (info.available) MM.info[map] = info;            // a "not there" answer is asked again next time
   }
   return info;
@@ -132,21 +132,21 @@ async function mmGame(gi) {
   MM.game = null; MM.view = null; MM.hover = null;
   const cap = $('#mmCap');
   mmSquadLine();
-  if (!MM.d.scan || !MM.d.games) { mmMsg('Scan this recording to see your path on the map'); if (cap) cap.textContent = ''; mmDraw(); return; }
+  if (!MM.d.scan || !MM.d.games) { mmMsg(t('Scan this recording to see your path on the map')); if (cap) cap.textContent = ''; mmDraw(); return; }
   const g = MM.d.games[gi];
-  if (!g) { mmMsg('No game in this recording'); if (cap) cap.textContent = ''; mmDraw(); return; }
-  if (cap) cap.textContent = `Game ${gi + 1} · ${mapName(g.map)}`;
-  if (!g.map || g.map === '?') { mmMsg('No minimap for this map yet'); mmDraw(); return; }
-  mmMsg('Loading the map…');
+  if (!g) { mmMsg(t('No game in this recording')); if (cap) cap.textContent = ''; mmDraw(); return; }
+  if (cap) cap.textContent = t('Game {n} · {map}', {n: gi + 1, map: mapName(g.map)});
+  if (!g.map || g.map === '?') { mmMsg(t('No minimap for this map yet')); mmDraw(); return; }
+  mmMsg(t('Loading the map…'));
   const info = await mmInfo(g.map);
   if (!mmLive() || MM.gi !== gi) return;
-  if (!info.available) { mmMsg(info.text || 'No minimap for this map yet'); mmDraw(); return; }
+  if (!info.available) { mmMsg(info.text || t('No minimap for this map yet')); mmDraw(); return; }
   const game = mmPath(g, info);
   game.gi = gi;
   game.img = mmImage(g.map, info, () => { if (MM.game === game) mmDraw(); },
-    () => { if (MM.game === game) mmMsg('Minimap needs the team hub'); });
+    () => { if (MM.game === game) mmMsg(t('Minimap needs the team hub')); });
   MM.game = game;
-  mmMsg(game.pts.length ? '' : 'No positions read in this game');
+  mmMsg(game.pts.length ? '' : t('No positions read in this game'));
   if (MM.squad) mmLoadSquad(game);
   mmDraw();
 }
@@ -183,14 +183,14 @@ function mmIcons(g) {
   const out = [], ok = e => e && typeof e.t === 'number' && Number.isFinite(e.mapX) && Number.isFinite(e.mapY);
   for (const e of g.carePackages || []) {
     if (!ok(e)) continue;
-    const ring = e.inNextRing === true ? ' · inside ring ' + e.nextRing : e.inNextRing === false ? ' · outside ring ' + e.nextRing : '';
+    const ring = e.inNextRing === true ? ' · ' + t('inside ring {n}', {n: e.nextRing}) : e.inNextRing === false ? ' · ' + t('outside ring {n}', {n: e.nextRing}) : '';
     out.push({kind: 'care', t: e.t, fx: e.mapX / 100, fy: e.mapY / 100, n: e.n || null, opened: e.openedAt,
-              label: 'Care package' + (e.n ? ' ' + e.n : '') + ring});
+              label: t('Care package') + (e.n ? ' ' + e.n : '') + ring});
   }
   for (const e of g.strongholds || []) {
     if (!ok(e)) continue;
     out.push({kind: 'sh', t: e.t, fx: e.mapX / 100, fy: e.mapY / 100, state: e.state, until: e.availableLast,
-              label: 'Stronghold' + (e.state === 'unavailable' ? ' (taken)' : '')});
+              label: t('Stronghold') + (e.state === 'unavailable' ? ' (' + t('taken') + ')' : '')});
   }
   return out;
 }
@@ -251,13 +251,13 @@ function mmPlace(P, t) {
 }
 
 /* kill feed events with our squad and the coach's notes in this game, where the player was at that moment */
-function mmMarks(game, t) {
+function mmMarks(game, at) {
   const g = game.g, P = game.pts, marks = [];
   if (!P.length) return marks;
   const from = P[0].t - 1, to = P[P.length - 1].t + 20;
   if (MM.d.feedSides && window.feedSide && window.feedEvent) {
     for (const l of MM.d.feed || []) {
-      if (l.dup || l.t < from || l.t > to || l.t > t + 0.25) continue;        // so far only
+      if (l.dup || l.t < from || l.t > to || l.t > at + 0.25) continue;        // so far only
       const e = feedEvent(l, g); if (!e) continue;
       const p = mmPlace(P, l.t); if (!p) continue;
       marks.push({kind: e.lost ? 'down' : 'kill', t: l.t, fx: p[0], fy: p[1], label: e.title});
@@ -267,7 +267,7 @@ function mmMarks(game, t) {
   for (const n of notes) {
     if (n.t < from || n.t > to) continue;
     const p = mmPlace(P, n.t); if (!p) continue;
-    marks.push({kind: 'note', t: n.t, fx: p[0], fy: p[1], label: 'Coach: ' + (n.text ? n.text.split('\n')[0].slice(0, 60) : 'drawing'), later: n.t > t + 0.25});
+    marks.push({kind: 'note', t: n.t, fx: p[0], fy: p[1], label: t('Coach: {note}', {note: n.text ? n.text.split('\n')[0].slice(0, 60) : t('drawing')}), later: n.t > at + 0.25});
   }
   return marks;
 }
@@ -276,12 +276,12 @@ function mmMarks(game, t) {
 async function mmLoadSquad(game) {
   const gi = game.gi, jump = mmJump(game.g);
   if (MM.sq[gi] && !MM.sq[gi].loading) { mmSquadLine(); mmDraw(); return; }
-  if (jump == null) { MM.sq[gi] = {available: false, text: 'No jump in this game'}; mmSquadLine(); return; }
+  if (jump == null) { MM.sq[gi] = {available: false, text: t('No jump in this game')}; mmSquadLine(); return; }
   MM.sq[gi] = {loading: true};
   mmSquadLine();
   let r;
   try { r = await api(`/api/squadpaths?id=${encodeURIComponent(MM.d.id)}&jump=${jump}`); }
-  catch (e) { r = {available: false, text: 'Squad paths need the team hub'}; }
+  catch (e) { r = {available: false, text: t('Squad paths need the team hub')}; }
   if (!r.available) MM.sq[gi] = r;
   else MM.sq[gi] = Object.assign(r, {lines: mmSquadLines(r.players, game.info, jump)});
   if (MM.game === game) { mmSquadLine(); mmDraw(); }
@@ -309,12 +309,12 @@ function mmSquadLine() {
   const s = MM.squad && MM.game ? MM.sq[MM.game.gi] : null;
   el.hidden = !s;
   if (!s) return;
-  if (s.loading) { el.textContent = 'Loading your teammates\' paths…'; return; }
-  if (!s.available) { el.textContent = s.text || 'Squad paths need the team hub'; return; }
+  if (s.loading) { el.textContent = t('Loading your teammates\' paths…'); return; }
+  if (!s.available) { el.textContent = tx(s.text) || t('Squad paths need the team hub'); return; }
   const L = s.lines || [];
-  el.innerHTML = !L.length ? 'No teammate\'s recording of this game on the hub' :
-    L.map(l => `<span><i class="mm-k" style="background:${l.color}"></i>${esc(l.name)}${l.pts.length ? '' : ' (no positions)'}</span>`).join('') +
-    (s.offline ? '<span>Hub not reachable: paths saved earlier</span>' : '');
+  el.innerHTML = !L.length ? t('No teammate\'s recording of this game on the hub') :
+    L.map(l => `<span><i class="mm-k" style="background:${l.color}"></i>${esc(l.name)}${l.pts.length ? '' : ' (' + t('no positions') + ')'}</span>`).join('') +
+    (s.offline ? '<span>' + t('Hub not reachable: paths saved earlier') + '</span>' : '');
 }
 
 /* ---- drawing: one painter for the review panel and Watch together */
@@ -336,13 +336,13 @@ function mmDraw() {
   const now = mmPaint(cv, box, sc);
   const cap = $('#mmCap');
   if (cap && sc) {
-    const t = sc.t, from = mmJump(game.g);
+    const at = sc.t, from = mmJump(game.g);
     let row = null;                                     // what the scanner saw at this moment (spectating?)
-    for (const r of game.g.seen || []) { if (r[0] <= t + 0.5) row = r; else break; }
-    const spec = row && row[2] && t - row[0] < 5;
-    const where = !game.pts.length || now ? '' : (from != null && t < from) ? ' · before the jump' :
-      spec ? ' · spectating' : t < game.pts[0].t ? ' · not on the map yet' : ' · no position read now';
-    cap.textContent = `Game ${MM.gi + 1} · ${mapName(game.g.map)}${game.landPoi ? ' · landed at ' + poiName(game.landPoi) : ''}${where}`;
+    for (const r of game.g.seen || []) { if (r[0] <= at + 0.5) row = r; else break; }
+    const spec = row && row[2] && at - row[0] < 5;
+    const where = !game.pts.length || now ? '' : ' · ' + ((from != null && at < from) ? t('before the jump') :
+      spec ? t('spectating') : at < game.pts[0].t ? t('not on the map yet') : t('no position read now'));
+    cap.textContent = t('Game {n} · {map}', {n: MM.gi + 1, map: mapName(game.g.map)}) + (game.landPoi ? ' · ' + t('landed at {poi}', {poi: poiName(game.landPoi)}) : '') + where;
   }
 }
 
@@ -544,16 +544,16 @@ function wtMapSetup(box, st, go) {
   if (WM.box !== box) {
     WM.box = box; WM.key = '';
     box.className = 'mm wt-map';
-    box.innerHTML = `<div class="mm-head"><b>Map</b><span class="mm-cap faint" id="wmCap"></span>
-        <button class="btn small ghost" id="wmReset" title="Back to the whole path">Reset</button>
-        <button class="btn small ghost" id="wmHide">${WM.on ? 'Hide' : 'Show'}</button></div>
+    box.innerHTML = `<div class="mm-head"><b>${t('Map')}</b><span class="mm-cap faint" id="wmCap"></span>
+        <button class="btn small ghost" id="wmReset" title="${t('Back to the whole path')}">${t('Reset')}</button>
+        <button class="btn small ghost" id="wmHide">${WM.on ? t('Hide') : t('Show')}</button></div>
       <div class="mm-box" id="wmBox"${WM.on ? '' : ' hidden'}><canvas id="wmCv"></canvas><div class="mm-msg" id="wmMsg" hidden></div></div>
       <div class="mm-squad faint" id="wmSquad"${WM.on ? '' : ' hidden'}></div>`;
     $('#wmReset').onclick = () => { WM.view = null; wmDraw(); };
     $('#wmHide').onclick = () => {
       WM.on = !WM.on;
       try { localStorage.setItem('pcs-wt-map', WM.on ? '1' : '0'); } catch (e) {}
-      $('#wmHide').textContent = WM.on ? 'Hide' : 'Show';
+      $('#wmHide').textContent = WM.on ? t('Hide') : t('Show');
       $('#wmBox').hidden = $('#wmSquad').hidden = !WM.on;
       if (WM.on) wmDraw();
     };
@@ -574,22 +574,22 @@ function wtMapTick(t) {
   WM.t = t;
   wmDraw();
 }
-function wmMsg(text) { const m = $('#wmMsg'); if (m) { m.hidden = !text; m.textContent = text || ''; } }
+function wmMsg(text) { const m = $('#wmMsg'); if (m) { m.hidden = !text; m.textContent = tx(text) || ''; } }
 async function wmLoad(st) {
   const key = st.gameKey, map = st.game && st.game.map;
-  if (!map || map === '?') { wmMsg('No minimap for this map yet'); return; }
-  wmMsg('Loading the map…');
+  if (!map || map === '?') { wmMsg(t('No minimap for this map yet')); return; }
+  wmMsg(t('Loading the map…'));
   const info = await mmInfo(map);
   if (WM.key !== key) return;
-  if (!info.available) { wmMsg(info.text || 'No minimap for this map yet'); return; }
+  if (!info.available) { wmMsg(info.text || t('No minimap for this map yet')); return; }
   let r;
   try { r = await api('/api/squadpaths?gameKey=' + encodeURIComponent(key)); }
-  catch (e) { r = {available: false, text: 'Squad paths need the team hub'}; }
+  catch (e) { r = {available: false, text: t('Squad paths need the team hub')}; }
   if (WM.key !== key) return;
   WM.info = info; WM.data = r;
   WM.lines = r.available ? mmSquadLines(r.players, info, 0) : [];
-  WM.img = mmImage(map, info, () => { if (WM.key === key) { wmMsg(''); wmDraw(); } }, () => { if (WM.key === key) wmMsg('Minimap needs the team hub'); });
-  if (!r.available) wmMsg(r.text || 'Squad paths need the team hub');
+  WM.img = mmImage(map, info, () => { if (WM.key === key) { wmMsg(''); wmDraw(); } }, () => { if (WM.key === key) wmMsg(t('Minimap needs the team hub')); });
+  if (!r.available) wmMsg(r.text || t('Squad paths need the team hub'));
   wmLegend(); wmDraw();
 }
 function wmFocus() {
@@ -601,9 +601,9 @@ function wmLegend() {
   const f = wmFocus(), cap = $('#wmCap');
   if (cap) cap.textContent = WM.st ? `${mapName(WM.st.game && WM.st.game.map)} · ${f ? f.name : (WM.st.focus || '')}` : '';
   if (!WM.data || !WM.data.available) { el.textContent = ''; return; }
-  el.innerHTML = WM.lines.map(l => `<span><i class="mm-k" style="background:${l === f ? '#ffd60a' : l.color}"></i>${esc(l.name)}${l.pts.length ? '' : ' (no positions)'}</span>`).join('') +
-    (WM.data.offline ? '<span>Hub not reachable: paths saved earlier</span>' : '') +
-    '<span>Click a path to go there</span>';
+  el.innerHTML = WM.lines.map(l => `<span><i class="mm-k" style="background:${l === f ? '#ffd60a' : l.color}"></i>${esc(l.name)}${l.pts.length ? '' : ' (' + t('no positions') + ')'}</span>`).join('') +
+    (WM.data.offline ? '<span>' + t('Hub not reachable: paths saved earlier') + '</span>' : '') +
+    '<span>' + t('Click a path to go there') + '</span>';
 }
 function wmScene() {
   if (!WM.img || !WM.img.complete || !WM.img.naturalWidth || !WM.data || !WM.data.available) return null;
@@ -623,6 +623,6 @@ function wmDraw() {
   if (document.hidden) { WM.dirty = true; return; }
   const sc = wmScene();
   mmPaint(cv, box, sc);
-  if (sc && !sc.main.pts.length) wmMsg(`No positions for ${WM.st.focus} in this game`);
+  if (sc && !sc.main.pts.length) wmMsg(`${t('No positions for {focus} in this game', {focus: WM.st.focus})}`);
   else if (sc) wmMsg('');
 }

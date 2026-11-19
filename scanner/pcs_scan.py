@@ -21,7 +21,7 @@ import pcs_hud as HUD
 import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo
 import pcs_bans
 
-VERSION = '1.10.15'
+VERSION = '1.11.0'
 HERE = getattr(sys, '_MEIPASS', os.path.dirname(os.path.abspath(__file__)))  # bundled data when frozen (PCS Scanner app)
 
 def build_stamp(here=HERE):

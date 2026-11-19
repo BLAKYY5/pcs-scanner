@@ -59,6 +59,7 @@ h1{font-size:34px}h2{font-size:22px}h3{font-size:15px;color:var(--muted);letter-
 .kpi>span{display:block;font-size:11px;text-transform:uppercase;letter-spacing:.08em;color:var(--muted)}
 .kpi b{font:700 30px/1.15 var(--display)}
 .kpi small{color:var(--muted);font-size:12px;display:block}
+.kpi .pill{white-space:normal;max-width:100%}   /* longer words in other languages wrap inside the card */
 .meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:8px}
 .meter i{display:block;height:100%;background:var(--good)}
 .meter.warn i{background:var(--warn)}.meter.full i{background:var(--accent)}
