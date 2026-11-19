@@ -324,8 +324,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   coach notes, session bookmarks) with 3-30 s before / after; the range shows on the timeline. Sound: the recording's
   own tracks except the voice-app track (it holds teammates' voices without their own consent; the server refuses it
   too), plus downloaded teammates' mic tracks, each at its offset per game: only when the player shares their own
-  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment (a teammate who said no
-  since the download, or a hub out of reach = left out, listed under the clip). Coach notes on screen in the range
+  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment with `share_clips: true`
+  (the teammate's own "Allow my voice in teammates' clips", setting `share_clips`, off by default, sent with
+  `PUT /api/me/sharing`: sharing the mic does not cover clips, coach 20 Nov 2026). A teammate who said no since the
+  download, no clips answer, an older hub without the field, or a hub out of reach = left out, listed under the clip. Coach notes on screen in the range
   (text + drawings, as the player shows them) are drawn with Pillow on transparent PNGs at the clip's size and laid
   over for their time. Discord = under 10 MB (aimed at 9.0 MB: AMF overshot by 6 %; bitrate from the length, 1080 /
   720 / 540 / 480 and 30 fps as it drops, at most ~3 min with sound; encoded again lower if still over 10 MB); Full

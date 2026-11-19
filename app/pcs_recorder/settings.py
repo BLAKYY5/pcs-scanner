@@ -65,8 +65,10 @@ class Settings:
     server_scan: bool = False                          # scan on the team server (serverscan.py), this PC if it can't
     share_tracks: bool = False                         # my mic track shared with my team, theirs fetched by themselves
     share_asked: bool = False                          # the player answered the mic sharing question (setup step)
+    share_clips: bool = False                          # my voice may go into teammates' clips (a separate yes, 20 Nov 2026)
     transcript_consent: bool = False                   # comms transcripts (not built yet): each player says yes
     transcript_asked: bool = False                     # the player answered the transcripts question (setup step)
+    transcripts_withdraw: bool = False                 # said no after yes: the hub must still be told (decision 21)
     hk_mute_game: str = "ctrl+alt+1"                   # hotkeys while recording ("" = none)
     hk_mute_discord: str = "ctrl+alt+2"
     hk_mute_mic: str = "ctrl+alt+3"
