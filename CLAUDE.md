@@ -696,6 +696,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.11.0 is
 
 - Commit messages: a plain summary line, then what and why. PRs: what changed for the players, how it was tested.
 - UI text is short and literal ("Upload now", "Skip"). No jargon in anything a player reads.
+- **Languages** (English, French; `app/web/i18n/<code>.json`, `pcs_i18n.py`, `web/i18n.js`): every word a player reads in
+  the web UI goes through `t('English text', {values})` (index.html: `data-i18n`); the key is the English text with
+  `{name}` for values, en.json is the source, a missing key shows English. Python keeps writing English (app.log,
+  Activity data); `tx()` (Python and JS) turns a sentence the app wrote into the player's language at display time by
+  matching the table's keys with their values (corner messages, tray, Activity, reasons). A new Python sentence the
+  player sees: add its English template to en.json and its translation to fr.json. Game words stay English
+  (`i18n/glossary.md`). `python tools/i18n_keys.py --update` adds new t() keys to en.json; tests check the tables match
+  and no English is left outside t() in the main pages. Language setting: `settings.json` `language` (none = Windows
+  display language if the app has it); changing it reloads the page. A new language = one more json file.
 - Keep the web UI dependency-free. Check new UI at 1320 px and 900 px wide.
 - Results the hub or the Loot Book consume (`*.scan.json`, `*.feed.json`) are a contract: add fields, don't
   rename or remove them without checking the hub's importer.
