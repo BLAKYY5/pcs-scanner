@@ -1653,6 +1653,7 @@ function renderSettings() {
           <small>${t('Takes effect the next time Apex starts.')}</small></label>
         <div class="field">${switchHTML('f-send_mic', s.send_mic, t('Send my mic track to the team'), t('With the scan results, for the comms review'))}</div>
         <div class="field">${switchHTML('f-share_tracks', s.share_tracks, t('Share mic tracks with my team'), t('Your mic track goes to your teammates, theirs come to you by themselves while Apex is closed') + (S.teamTracks && S.teamTracks.tracks ? ' ' + t('({tracks} here)', {tracks: S.teamTracks.tracks}) : ''))}</div>
+        <div class="field">${switchHTML('f-share_clips', s.share_clips, t('Allow my voice in teammates\' clips'), t('Off: your teammates\' clips (for Discord) leave your voice out. Sharing your mic with the team doesn\'t change this.'))}</div>
       </div>
       ${switchHTML('f-transcript_consent', s.transcript_consent, t('Comms transcripts'), TRANSCRIPT_HINT + transcriptState())}
       <h3>${t('Hotkeys while recording')}</h3>
@@ -1755,10 +1756,12 @@ function renderSettings() {
   const syncComms = () => { if (box) { box.style.opacity = cc.checked ? 1 : .4; $$('input, select', box).forEach(i => i.disabled = !cc.checked); } };
   if (cc) { cc.onchange = syncComms; syncComms(); }
   // sharing needs the mic recorded and sent: switching one off switches sharing off, sharing on switches them on
-  const sh = $('#f-share_tracks'), sm = $('#f-send_mic'), ma = $('#f-mic_audio');
+  const sh = $('#f-share_tracks'), sm = $('#f-send_mic'), ma = $('#f-mic_audio'), sc = $('#f-share_clips');
   if (sh && sm && ma) {
-    sh.onchange = () => { if (sh.checked) { sm.checked = true; ma.checked = true; } };
-    [sm, ma].forEach(x => x.addEventListener('change', () => { if (!x.checked) sh.checked = false; }));
+    sh.onchange = () => { if (sh.checked) { sm.checked = true; ma.checked = true; } else if (sc) sc.checked = false; };
+    [sm, ma].forEach(x => x.addEventListener('change', () => { if (!x.checked) { sh.checked = false; if (sc) sc.checked = false; } }));
+    // clips are a separate yes (coach, 20 Nov 2026), but only make sense while the mic is shared: on = sharing on too
+    if (sc) sc.onchange = () => { if (sc.checked) { sh.checked = sm.checked = ma.checked = true; } };
   }
   const en = $('#f-enabled'); if (en) en.onchange = async () => {
     try { S = await api('/api/autorecord', {enabled: en.checked}); toast(en.checked ? t('Auto-record on.') : t('Auto-record off.')); renderTop(); }
@@ -1792,7 +1795,7 @@ function settingsBody() {
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min', 'hl_chain_s', 'hl_multi_min', 'hl_double_s']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
-    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
+    for (const k of ['game_pause', 'game_fullscreen', 'start_with_windows', 'game_audio', 'auto_scan', 'comms_consent', 'discord_audio', 'mic_audio', 'send_mic', 'share_tracks', 'share_clips', 'transcript_consent', 'crash_reports', 'server_scan', 'hk_sounds', 'yt_enabled', 'yt_scrims_only', 'night_shutdown', 'yt_wait_eec']) { const el = $('#f-' + k); if (el) body[k] = el.checked; }
     for (const k of ['hk_mark', 'hk_mute_game', 'hk_mute_discord', 'hk_mute_mic']) body[k] = $('#f-' + k).dataset.v || '';
     const hk = $('#f-hub_key'); if (hk && hk.value.trim()) body.hub_key = hk.value.trim();   // empty = key unchanged
     if (gamesEdit) { body.game_exes = gamesEdit.exes.slice(); body.game_ignore = gamesEdit.ignore.slice(); }

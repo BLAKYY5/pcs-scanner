@@ -5,8 +5,9 @@
 - Sound: any of the recording's own tracks except the voice-app track (track 2 holds teammates' voices; their voices
   go into a clip only through their own mic tracks, which they agreed to share), plus downloaded teammates' mic
   tracks (pcs_recorder.teamtracks), each at its own time offset. A teammate's track is used only when the team hub
-  says at that moment that they still share it (they may have said no since the download); hub out of reach =
-  teammates' tracks left out. Mixed at their recorded levels.
+  says at that moment that they still share it (they may have said no since the download) AND that they allow their
+  voice in teammates' clips (`share_clips`, their own separate yes, off by default: coach, 20 Nov 2026; no answer or
+  an older hub = left out); hub out of reach = teammates' tracks left out. Mixed at their recorded levels.
 - Coach notes: the drawings and texts on screen in the range are drawn (Pillow) on transparent pictures at the clip's
   size and laid over the video for the time they show in the review player.
 - Size: "discord" = under 10 MB (bitrate from the length; size and frame rate lowered to fit; encoded again lower if
