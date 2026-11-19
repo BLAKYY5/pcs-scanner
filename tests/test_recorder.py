@@ -3444,7 +3444,7 @@ def test_checksets_event_scorers():
           "abilities": [{"t": 261, "kind": "tactical"}, {"t": 350, "kind": "tactical"}]}
     g1 = {"tStart": 930, "mode": None, "select": {"tFirst": 880, "tLast": 905}, "bans": [{"legend": "seer"}]}
     (scans / "A.scan.json").write_text(_json.dumps({"games": [g0, g1]}), encoding="utf-8")
-    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": None}]}), encoding="utf-8")
+    (scans / "B.scan.json").write_text(_json.dumps({"games": [{"tStart": 10, "mode": "unknown"}]}), encoding="utf-8")
     assert C.recordings(str(folder)) == ["A", "B"]
     res, misses, missing = C.score_all(str(folder), str(scans))
     assert missing == []
