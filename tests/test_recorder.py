@@ -3745,6 +3745,144 @@ def test_stretched_views_fill_reader_boxes():
     assert np.array_equal(SCAN.view_top(img)[:SCAN.TOP_ROWS], old_top[:SCAN.TOP_ROWS])
 
 
+def _stretch43():
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import stretch43
+    return stretch43.stretch
+
+
+def test_stretched_top_readers():
+    """4:3 stretched recordings: the playlist emblem, the legend select screen, the loading banner, the squads counter
+    and the own stats strip are read on the scanner's remapped top (view_top). Test frames: 16:9 HUD pictures turned
+    into what a 4:3 stretched player records (tools/stretch43.py: rows squashed to 75 % towards the top, drawn at the
+    1440 x 1080 render size and scaled back up). The 16:9 readers keep their old values."""
+    import numpy as np
+    from PIL import Image
+    SCAN = _scanner()
+    import pcs_hud as HUD
+    stretch = _stretch43()
+    top = lambda img: SCAN.view_top(stretch(img))
+    assert (HUD.SquadsLeft.WHITE, HUD.SquadsLeft.BITS, HUD.OwnStats.INK, HUD.OwnStats.INK_K, HUD.Banner.WHITE) == (232, 26, 35, 0.5, 215)
+
+    # playlist emblem (in game and on the waiting screen)
+    E = HUD.ModeEmblem
+    rng = np.random.default_rng(5)
+    for key, mode, rgb, mask in [e for e in E.T if e[1]]:
+        for y, x in ((8, 2422), (142, 2420)):
+            img = np.full((1440, 2560, 3), 90, np.uint8)
+            img[:300, 2160:] = rng.integers(60, 200, (300, 400, 3), dtype=np.uint8)
+            h, w = E.SIZE
+            big = np.asarray(Image.fromarray(rgb.astype(np.uint8)).resize((w, h), Image.NEAREST))
+            m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((w, h), Image.NEAREST)) > 0
+            img[y:y + h, x:x + w][m] = big[m]
+            r = E.read(top(img))
+            assert r and r[:2] == (key, mode), (mode, y, r)
+
+    # squads counter: test digits drawn from the table's shapes (one pixel bolder, as the game's font) are not the game's
+    # own glyphs, so some come out doubtful once softened; a stretched read is right or nothing, never another number
+    def cells(digit):
+        bits = next(t for d, t in HUD.SquadsLeft.T if d == digit)
+        g = np.array([(bits >> (191 - i)) & 1 for i in range(192)], np.uint8).reshape(16, 12)
+        g = np.asarray(Image.fromarray(g * 255).resize((14, 22), Image.NEAREST)) > 127
+        g[:, :-1] |= g[:, 1:]
+        return g.astype(np.float32)[..., None]
+
+    def hud(number, plate=40):
+        img = np.full((1440, 2560, 3), plate, np.uint8)
+        for x in range(2140, 2286, 16): img[77:99, x:x + 4] = 255
+        img[77:99, 2288:2292] = 255
+        x = 2130
+        for ch in reversed(str(number)):
+            box = img[77:99, x - 14:x].astype(np.float32); img[77:99, x - 14:x] = box * (1 - cells(ch)) + 255 * cells(ch); x -= 18
+        return img
+    got = {n: HUD.SquadsLeft43.read(top(hud(n))) for n in (20, 17, 13, 9, 4, 1, 58, 36)}
+    assert all(v in (n, None) for n, v in got.items()) and {17, 13, 1} <= {n for n, v in got.items() if v == n}, got
+    assert HUD.SquadsLeft43.read(top(np.full((1440, 2560, 3), 40, np.uint8))) is None
+
+    # own stats strip
+    put = lambda *a, **k: _own_put(HUD, *a, **k)
+
+    def strip(kills=None, assists=None, knocks=None, damage=None, font="B", plate=40):
+        img = np.full((1440, 2560, 3), plate, np.uint8)
+        d0, _ = put(img, "S", str(damage), x_end=2336)
+        img[132:156, d0 - 40:d0 - 3] = 255
+        left = d0 - 70
+        if knocks is not None:
+            img[126:162, left - 105:left] = 250
+            img[131:157, left - 80:left - 44] = 20
+            put(img, "K", str(knocks), x_start=left - 41)
+            left -= 125
+        if kills is not None:
+            a0 = left - 20 - 15 * len(str(assists))
+            put(img, font, str(assists), x_start=a0)
+            img[132:157, a0 - 41:a0 - 3] = 255
+            k0, _ = put(img, font, str(kills), x_end=a0 - 41 - 24)
+            img[132:157, k0 - 34:k0 - 9] = 255
+        return img
+    # the strip's places come from its icons (the damage icon and the knocks icon fall apart once softened: joined
+    # again); the test digits are the table's averaged shapes, softer than the game's, so some stay doubtful: every
+    # number read must be right, and the plates must be found
+    O = HUD.OwnStats43
+    seen = set()
+    for kw in ({"damage": 54}, {"damage": 174}, {"knocks": 2, "damage": 160}, {"kills": 3, "assists": 1, "knocks": 2, "damage": 716},
+               {"kills": 12, "assists": 10, "knocks": 6, "damage": 2051}, {"kills": 2, "assists": 0, "damage": 589, "font": "S"}):
+        want = {k: v for k, v in kw.items() if k != "font"}
+        assert HUD.OwnStats.read(strip(**kw)) == want                 # 16:9 reader on the 16:9 picture
+        got = O.read(top(strip(**kw)))
+        assert set(got.pop("_seen")) == set(want), (kw, got)            # every plate found, read or not
+        assert all(want[k] == v for k, v in got.items()), (kw, got)
+        seen |= set(got)
+    assert seen == {"kills", "assists", "knocks", "damage"}, seen
+    assert O.read(top(np.full((1440, 2560, 3), 40, np.uint8))) == {}
+    # a game's total: refused when the number was on the strip but not read twice after its last read (it may have
+    # grown); read to the end: as before
+    rd = [(t, {"damage": 300, "_seen": ("damage",)}) for t in range(10, 20)]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd)
+    assert games[0]["own"]["damage"] == 300, games[0]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd + [(20, {"_seen": ("damage",)}), (21, {"_seen": ("damage",)})])
+    assert "own" not in games[0], games[0]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=rd + [(20, {"_seen": ("damage",)})])          # once: a doubtful digit, as in 16:9
+    assert games[0]["own"]["damage"] == 300, games[0]
+
+    # legend select screen in a whole scan: read on the remapped top once the layout is known (forced here), and
+    # also while nothing is known yet (a chunk that starts in the lobby); a 16:9 scan of the same screens is unchanged
+    tiles = {n: np.clip(rng.integers(1, 255, (16, 25)).repeat(4, 0).repeat(4, 1), 1, 255).astype(np.uint8) for n in ("alpha", "bravo", "charlie")}
+    f = TMP / "legends-43.npz"
+    np.savez_compressed(f, **{"legend_" + n: t for n, t in tiles.items()})
+    COL = [(240, 160, 40), (40, 180, 190), (140, 200, 50)]
+
+    def screen():
+        img = np.full((1440, 2560, 3), 60, np.uint8)
+        for k, n in enumerate(tiles):
+            y0 = int(round(172 + 106.5 * k))
+            img[y0 + 9:y0 + 73, 215:315] = tiles[n][..., None]
+            img[y0 + 60:y0 + 80, 300:328] = COL[k]
+            img[y0 + 64:y0 + 76, 312:316] = 255
+            img[y0 + 30:y0 + 46, 196:204] = COL[k]
+            for x in range(330, 520, 6): img[y0 + 10:y0 + 30, x:x + 3] = COL[k] if k == 1 else (255, 255, 255)
+        for y in range(170, 254, 8): img[y:y + 4, 72:156] = 230             # rank badges (ranked)
+        return img
+    old = os.environ.get("PCS_WEAPON_ICONS"); os.environ["PCS_WEAPON_ICONS"] = str(f); layout = SCAN.LAYOUT
+    try:
+        flat = screen()
+        for lay, img in ((True, stretch(flat)), (None, stretch(flat)), (None, flat), (False, flat)):
+            SCAN.LAYOUT = lay
+            events, _, _ = SCAN.scan_frames([(100.0 + k, img) for k in range(10)], quiet=True)
+            sel = [e for e in events if e["kind"] == "select"]
+            assert len(sel) == 10, (lay, [e["kind"] for e in events])
+            assert [s["legend"] for s in sel[0]["data"]["squad"]] == ["alpha", "bravo", "charlie"], (lay, sel[0])
+            assert [s["self"] for s in sel[0]["data"]["squad"]] == [False, True, False] and sel[0]["data"]["ranked"], (lay, sel[0])
+        SCAN.LAYOUT = False                                     # a 16:9 scan never tries the stretched view
+        assert not [e for e in SCAN.scan_frames([(100.0, stretch(flat))], quiet=True)[0] if e["kind"] == "select"]
+    finally:
+        SCAN.LAYOUT = layout
+        os.environ.pop("PCS_WEAPON_ICONS", None)
+        if old is not None: os.environ["PCS_WEAPON_ICONS"] = old
+
+
 def test_clean_old_unpacked_copies():
     """At start the app removes the copies of itself left unpacked in %TEMP% (crash, shutdown), and nothing else:
     not the one it runs from, not one being unpacked, not one in use, not another program's folder."""

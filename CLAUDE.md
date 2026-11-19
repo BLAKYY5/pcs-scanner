@@ -116,7 +116,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
   emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
-- **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 only): the round emblem at
+- **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 and 4:3 stretched): the round emblem at
   the top right (x 2422..2539, y 8..123 at 1440p in a game; 134 px lower on the "waiting for players" screen). Pubs =
   red "unranked" emblem, Wildcard = teal; ranked shows a rank badge there instead. Compared as 16 x 16 colour cells on
   the cells the emblem fully covers with `pcs_banner.json` `emblems` (derived from the game's own emblem images by
@@ -380,7 +380,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   a window: the screen's background is often a saturated orange right behind them, and the hue test flipped with tiny
   pixel differences between the CPU and GPU decoders (7 Nov, one game: octane on CPU, pathfinder on GPU; the screen
   says octane). Look-alikes: the lobby's party list (rejected by position), odd single frames (rejected by duration),
-  and the orange background filling the badge window at the wrong roster position (rejected by size). 16:9 only so far.
+  and the orange background filling the badge window at the wrong roster position (rejected by size). 4:3 stretched: see
+  "4:3 stretched top band".
 - **Loading banner**: `pcs_hud.Banner` reads the mode word and the map word shown at the top left while players
   connect, by letter shape against `scanner/pcs_banner.json` (a table built from our own recordings, English
   only: ranked (RANKED, and RANKED - DROPZONE read as one word since 17 Nov 2026), wildcard, pubs (the word TRIOS
@@ -391,7 +392,22 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
 - **Squads left**: `pcs_hud.SquadsLeft` reads the number in front of "SQUADS LEFT" (top right) once a second,
   digit shapes in `pcs_banner.json` (`digits`). `games[].squadsLeft` = `[[t, n], ...]`, each lower count the first
   time it was read twice; the count never goes up inside a game. The last entry while the squad is alive is close
-  to the placement. 16:9 only.
+  to the placement. 4:3 stretched: `SquadsLeft43` (see "4:3 stretched top band").
+- **4:3 stretched top band** (19 Nov 2026): on a 4:3 stretched recording (1440 x 1080 stretched to 16:9) the legend
+  select screen, loading banner, playlist emblem, squads counter and own stats strip are read on the scanner's remapped
+  top (`view_top`: rows of the top band x 4/3, same as the ring clock and kill feed). The game draws that HUD at its
+  4:3 render size, so text is softer: `Legends43` (own name: little colour left, `MINE` 5), `Banner43` (white cut 190,
+  70 cells), `SquadsLeft43` (white cut 200; each digit must also be read the same by the grey own-stats test, font 'B'),
+  `OwnStats43` (lower ink cut, plate rows further out, the table's shapes softened (`_soften`), the damage and knocks
+  icons joined from their pieces; `read` also gives `_seen` = numbers whose place was found: a game total is refused
+  when its number was seen but not read twice after its last read). Layout known (`mode`, or votes for stretched) =
+  stretched view only; while nothing is known in a chunk (votes tied) both views are read and the select read whose
+  named slots score higher wins (the 16:9 reader "reads" a stretched roster with slots misplaced); a stretched banner
+  read must name its mode or map then. 16:9 recordings: identical scans (4 recordings, 18 games, every field of
+  scan.json and feed.json). Checked on synthetic stretched copies only (`tools/stretch43.py`; no real 4:3 recording
+  on the coach's PC): per keyframe never a wrong number for own stats (2 recordings, ~2,400 keyframes), squads 1 wrong
+  read (a higher count, ignored by the timeline). Not done: 16:10 (1728 x 1080) stretched, the RP panel / RP lines,
+  minimap, squad cards, bars and heals (bottom band) on stretched recordings.
 - **Own stats**: `pcs_hud.OwnStats` reads the recording player's kills, assists, knocks and damage from the strip under
   the squads counter. Nothing there is at a fixed place (plates come and go, the group shifts left as numbers grow,
   pubs has no knocks plate and smaller kills / assists digits): the strip is cut into white shapes (brighter than the
@@ -606,6 +622,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   run unchanged. Cache folder: `--cache` or `PCS_REGION_CACHE` (the coach's: `D:\tools\pcs-test-exe\region-cache`).
   It is game footage: never in the repo. 16:9 recordings only. Caches built before 16 Nov 2026 cut the counters box
   at x = 1990, which hides the skull of ranked kills: OwnStats leaves those kills unread on them (real frames are fine).
+- **Synthetic 4:3 stretched video** (`tools/stretch43.py video <16:9 rec> <out.mp4>`): each keyframe rebuilt as a 4:3
+  stretched player's recording shows its HUD (top band squashed to the top, bottom band to the bottom, middle centred,
+  then down to 1440 x 1080 and up again), all-intra H.264 with the same times and the game audio. HUD readers only:
+  the full map and drop screen are not rebuilt the way the game draws them. Game footage: never in the repo.
 - **Check set** (`tools/check_set.py score <file.json>`): truths read by eye at given times (squads left, kills,
   assists, knocks, damage, legends, mode, map), scored against the readers on the region cache: per field, truths /
   read / correct at the nearest keyframe and within 3 s, misses listed. Format in the module and
