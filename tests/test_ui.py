@@ -192,7 +192,7 @@ def test_recording_date_and_game_data_for_review():
         assert g["feedStats"]["players"][0]["legend"] == "crypto"
         assert g["ownKnocks"][0]["outcome"] == "revived" and o["ownKnocks"] is None          # own knocks reach the page
         # own knocks: an event and a tick on the kill feed lane, never a marker of the start lane (no letter for them)
-        assert "knock: ['', 'Knocked']" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
+        assert "knock: ['', t('Knocked')]" in js and "'respawn', 'knock', 'mark'" in js and "'You were knocked'" in js
         # heals and ability uses reach the page: small marks on the events lane, heals and ults also in Events
         assert g["heals"][0]["item"] == "battery" and g["abilities"][0]["kind"] == "ult" and o["heals"] is None
         assert "battery: 'Shield battery'" in js and "'Ultimate used'" in js and "laneOnly: true" in js and "if (e.laneOnly) return;" in js
@@ -236,7 +236,7 @@ def test_review_page_texts():
     assert "Your microphone is never recorded" not in js                       # Settings offers mic recording
     assert "Changes apply right away" not in js                                # most fields need Save changes
     assert "'Legend select'" in js and "'Game start'" in js and "Unsaved changes" in js
-    assert "'banner picked up'" in js and "'banner crafted'" in js and "'beacon' + at(r.beaconAt)" in js   # respawn steps
+    assert "'banner picked up'" in js and "'banner crafted'" in js and "t('beacon') + at(r.beaconAt)" in js   # respawn steps
     assert "+ 480)" not in js and "r.gbPerHour + ' GB" not in js               # GB per hour: one formula (gbHour)
     assert "File missing" in js and "Video format not supported" in js
 
@@ -1782,7 +1782,7 @@ def test_weapon_icons_from_hub():
         assert b.sync_icons() == "hub:error" and Path(core.ICONS_F).read_bytes() == one and drive["calls"] == calls
         # page words: the team link is hidden once the hub gives the icons (leaving-Drive plan step 2)
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-        for text in ("iconsFromHub", "${S.iconsFromHub ? `<label class=\"field\"><span>Weapon icons</span>",
+        for text in ("iconsFromHub", "${S.iconsFromHub ? `<label class=\"field\"><span>${t('Weapon icons')}</span>",
                      "no team link needed", "From the team hub", "invite link"):
             assert text in js, text
     finally:
@@ -1913,14 +1913,14 @@ def test_hub_only_results_page():
     assert "driveOff" not in js and "S.google" not in js and "/api/signin" not in js and "su-google" not in js
     assert "function setupDone(st) { return st.name && st.hub && choicesDone(st); }" in js
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
-    assert "const total = 3;" in setup and "${n} of ${total} done" in setup and "Google Drive" not in setup
+    assert "const total = 3;" in setup and "t('{n} of {total} done', {n, total})" in setup and "Google Drive" not in setup
     assert "Until you join, your results stay on this PC." in setup
     home = js[js.index("function renderHome"):js.index("function renderHome") + 6000]
     assert "hubSet() ?" in home and "Sent to the team hub" in home and "No team hub yet" in home
     assert "Kept on this PC until you join the hub" in home
     sett = js[js.index("function renderSettings"):js.index("function settingsBody")]
-    assert "${hubSet() ?" in sett and "Your results go to the team hub.</small>" in sett
-    assert "Your results stay on this PC until you join your team's hub" in sett and "f-signin" not in sett
+    assert "${hubSet() ?" in sett and "t('Your results go to the team hub.')}</small>" in sett
+    assert "Your results stay on this PC until you join your team\\'s hub" in sett and "f-signin" not in sett
     body = js[js.index("function settingsBody"):js.index("function settingsBody") + 600]
     assert "for (const k of ['team_link']) { const el = $('#f-' + k); if (el)" in body
     assert "$('#f-team_link').value" not in js
@@ -2651,7 +2651,7 @@ def test_watch_together_never_during_a_game():
         b.watch.leave()
         _fresh_hub()
     js = (Path(pcs_server.WEB) / "session.js").read_text(encoding="utf-8")
-    assert "apex: 'Apex started, so you left the session. The others keep watching.'" in js
+    assert "apex: t('Apex started, so you left the session. The others keep watching.')" in js
     assert "stopPlayers();" in js
 
 
@@ -2732,7 +2732,7 @@ def test_watch_session_plan_through_the_app():
         core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
     web = Path(pcs_server.WEB)
     js = (web / "session.js").read_text(encoding="utf-8")
-    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "Moment ${at + 1} of ${items.length}",
+    for text in ("Start with plan", "Session plans", "Previous", "'Next'", "t('Moment {n} of {total}', {n: at + 1, total: items.length})",
                  "N / P = next / previous moment", "control('item', {index: i})", "Use a plan…"):
         assert text in js, text
     rx = (web / "review-extras.js").read_text(encoding="utf-8")
@@ -2881,8 +2881,8 @@ def test_review_kill_feed_our_squad():
     old, sides = pcs_server.feed_lines([{"t": 5.0, "jpg": "X"}])
     assert not sides and old == [{"t": 5.0, "jpg": "X"}]
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-    for text in ("Only our squad", "Kill feed sides not read in this scan", "Preparing ${x.t.key === 'game' ? 'game sound'",
-                 "'knocked'", "'got knocked'", "'died'", ">Theatre</button>", "pcs-theatre"):
+    for text in ("Only our squad", "Kill feed sides not read in this scan", "x.t.key === 'game' ? t('Preparing game sound…')",
+                 "'We knocked'", "'You got knocked'", "'{who} died'", ">${t('Theatre')}</button>", "pcs-theatre"):
         assert text in js, text
 
 
@@ -2925,7 +2925,7 @@ def test_review_respawns_like_kills():
         assert d["games"][1]["respawns"] is None                                           # older scan: just missing
         js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
         css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
-        assert "respawned`" in js and "Respawned</span>" in js and ".tick.respawn" in css
+        assert "t('{who} respawned', {who})" in js and "${t('Respawned')}</span>" in js and ".tick.respawn" in css
         page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
         try:
             end = time.time() + 15
@@ -3199,7 +3199,7 @@ def test_minimap_transform_and_page():
     html = (web / "index.html").read_text(encoding="utf-8")
     assert '<script src="minimap.js"></script>' in html and 'href="minimap.css"' in html
     app = (web / "app.js").read_text(encoding="utf-8")
-    assert "minimapSetup(d, v)" in app and "minimapToggle()" in app and "<kbd>M</kbd> map" in app
+    assert "minimapSetup(d, v)" in app and "minimapToggle()" in app and "<kbd>M</kbd> ${t('map')}" in app
     # nothing of EA's in the app: no picture files next to the page
     assert not [f for f in web.rglob("*") if f.suffix.lower() in (".jpg", ".jpeg", ".img")]
 
@@ -3345,7 +3345,7 @@ def test_minimap_layers_and_quiet_drawing():
     web = Path(pcs_server.WEB)
     js = (web / "minimap.js").read_text(encoding="utf-8")
     for text in ("ringCircles", "/api/squadpaths?id=", "/api/squadpaths?gameKey=", "MM_EVERY_MS = 250", "document.hidden",
-                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">Squad</button>", "pcs-map-squad",
+                 "'visibilitychange'", "feedEvent(l, g)", "RV.notes.notes", ">${t('Squad')}</button>", "pcs-map-squad",
                  "No teammate\\'s recording of this game on the hub", "Squad paths need the team hub",
                  "function wtMapSetup", "function wtMapTick", "pcs-wt-map", "Click the path or a mark to go there"):
         assert text in js, text
@@ -3353,7 +3353,7 @@ def test_minimap_layers_and_quiet_drawing():
     assert "ringCircles" in pcs_server.GAME_FIELDS                                   # passed to the page when the scan has it
     assert "ownDeaths" in pcs_server.GAME_FIELDS and "respawns" in pcs_server.GAME_FIELDS   # lives / dead time in the game bar
     app = (web / "app.js").read_text(encoding="utf-8")
-    assert "function livesOf(g)" in app and "<small>Dead</small>" in app and "<small>Lives</small>" in app
+    assert "function livesOf(g)" in app and "<small>${t('Dead')}</small>" in app and "<small>${t('Lives')}</small>" in app
     assert "if (!Array.isArray(g.respawns) || g.tEndGame == null) return null;" in app   # older scans: nothing, never 0
     ses = (web / "session.js").read_text(encoding="utf-8")
     assert 'id="wtMap"' in ses and "wtMapSetup($('#wtMap'), st," in ses
@@ -4959,6 +4959,199 @@ def test_clip_in_review_page():
     root = web.parent.parent
     assert "pcs_recorder.clips" in (root / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "import pcs_recorder.clips" in (root / "app" / "pcs_app.py").read_text(encoding="utf-8")
+
+# ------------------------------------------------------------------ languages (app/web/i18n, pcs_i18n)
+
+GAME_WORDS = ("knock", "third party", "ring", "care package", "harvester", "banner", "beacon", "Ranked", "Pubs", "Wildcard",
+              "Scrims", "RP", "kill feed", "squad", "dropship", "stronghold", "Ultimate", "Tactical")
+
+
+def _i18n_tables():
+    d = Path(pcs_server.WEB) / "i18n"
+    return {f.stem: json.loads(f.read_text(encoding="utf-8")) for f in d.glob("*.json")}
+
+
+def test_language_tables_match():
+    """One table per language, English text as the key. Every key of every language is in en.json, French has them
+    all (none falls back to English), every t('...') of the web UI is in en.json, a translation keeps the same {values},
+    and the game words stay in English in the French text."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+    import i18n_keys
+    tables = _i18n_tables()
+    en, fr = tables["en"], tables["fr"]
+    assert en["_language"] == "English" and fr["_language"] == "Français"
+    keys = {k for k in en if not k.startswith("_")}
+    assert len(keys) > 900, len(keys)
+    for code, tr in tables.items():
+        extra = [k for k in tr if not k.startswith("_") and k not in keys]
+        assert not extra, (code, extra[:5])
+    missing = sorted(k for k in keys if k not in fr)
+    assert not missing, missing[:10]                       # documented fallback: none for French today
+    used = i18n_keys.js_keys()
+    assert not [k for k in used if k not in keys], [k for k in used if k not in keys][:10]
+    for k in keys:
+        assert sorted(re.findall(r"\{(\w+)\}", k)) == sorted(re.findall(r"\{(\w+)\}", fr[k])), (k, fr[k])
+        for w in GAME_WORDS:
+            if re.search(r"(?<![A-Za-z])" + re.escape(w), k, re.I):
+                assert re.search(re.escape(w), fr[k], re.I), (w, k, fr[k])
+    gloss = (Path(pcs_server.WEB) / "i18n" / "glossary.md").read_text(encoding="utf-8")
+    for w in ("knock", "third party", "care package", "harvester", "EVO", "banner", "beacon", "RP", "Diamond", "Wildcard"):
+        assert w in gloss, w
+
+
+def _web_leftovers(src):
+    """Player-facing English in a web UI file that does not go through t(): text between tags, title / placeholder /
+    aria-label / alt values, single-quoted sentences. Names and game words (glossary.md) may stay."""
+    keep = {"YouTube", "EEC", "Discord", "TeamSpeak", "PCS Scanner", "Scanner", "PCS Esports", "Scan", "ner", "Coach", "IGL",
+            "Fragger", "Anchor", "Support", "Sub", "Scrims", "Ranked", "Pubs", "Wildcard", "Scrim", "HEVC / H.264",
+            "World's Edge", "Storm Point", "E-District", "Olympus", "Broken Moon", "Kings Canyon", "Mad Maggie",
+            "Shield cell", "Shield battery", "Med kit", "Phoenix kit", "Waiting for Apex", "Mumble.exe", "Mb/s", "MB", "GB"}
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    src = re.sub(r"(?m)(^|\s)//.*$", r"\1", src)
+    src = re.sub(r"""\b(?:t|tx)\(\s*(?:'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*")""", "t(''", src)
+    src = re.sub(r'(<[^>]*\sdata-i18n="[^"]*"[^>]*>)[^<]*', r"\1", src)          # index.html: translated at load
+    src = re.sub(r'\b(?:title|aria-label)="[^"]*"(?=[^>]*data-i18n-(?:title|aria)=)', "", src)
+    src = re.sub(r'data-i18n(?:-title|-aria)?="[^"]*"', "", src)
+    out = []
+    for m in re.finditer(r">([^<>]+)<", src):
+        seg = re.sub(r"\$\{[^{}]*\}", " ", m.group(1)).strip()
+        if (re.fullmatch(r"[A-Za-z][A-Za-z ,.…:!’'/-]*", seg) and re.search(r"[A-Za-z]{2,}", seg) and seg not in keep
+                and (seg[0].isupper() or " " in seg) and not re.search(r"\w\.\w", seg)):
+            out.append(seg)
+    for m in re.finditer(r'\b(title|placeholder|aria-label|alt)="([^"$]*)"', src):
+        v = m.group(2)
+        if re.search(r"[A-Za-z]{3,}", v) and v not in keep and not re.search(r"://|\\|^\w+\.\w+$", v):
+            out.append(f'{m.group(1)}="{v}"')
+    for m in re.finditer(r"'((?:[^'\\\n]|\\.)*)'", src):
+        v = m.group(1)
+        if v in keep or re.search(r"[<>=#{}$;]|\.\w+\(|^\W", v):
+            continue
+        if re.fullmatch(r"[A-Z][a-z’\\']+(?: [A-Za-z’\\',.:…!?/-]+)+[.…!?]?", v):
+            out.append(v)
+    return out
+
+
+def test_no_hardcoded_english_in_web_ui():
+    """What the player reads in the main pages goes through t() (or data-i18n in index.html); the check finds the
+    English that was there before (several hundred lines) and nothing now."""
+    web = Path(pcs_server.WEB)
+    assert _web_leftovers('<b>Get set up</b> <button title="Hide this">x</button> toast(\'Saved the file.\')')
+    for name in ("index.html", "app.js", "session.js", "review-extras.js", "minimap.js", "clip.js"):
+        left = _web_leftovers((web / name).read_text(encoding="utf-8"))
+        assert not left, (name, left[:10])
+    html = (web / "index.html").read_text(encoding="utf-8")
+    assert html.index("i18n.js") < html.index("app.js")      # t() exists before the pages are drawn
+
+
+def test_python_text_in_the_players_language():
+    """Python keeps writing English (app.log, Activity data); what reaches the player is matched to the table with its
+    values: corner messages, tray, Activity lines and reasons shown in the page."""
+    import pcs_i18n
+    try:
+        pcs_i18n.reset(); pcs_i18n.set_language("fr")
+        tx = pcs_i18n.tx
+        assert tx("Results sent") == "Résultats envoyés"
+        assert tx("Scan of Apex Legends_2026.11.02-09.03.mp4 done, but not sent: Hub down") == \
+            "Scan de Apex Legends_2026.11.02-09.03.mp4 terminé, mais non envoyé : Hub arrêté"      # value translated too
+        assert tx("[Auto-record] Results not sent yet: Hub down. They are kept and sent automatically as soon as it works.") == \
+            "[Enregistrement auto] Résultats pas encore envoyés : Hub arrêté. Ils sont gardés et envoyés automatiquement dès que ça marche."
+        assert tx("2 games: World's Edge, Storm Point") == "2 parties : World's Edge, Storm Point"     # map names stay
+        assert tx("not sent yet: no team hub") == "pas encore envoyé : pas de hub d'équipe"
+        assert tx("Something the table doesn't know") == "Something the table doesn't know"
+        assert pcs_i18n.t("Settings") == "Paramètres" and pcs_i18n.t("A key no table has") == "A key no table has"
+        assert pcs_i18n.t("Update to {tag}", tag="v1.12.0") == "Mettre à jour vers v1.12.0"
+        from pcs_recorder import runtime
+        assert runtime.tx("Open PCS Scanner") == "Ouvrir PCS Scanner"          # tray menu and corner messages
+        pcs_i18n.set_language("en")
+        assert tx("Results sent") == "Results sent" and runtime.tx("Quit") == "Quit"
+        # the app's own messages stay English (app.log, Activity data); only the page shows them translated
+        pcs_i18n.set_language("fr")
+        b = pcs_server.Backend()
+        b.say("Auto-record is off.")
+        assert b.messages[-1]["text"] == "Auto-record is off."
+    finally:
+        pcs_i18n.reset()
+
+
+def test_language_setting():
+    """Settings → Language: saved in the app's settings, the page's tables follow at once. A settings file from an
+    older version (no language) loads and gets the Windows display language when the app has it, else English."""
+    import pcs_i18n
+    old = dict(core.SETTINGS)
+    f = TMP / "old-settings.json"
+    f.write_text(json.dumps({"player": "Xno", "role": "", "uploaded": [], "library": []}), encoding="utf-8")
+    s = core.load_json(str(f), {})
+    assert s["player"] == "Xno" and "language" not in s
+    assert pcs_i18n.pick(s) in ("en", "fr") and pcs_i18n.pick(s) == pcs_i18n.windows_language()
+    assert pcs_i18n.pick({"language": "fr"}) == "fr" and pcs_i18n.pick({"language": "xx"}) == pcs_i18n.windows_language()
+    assert [l["code"] for l in pcs_i18n.languages()][:1] == ["en"] and {"en", "fr"} <= {l["code"] for l in pcs_i18n.languages()}
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        pcs_i18n.reset()
+        st, r, _ = call(srv, "/api/settings", {"language": "fr"})
+        assert st == 200 and core.SETTINGS["language"] == "fr" and r["language"] == "fr"
+        assert json.loads(Path(core.SETTINGS_F).read_text(encoding="utf-8"))["language"] == "fr"
+        st, d, _ = call(srv, "/api/i18n")
+        assert st == 200 and d["lang"] == "fr" and d["tr"]["Settings"] == "Paramètres" and d["en"]["Settings"] == "Settings"
+        assert {"code": "fr", "name": "Français"} in d["languages"]
+        assert call(srv, "/api/i18n", token=False)[0] == 403
+        st, r, _ = call(srv, "/api/settings", {"language": "xx"})
+        assert st >= 400 and core.SETTINGS["language"] == "fr"
+        call(srv, "/api/settings", {"language": "en"})
+        assert call(srv, "/api/i18n")[1]["tr"] == {}
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "id=\"lang-select\"" in js and "langChoiceHTML()" in js and "location.reload()" in js
+    finally:
+        srv.stop()
+        core.SETTINGS.clear(); core.SETTINGS.update(old); core.save_settings()
+        pcs_i18n.reset()
+
+
+def test_language_switch_changes_the_page():
+    """In a real page (headless Edge): English, then French after the setting changes; the pages draw without an
+    error in both languages (a t() hidden by a local variable would throw here)."""
+    import pcs_i18n
+    old = dict(core.SETTINGS)
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    page = None
+    try:
+        call(srv, "/api/settings", {"language": "en"})
+        page = _Page(srv.url)
+        pages = ["#home", "#recordings", "#settings", "#youtube", "#team", "#home"]
+
+        def visit():
+            page.js("window.__errs = window.__errs || []; window.onerror = m => { __errs.push(String(m)); }; 1")
+            seen = {}
+            for h in pages:
+                page.js(f"location.hash = '{h}'; 1")
+                time.sleep(0.8)
+                seen[h] = page.js("document.querySelector('#main').textContent")
+            return seen
+        en = visit()
+        assert page.js("document.querySelector('#nav a[data-page=settings]').textContent") == "Settings"
+        assert "Recordings" in en["#recordings"] and "Language" in en["#settings"], en["#settings"][:200]
+        call(srv, "/api/settings", {"language": "fr"})
+        page.send("Page.reload")
+        end = time.time() + 15
+        while time.time() < end and page.js("typeof I18N === 'object' && I18N.lang") != "fr":
+            time.sleep(0.2)
+        fr = visit()
+        assert page.js("document.querySelector('#nav a[data-page=settings]').textContent") == "Paramètres"
+        assert page.js("document.documentElement.lang") == "fr"
+        assert "Enregistrements" in fr["#recordings"] and "Langue" in fr["#settings"] and "Paramètres" in fr["#settings"]
+        assert fr["#settings"] != en["#settings"]
+        assert page.js("window.__errs") == [], page.js("window.__errs")
+    finally:
+        if page:
+            page.close()
+        srv.stop()
+        core.SETTINGS.clear(); core.SETTINGS.update(old); core.save_settings()
+        pcs_i18n.reset()
+
 
 if __name__ == "__main__":
     try:

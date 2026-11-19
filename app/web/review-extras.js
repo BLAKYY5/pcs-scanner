@@ -32,13 +32,13 @@ async function reviewExtras(d, v) {
   const seen = new Set(), sessions = games.flatMap(g => g.sessions || []).filter(x => !seen.has(x.id) && seen.add(x.id))
     .sort((a, b) => (b.started || 0) - (a.started || 0));
   box.hidden = false;
-  box.innerHTML = `<div class="row between"><h3>Watch together</h3>
-      ${talk ? `<label class="row rx-switch"><input type="checkbox" id="rxTalk"> <b>Review talk</b> <span class="faint">the coach's review over your video</span></label>` : ''}</div>
+  box.innerHTML = `<div class="row between"><h3>${t('Watch together')}</h3>
+      ${talk ? `<label class="row rx-switch"><input type="checkbox" id="rxTalk"> <b>${t('Review talk')}</b> <span class="faint">${t('the coach\'s review over your video')}</span></label>` : ''}</div>
     <div class="rx-talkstate faint" id="rxState" hidden></div>
-    ${marks.length ? `<div class="rx-marks"><span class="faint">Session bookmarks</span>${marks.map(b => `<button class="rx-mark" data-t="${b.rt}">
-      <span class="mono">${fmtT(b.rt)}</span> ${esc(b.text || 'Bookmark')}${b.focus ? ` <span class="faint">· ${esc(b.focus)}'s view</span>` : ''}</button>`).join('')}</div>` : ''}
-    ${plan.length ? `<div class="rx-marks"><span class="faint">Session plan</span>${plan.map(m => `<button class="rx-mark ${m.covered ? '' : 'skipped'}" data-t="${m.rt}" title="${m.covered ? 'Watched in the session' : 'Skipped in the session'}">
-      <span class="mono">${fmtT(m.rt)}</span> ${esc(m.note || 'Moment')}${m.covered ? '' : ' <span class="faint">· skipped</span>'}</button>`).join('')}</div>` : ''}
+    ${marks.length ? `<div class="rx-marks"><span class="faint">${t('Session bookmarks')}</span>${marks.map(b => `<button class="rx-mark" data-t="${b.rt}">
+      <span class="mono">${fmtT(b.rt)}</span> ${esc(b.text || t('Bookmark'))}${b.focus ? ` <span class="faint">· ${t('{player}\'s view', {player: esc(b.focus)})}</span>` : ''}</button>`).join('')}</div>` : ''}
+    ${plan.length ? `<div class="rx-marks"><span class="faint">${t('Session plan')}</span>${plan.map(m => `<button class="rx-mark ${m.covered ? '' : 'skipped'}" data-t="${m.rt}" title="${m.covered ? t('Watched in the session') : t('Skipped in the session')}">
+      <span class="mono">${fmtT(m.rt)}</span> ${esc(m.note || t('Moment'))}${m.covered ? '' : ' <span class="faint">· ' + t('skipped') + '</span>'}</button>`).join('')}</div>` : ''}
     ${sessions.length ? `<div class="rx-sessions">${sessions.map(sessionLine).join('')}</div>` : ''}`;
   $$('.rx-mark', box).forEach(b => b.onclick = () => { v.currentTime = +b.dataset.t; v.pause(); });
   const sw = $('#rxTalk');
@@ -47,14 +47,15 @@ async function reviewExtras(d, v) {
 
 /* one line per session: when, how long, who was there, what it covered */
 function sessionLine(x) {
-  const mins = sec => sec == null ? '' : sec < 60 ? 'under 1 min' : `${Math.round(sec / 60)} min`;
-  const when = x.started ? new Date(x.started * 1000).toLocaleString(undefined, {weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}) : 'Session';
+  const mins = sec => sec == null ? '' : sec < 60 ? t('under 1 min') : `${Math.round(sec / 60)} min`;
+  const when = x.started ? new Date(x.started * 1000).toLocaleString(undefined, {weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit'}) : t('Session');
   const bits = [];
   if (x.length != null) bits.push(mins(x.length));
   if (x.attendance && x.attendance.length) bits.push(x.attendance.map(a => `${esc(a.name)} ${mins(a.seconds)}`).join(', '));
-  if (x.plan) bits.push(`${x.plan.covered} of ${x.plan.total} planned moments${x.plan.skipped ? `, ${x.plan.skipped} skipped` : ''}`);
-  const n = (v, w) => v ? `${v} ${w}${v === 1 ? '' : 's'}` : '';
-  const counts = [n(x.bookmarks, 'bookmark'), n(x.flags, 'flag'), n(x.notes, 'note'), n(x.drawings, 'drawing')].filter(Boolean);
+  if (x.plan) bits.push(t('{covered} of {total} planned moments', {covered: x.plan.covered, total: x.plan.total}) + (x.plan.skipped ? ', ' + t('{n} skipped', {n: x.plan.skipped}) : ''));
+  const n = (v, one, many) => v ? (v === 1 ? one : many(v)) : '';
+  const counts = [n(x.bookmarks, t('1 bookmark'), k => t('{n} bookmarks', {n: k})), n(x.flags, t('1 flag'), k => t('{n} flags', {n: k})),
+    n(x.notes, t('1 note'), k => t('{n} notes', {n: k})), n(x.drawings, t('1 drawing'), k => t('{n} drawings', {n: k}))].filter(Boolean);
   if (counts.length) bits.push(counts.join(' · '));
   return `<div class="rx-session"><b>${esc(when)}</b> <span class="faint">${bits.join(' · ')}</span></div>`;
 }
@@ -66,11 +67,11 @@ function startTalk() {
   const v = RX.data && RX.data.v; if (!v) return;
   stopTalk();
   RX.on = true; RX.done = new Set(); RX.lastT = v.currentTime;
-  RX.audios = talkTracks().map(t => {
-    const a = new Audio(`/talk/${t.id}?t=${encodeURIComponent(TOKEN)}`);
+  RX.audios = talkTracks().map(tr => {
+    const a = new Audio(`/talk/${tr.id}?t=${encodeURIComponent(TOKEN)}`);
     a.preload = 'auto';
-    a.addEventListener('error', () => setState('Review talk can\'t be loaded (the team hub may be out of reach).'));
-    return {a, t};
+    a.addEventListener('error', () => setState(t('Review talk can\'t be loaded (the team hub may be out of reach).')));
+    return {a, t: tr};
   });
   v.addEventListener('seeking', onSeekBack);
   v.addEventListener('play', onUserPlay);
@@ -111,15 +112,15 @@ function talkTick() {
     return;
   }
   if (!v.paused) {
-    for (const t of talkTracks().slice(0, 1)) {
-      const g0 = RX.lastT - t.jumpAt, g1 = rt - t.jumpAt;
-      const s = t.segments.find(x => x.g0 === x.g1 && x.a1 - x.a0 >= PAUSE_TALK_MIN_S && x.g0 > g0 && x.g0 <= g1 + 0.01 && !RX.done.has(x.a0));
+    for (const tr of talkTracks().slice(0, 1)) {
+      const g0 = RX.lastT - tr.jumpAt, g1 = rt - tr.jumpAt;
+      const s = tr.segments.find(x => x.g0 === x.g1 && x.a1 - x.a0 >= PAUSE_TALK_MIN_S && x.g0 > g0 && x.g0 <= g1 + 0.01 && !RX.done.has(x.a0));
       if (s && g1 - g0 < 2) {
         RX.done.add(s.a0);
         v.pause();
         RX.held = {s, auto: true};
         RX.audios.forEach(x => { x.a.currentTime = s.a0; x.a.playbackRate = 1; x.a.play().catch(() => {}); });
-        setState(`The coach talked here with the game paused (${Math.round(s.a1 - s.a0)} s). The video goes on after.`);
+        setState(t('The coach talked here with the game paused ({n} s). The video goes on after.', {n: Math.round(s.a1 - s.a0)}));
         RX.lastT = rt;
         return;
       }
@@ -136,5 +137,5 @@ function talkTick() {
     if (Math.abs(a.currentTime - at.pos) > 0.3) a.currentTime = at.pos;
     if (a.paused) a.play().catch(() => {});
   });
-  setState(any ? '' : (v.paused ? '' : 'No review talk at this moment.'));
+  setState(any ? '' : (v.paused ? '' : t('No review talk at this moment.')));
 }

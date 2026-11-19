@@ -37,10 +37,13 @@ def selftest(out):
         import pcs_recorder.precheck   # noqa: F401
         import pcs_recorder.comms, pcs_transcribe   # noqa: F401
         import pcs_recorder.clips   # noqa: F401
+        import pcs_i18n   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
         ff = os.path.join(getattr(sys, '_MEIPASS', ''), 'ffmpeg', 'ffmpeg.exe')
-        web = all(os.path.exists(os.path.join(pcs_server.WEB, f)) for f in ('index.html', 'app.css', 'app.js'))
+        web = all(os.path.exists(os.path.join(pcs_server.WEB, f)) for f in ('index.html', 'app.css', 'app.js', 'i18n.js', 'i18n/en.json'))
+        langs = [l['code'] for l in pcs_i18n.languages()]                # the string tables are in the exe
+        web = web and 'fr' in langs and pcs_i18n.tables('fr')['tr'].get('Settings') not in (None, 'Settings')
         s = pcs_server.Server(pcs_server.Backend()); s.start()            # the local server answers
         import urllib.request
         with urllib.request.urlopen(f'http://127.0.0.1:{s.port}/api/state?t={s.token}', timeout=5) as resp:
@@ -48,7 +51,7 @@ def selftest(out):
         s.stop()
         msg = (f'OK numpy {numpy.__version__} scipy {scipy.__version__} scanner {pcs_scan.VERSION} '
                f'ffmpeg {os.path.exists(ff)} upload {os.path.exists(os.path.join(core.HERE, "client.json"))} '
-               f'ui {web and api} autorecord ok')
+               f'ui {web and api} languages {",".join(langs)} autorecord ok')
         if not (web and api):
             msg = 'FAIL interface files or local server missing: ' + msg
     except Exception:
