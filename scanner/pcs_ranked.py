@@ -311,9 +311,17 @@ class Tracker:
                          last_twice(L['rp'])[0] is not None and (last_twice(M['rp'])[0] or 0) > last_twice(L['rp'])[0] and
                          _one(L['rank']) and _one(L['rank']) == _one(M['rank']) and
                          _one([color_of(h) for h in L['color'] if h is not None]) == _one([color_of(h) for h in M['color'] if h is not None]))
-                if same or grown:
+                # a line lost for a keyframe (bright background): the same number and killer colour going on within
+                # 3 s, at most one place from where it was, with words that look alike (two kills by one player with
+                # the same RP can follow each other: egoyebli then [HARU] Reders, +9 each, 18 Nov).
+                lc = _one([color_of(h) for h in L['color'] if h is not None]); mc = _one([color_of(h) for h in M['color'] if h is not None])
+                twin = (0 < M['ts'][0] - L['ts'][-1] <= 3 and abs(M['y'] - L['last']['y']) <= 50 and
+                        _one(L['rp']) is not None and _one(L['rp']) == _one(M['rp']) and lc == mc and
+                        float((M['sig0'] ^ L['last']['sig']).mean()) < 0.15)
+                if same or grown or twin:
                     rows = sorted(zip(L['ts'] + M['ts'], L['rp'] + M['rp'], L['rank'] + M['rank'], L['color'] + M['color'], L['what'] + M['what']), key=lambda r: r[0])
                     L['ts'], L['rp'], L['rank'], L['color'], L['what'] = (list(x) for x in zip(*rows))
+                    if M['last']['t'] > L['last']['t']: L['last'] = M['last']
                     M['merged'] = True
         for L in Ls:
             if L.get('merged'): continue
