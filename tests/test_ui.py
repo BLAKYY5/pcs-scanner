@@ -248,6 +248,7 @@ class _S:            # recorder settings stand-in
     comms_consent, discord_audio, mic_audio, send_mic, hk_sounds = False, True, True, True, True
     mic_device = "default"
     share_tracks, share_asked, transcript_consent, transcript_asked = False, False, False, False
+    share_clips = False
     hk_mark, hk_mute_game, hk_mute_discord, hk_mute_mic = "ctrl+alt+m", "ctrl+alt+1", "ctrl+alt+2", "ctrl+alt+3"
     yt_enabled, yt_privacy, yt_audio, yt_scrims_only, yt_gap_min, yt_since = False, "unlisted", "game", True, 45, 0.0
     yt_when, night_from, night_to, night_idle_min, night_shutdown = "night", 1, 7, 20, False
@@ -4199,6 +4200,8 @@ class TeamHub:
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         import threading
         self.calls, self.shared, self.rec = [], [], rec
+        self.bodies = []                 # what PUT /api/me/sharing got
+        self.clips = None                # share_clips per track: None = an older hub without the field
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -4219,7 +4222,8 @@ class TeamHub:
                     return self._json(401, {"error": "bad_key"})
                 if self.path == "/api/me/sharing" and self.command == "PUT":
                     n = int(self.headers.get("Content-Length") or 0)
-                    hub.shared.append(json.loads(self.rfile.read(n))["share_tracks"])
+                    hub.bodies.append(json.loads(self.rfile.read(n)))
+                    hub.shared.append(hub.bodies[-1]["share_tracks"])
                     return self._json(200, {"share_tracks": hub.shared[-1]})
                 if self.path.startswith("/api/team-tracks"):
                     q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
@@ -4227,6 +4231,8 @@ class TeamHub:
                         return self._json(200, {"recording": q["recording"][0], "games": []})
                     t = {"player": "Zed", "recording": "zed-rec", "scan_id": 7, "name": "zed-rec.mic.m4a",
                          "size": len(MIC_BYTES)}
+                    if hub.clips is not None:
+                        t["share_clips"] = hub.clips
                     return self._json(200, {"recording": hub.rec, "player": "Moe", "games": [
                         {"gameKey": "g-1", "jumpAt": 200.0, "start": 50.0, "end": 1550.0,
                          "tracks": [{**t, "jumpAt": 340.0}], "skipped": [{"player": "Kai", "reason": "not_shared"}]},
@@ -4302,6 +4308,7 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert fake.shared == [False, True]
+        assert fake.bodies[-1] == {"share_tracks": True, "share_clips": False}   # clips: a separate yes, off by default
         asked = [c[1] for c in fake.calls if c[1].startswith("/api/team-tracks")]
         assert asked == ["/api/team-tracks?recording=" + rec.stem], asked   # not the old one, not the missing one
         got = teamtracks.base_dir() / rec.stem / "Zed-7.mic.m4a"
@@ -4319,6 +4326,13 @@ def test_team_tracks_download():
         assert tt.tick()
         _tt_wait(tt)
         assert len([c for c in fake.calls if c[1] == "/api/scans/7/file"]) == 1
+        # "Allow my voice in teammates' clips" on: the hub is told again, with the clips answer
+        s.share_clips = True
+        assert tt.sync_sharing() is True and fake.bodies[-1] == {"share_tracks": True, "share_clips": True}
+        n = len(fake.bodies)
+        assert tt.sync_sharing() is True and len(fake.bodies) == n             # unchanged: not sent again
+        s.share_clips = False
+        assert tt.sync_sharing() is True and fake.bodies[-1]["share_clips"] is False
         # Apex starting during a download: stopped, no partial file, tried again later
         got.unlink()
         tt.st["recs"][rec.stem]["checked"] = 0
@@ -4871,6 +4885,7 @@ def test_clip_routes_and_privacy():
     consent); a teammate's mic only when the team hub says right now that they still share it (hub out of reach or
     own sharing off = left out, said so); refused while Apex runs; too long for 10 MB refused with the limit."""
     b, srv, fake, v, vid, started = _clip_server("clipapi")
+    fake.clips = True                                        # Zed allows his voice in teammates' clips
     try:
         body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7", "9"], "notes": False}
         code, r, _ = call(srv, "/api/clips/make", body)
@@ -4914,6 +4929,40 @@ def test_clip_routes_and_privacy():
         code, r, _ = call(srv, "/api/clips/make", {**body, "team": [], "notes": True, "player": "Moe"})
         assert code == 200 and started[-1]["notes"] == [{"t": 12, "dur": 5, "text": "for Moe"}]
     finally:
+        srv.stop()
+        _fresh_hub().internet_up = _clip_server.internet_up
+
+
+def test_clip_teammate_voice_needs_their_clips_yes():
+    """Coach, 20 Nov 2026: a teammate's voice goes into a clip only when they said yes to clips (a separate answer,
+    off by default); sharing the mic with the team doesn't cover it. Said no, no answer, or an older hub without the
+    field = left out, and said so. The player's own answer: in Settings, saved, sent to the hub with the sharing one."""
+    from pcs_recorder import settings as st, teamtracks
+    b, srv, fake, v, vid, started = _clip_server("clipvoice")
+    try:
+        body = {"id": vid, "start": 10, "end": 40, "size": "discord", "tracks": [0, 2], "team": ["7"], "notes": False}
+        for clips in (None, False):                          # an older hub (no field), then Zed said no
+            fake.clips = clips
+            code, r, _ = call(srv, "/api/clips/make", body)
+            assert code == 200 and started[-1]["team"] == [], r
+            assert started[-1]["leftOut"] == ["Zed's mic: they haven't allowed their voice in clips"], started[-1]
+        fake.clips = True
+        code, r, _ = call(srv, "/api/clips/make", body)
+        assert code == 200 and [p for _, _, p in started[-1]["team"]] == ["Zed"] and started[-1]["leftOut"] == []
+        # the player's own answer: off by default, a Settings field, needs the mic shared to count
+        assert st.Settings().share_clips is False and "share_clips" in pcs_server.REC_FIELDS
+        s = _S(str(TMP))
+        s.comms_consent = s.share_tracks = True
+        s.share_clips = True
+        assert teamtracks.clips_answer(s) is True
+        s.share_tracks = False
+        assert teamtracks.clips_answer(s) is False
+        js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+        assert "f-share_clips" in js and "'share_clips'" in js
+        fr = _i18n_tables()["fr"]
+        assert fr["Allow my voice in teammates' clips"] != "Allow my voice in teammates' clips"
+    finally:
+        fake.stop()
         srv.stop()
         _fresh_hub().internet_up = _clip_server.internet_up
 

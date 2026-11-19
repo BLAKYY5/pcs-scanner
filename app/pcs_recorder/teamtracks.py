@@ -15,6 +15,10 @@ the same games, so the review player can play them next to the player's own soun
   when complete. A recording's folder is removed with the recording (retention, delete); nothing else is touched.
 - The player's answer goes to the hub (`PUT /api/me/sharing`), so teammates' apps skip a player who said no and the
   hub refuses their mic track to teammates. Never answered = nothing sent (the hub keeps its default).
+- Clips are a separate yes (coach, 20 Nov 2026): sharing the mic with the team does not put the player's voice in a
+  teammate's clip (Discord). "Allow my voice in teammates' clips" (`share_clips`, off by default) goes to the hub
+  with the sharing answer (`share_clips`); the hub lists it per track (`share_clips` in `GET /api/team-tracks`), and a
+  clip takes a teammate's mic only when that is true (missing = an older hub = left out).
 - State in `team-tracks.json` (no key, no personal data beyond teammates' names as the hub gives them).
 """
 from __future__ import annotations
@@ -74,6 +78,11 @@ def active(s) -> bool:
     return sharing_answer(s) is True
 
 
+def clips_answer(s) -> bool:
+    """The player's voice may go into teammates' clips: their own separate yes, and only while they share the track."""
+    return active(s) and bool(getattr(s, "share_clips", False))
+
+
 def _background(on: bool) -> None:
     from .hubbackup import _background as bg
     bg(on)
@@ -120,11 +129,13 @@ class TeamTracks:
         key = hub.get_key()
         if ans is None or not s.hub_url or not key:
             return None
-        who = (s.hub_url, hub._fp(key), ans)
+        clips = clips_answer(s)
+        who = (s.hub_url, hub._fp(key), ans, clips)
         if self.synced == who and not force:
             return ans
         try:
-            r = hub.request(s.hub_url, "PUT", "/api/me/sharing", json={"share_tracks": ans}, timeout=8)
+            r = hub.request(s.hub_url, "PUT", "/api/me/sharing", json={"share_tracks": ans, "share_clips": clips},
+                            timeout=8)
         except hub.HubError as e:
             log.info("sharing answer not sent: %s", e)
             return None
