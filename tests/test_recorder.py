@@ -70,8 +70,7 @@ class FakeHub:
 
     def upload(self, files):
         if self.down:
-            from pcs_recorder.core import NeedsSignIn
-            raise NeedsSignIn("Your Google sign-in has expired")
+            raise ConnectionError("the team hub didn't answer")
         self.uploads.append([f.name for f in files])
         return ["the team hub"]
 
@@ -850,7 +849,7 @@ def test_skip_and_offline_hub():
     assert list(r2.idx.values())[0].status == "scanned" and not hub2.uploads   # kept for retry
     fails = [n for n in ui2.notes if n[0] == "Results not sent yet"]
     assert len(fails) == 1 and fails[0][2] is True, ui2.notes                # said once, stays on screen
-    assert fails[0][3] == "signin" and "expired" in fails[0][1]              # with a Sign in button
+    assert fails[0][3] is None and "didn't answer" in fails[0][1]
     hub2.down = False; r2.next_upload = 0; r2.tick(); r2.wait_uploads()
     assert list(r2.idx.values())[0].status == "uploaded"
 
@@ -985,7 +984,7 @@ def test_upload_part_never_delays_a_recording():
         mic.write_bytes(os.urandom(36 * 1024 * 1024))           # 16 + 16 + 4 MB parts, ~2.5 s per 16 MB here
         apex = {"on": False}
         obs, ui = FakeOBS(s.folder_path), FakeUI()
-        sender = Sender(s, lambda paths: False, stop=lambda: apex["on"])
+        sender = Sender(s, stop=lambda: apex["on"])
         r = Recorder(s, obs, sender, ui, fake_scan, is_apex_running=lambda: apex["on"])
         r.idx = {"k": retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")}
         r.tick()                                                 # the upload starts in its own thread
@@ -3007,7 +3006,8 @@ def test_hub_answer_shown_on_recording():
 
 
 class HubThenDrive(FakeHub):
-    """A Sender stand-in: Drive takes the results, the hub fails with `fail` (a HubError kind) until it is None.
+    """A Sender stand-in for results an older version sent to Google Drive only: the first upload "goes through"
+    without the hub (hub_ok False = "Not on hub yet"), the hub fails with `fail` (a HubError kind) until it is None.
     `blocked` = what Sender.hub_blocked() would say (refused key, 429 wait)."""
 
     def __init__(self):
@@ -3017,7 +3017,7 @@ class HubThenDrive(FakeHub):
     def upload(self, files):
         from pcs_recorder.runtime import Sent
         out = Sent(["Google Drive"])
-        out.drive_ok, out.hub_ok, out.hub_why = True, False, "Hub not reachable"
+        out.hub_ok, out.hub_why = False, "Hub not reachable"
         out.hub_note = "Not sent to hub: the team hub didn't answer"
         return out
 
@@ -3058,7 +3058,7 @@ def test_hub_retried_when_only_drive_took_it():
     r._retry_uploads()
     assert r.idx["k0"].status == "uploaded" and r.hub_state("k0") == {"hub": "pending", "why": "Hub not reachable"}
     assert any(t == "Results sent" and "by itself" in m for t, m, *_ in ui.notes), ui.notes
-    assert retention.load_sent(r.idx)["k0"]["drive"] == "sent"                         # kept on disk
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                        # kept on disk
     r._retry_hub()
     assert len(hub.hub_calls) == 1 and r.hub_state("k0")["hub"] == "pending"
     r._retry_hub(); r._retry_hub()
@@ -3145,18 +3145,52 @@ def test_hub_and_drive_both_fine_or_no_hub():
     r, hub, ui, clock = _hub_recorder()
 
     def both(files):
-        out = Sent(["the team hub", "Google Drive"])
-        out.hub_ok, out.drive_ok, out.hub_note = True, True, "Sent to hub: 2 games"
+        out = Sent(["the team hub"])
+        out.hub_ok, out.hub_note = True, "Sent to hub: 2 games"
         return out
     hub.upload = both
     r._retry_uploads()
-    assert r.sent["k0"] == {"hub": "sent", "why": "", "drive": "sent"}
+    assert r.sent["k0"] == {"hub": "sent", "why": ""}
     r._retry_hub()
     assert not hub.hub_calls
     r, hub, ui, clock = _hub_recorder()
-    hub.upload = lambda files: Sent(["Google Drive"])                                  # no hub address
+    hub.upload = lambda files: Sent(["somewhere else"])                                # hub not tried
     r._retry_uploads()
     assert r.hub_state("k0")["hub"] == ""
+
+
+def test_no_hub_results_stay_on_pc():
+    """No hub address (Google Drive results removed): the results stay on this PC, the player is told once in
+    Activity (no pop-up), the recording says why; joining the hub sends them. An old sent.json with a "drive" field
+    still loads."""
+    from pcs_recorder.core import NoHub
+    from pcs_recorder.runtime import Sender, Sent
+    r, hub, ui, clock = _hub_recorder(n=2)
+    r.s.hub_url = ""
+    sender = Sender(r.s)
+    try:
+        sender.upload([Path("x.scan.json")])
+        raise AssertionError("no NoHub")
+    except NoHub as e:
+        assert "No team hub yet" in str(e) and "stay on this PC" in str(e)
+    said = []
+    ui.activity = said.append
+    r.hub = sender
+    for _ in range(3):
+        r.next_upload = 0
+        r._retry_uploads()
+    assert all(e.status == "scanned" for e in r.idx.values())
+    assert r.idx["k0"].note == "not sent yet: no team hub"
+    assert len(said) == 1 and "No team hub yet" in said[0] and not ui.notes, (said, ui.notes)   # once, no pop-up
+    r.s.hub_url = "http://hub.test:8420"                                              # joined
+    hub.upload = lambda files: (lambda o: (setattr(o, "hub_ok", True), o)[1])(Sent(["the team hub"]))
+    r.hub = hub
+    r.next_upload = 0
+    r._retry_uploads(); r._retry_uploads()
+    assert all(e.status == "uploaded" for e in r.idx.values()), r.idx
+    import json
+    retention.SENT_FILE.write_text(json.dumps({"k0": {"hub": "pending", "why": "", "drive": "sent"}}))
+    assert retention.load_sent(r.idx)["k0"]["hub"] == "pending"                       # older file still read
 
 
 def _silence_recorder(levels, tracks=("game", "discord", "mic"), consent=True, mutes=()):
@@ -4895,6 +4929,243 @@ def test_clip_stops_and_falls_back():
     c.start(spec)
     st = _clip_wait(c)
     assert st["step"] == "Failed" and "Too long for 10 MB" in st["error"], st
+
+# ---------------------------------------------------------------- comms transcripts (pcs_recorder/comms.py)
+
+def _comms_setup(name, mic=True, consent=True):
+    """A scanned recording with an events.json, settings with the given answers, and a Comms job on it."""
+    import json
+    from pcs_recorder import comms
+    d = TMP / name
+    d.mkdir(parents=True, exist_ok=True)
+    rec = d / "Apex Legends_2026.11.19-20.00.mp4"
+    rec.write_bytes(b"x" * 100)
+    rec.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"] if mic else ["game"]}))
+    (d / (rec.stem + ".scan")).mkdir(exist_ok=True)
+    s = settings.Settings()
+    s.player, s.comms_consent, s.mic_audio, s.transcript_consent, s.hub_url = "tester", True, True, consent, "http://hub"
+    idx = {"k1": retention.Entry(path=str(rec), started=time.time() - 600, status="uploaded")}
+    sent = []
+    job = comms.Comms(lambda: s, lambda: idx, lambda: None, lambda files: sent.append([Path(f).name for f in files]))
+    job.st = {"recs": {}}
+    return comms, job, s, idx, rec, sent
+
+
+FAKE_WORKER = r'''
+import json, sys, time
+a = sys.argv[1:]
+out = a[a.index("--out") + 1]
+if a[0].endswith("sleep.mp4"):
+    time.sleep(60)
+print(json.dumps({"done": 10, "total": 20}), flush=True)
+json.dump({"v": 1, "kind": "comms", "speaker": a[a.index("--speaker") + 1], "audioSeconds": 20, "seconds": 1,
+           "language": "fr", "segments": [{"start": 1.5, "end": 3.0, "text": "il est one shot", "speaker":
+           a[a.index("--speaker") + 1], "p": -0.2}]}, open(out, "w"))
+print(json.dumps({"finished": True}), flush=True)
+'''
+
+
+def _fake_worker(comms, sleep=False):
+    w = TMP / "fake_worker.py"
+    w.write_text(FAKE_WORKER)
+    comms.__dict__.setdefault("_real_get_runtime", comms.get_runtime)
+    comms.get_runtime = lambda busy=None, component=None: [sys.executable, str(w)]
+    comms.get_model = lambda busy=None: TMP
+
+
+def test_comms_only_with_the_players_yes():
+    """No transcript without the yes (or without the team's comms consent / the mic), and only recordings with a mic
+    track; the transcript never goes to Drive with the results."""
+    comms, job, s, idx, rec, _ = _comms_setup("comms-consent", consent=False)
+    assert not comms.eligible(s) and job.tick() is False and not job.running
+    s.transcript_consent = True
+    assert comms.eligible(s)
+    s.comms_consent = False
+    assert not comms.eligible(s)
+    s.comms_consent, s.mic_audio = True, False
+    assert not comms.eligible(s)
+    s.mic_audio = True
+    assert job.todo() == [("k1", str(rec))]
+    assert comms.mic_stream(rec) == 2
+    idx["k1"].status = "recorded"                      # not scanned yet: waits
+    assert job.todo() == []
+    idx["k1"].status = "scanned"
+    idx["k1"].started = time.time() - 5 * 86400        # too old
+    assert job.todo() == []
+    # the transcript and its kept parts stay out of the scan's results (Drive, re-sends)
+    from pcs_recorder.core import result_files
+    out = rec.with_suffix(".scan")
+    (out / (rec.stem + ".scan.json")).write_text("{}")
+    (out / (rec.stem + ".comms.json")).write_text("{}")
+    (out / (rec.stem + ".comms.partial.json")).write_text("{}")
+    assert [p.name for p in result_files(out)] == [rec.stem + ".scan.json"]
+
+
+def test_comms_transcribes_and_sends_to_hub():
+    comms, job, s, idx, rec, sent = _comms_setup("comms-run")
+    _fake_worker(comms)
+    out = job.transcribe(str(rec))
+    assert out == comms.comms_path(rec) and out.is_file()
+    d = comms.transcript_of(rec)
+    assert d["speaker"] == "tester" and d["segments"][0]["text"] == "il est one shot" and d["segments"][0]["start"] == 1.5
+    r = job.st["recs"][rec.stem]
+    assert r["status"] == "done" and r["segments"] == 1 and r["sent"]
+    assert sent == [[rec.stem + ".comms.json"]]
+    assert job.todo() == []                             # done once
+    # no mic track: nothing to transcribe, never asked again
+    comms2, job2, *_ , rec2, sent2 = _comms_setup("comms-nomic", mic=False)
+    assert job2.transcribe(str(rec2)) is None and job2.st["recs"][rec2.stem]["status"] == "no_mic" and job2.todo() == []
+    # said no after it was made: not sent
+    comms3, job3, s3, idx3, rec3, sent3 = _comms_setup("comms-no-after")
+    _fake_worker(comms3)
+    s3.hub_url = ""
+    job3.transcribe(str(rec3))
+    assert sent3 == [] and job3.unsent() == []
+    s3.hub_url, s3.transcript_consent = "http://hub", False
+    assert job3._send(comms3.comms_path(rec3)) is False and sent3 == []
+
+
+def test_comms_not_sent_to_a_hub_without_comms():
+    """A hub whose /api/me doesn't list "comms" (0.7.0 and older) would keep a transcript as a plain file any teammate
+    can download: nothing is sent, the file waits, and goes once the hub says it takes transcripts."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-old-hub")
+    _fake_worker(comms)
+    ok = [False]
+    job.hub_ok = lambda: ok[0]
+    job.transcribe(str(rec))
+    assert sent == [] and job.st["recs"][rec.stem]["sendNote"] == comms.HUB_TOO_OLD
+    assert job.unsent() == [comms.comms_path(rec)]
+    ok[0] = True
+    assert job._send(comms.comms_path(rec)) is True and sent == [[rec.stem + ".comms.json"]]
+
+
+def test_hub_has_feature():
+    from pcs_recorder import hub
+    calls = []
+
+    class R:
+        def __init__(self, ok, body): self.ok, self._b = ok, body
+        def json(self): return self._b
+    answers = {"http://new": R(True, {"features": ["comms"]}), "http://old": R(True, {"name": "x"}),
+               "http://down": None}
+
+    def fake(url, method, path, **kw):
+        calls.append(url)
+        if answers[url] is None:
+            raise hub.HubError("no answer", "network")
+        return answers[url]
+    real, hub.request = hub.request, fake
+    try:
+        hub._features.clear()
+        assert hub.has_feature("http://new", "comms") and hub.has_feature("http://new", "comms")
+        assert calls.count("http://new") == 1                      # cached
+        assert not hub.has_feature("http://old", "comms") and not hub.has_feature("http://down", "comms")
+        assert not hub.has_feature("", "comms")
+    finally:
+        hub.request = real
+        hub._features.clear()
+
+
+def test_comms_stops_when_apex_starts():
+    """Apex starting stops the transcriber within seconds; the stop is not counted as a failed try."""
+    comms, job, s, idx, rec, sent = _comms_setup("comms-apex")
+    slow = rec.with_name("sleep.mp4")
+    rec.rename(slow)
+    rec.with_suffix(".events.json").rename(slow.with_suffix(".events.json"))
+    _fake_worker(comms, sleep=True)
+    comms.BUSY_EVERY_S = 0.2
+    t0 = time.time()
+    job.busy = lambda: "Apex is running" if time.time() - t0 > 1 else None
+    try:
+        job.transcribe(str(slow))
+        raise AssertionError("not stopped")
+    except comms.Busy:
+        pass
+    finally:
+        comms.BUSY_EVERY_S = 3
+    assert time.time() - t0 < 20 and job.proc is None
+    assert job.st["recs"]["sleep"]["tries"] == 0 and not comms.comms_path(slow).exists()
+
+
+def test_comms_downloads_are_checked():
+    """Model and component: https only, size and SHA-256 must match the pinned values, zip paths stay inside."""
+    import hashlib
+    import io
+    import zipfile
+    import requests
+    from pcs_recorder import comms
+    dest = TMP / "dl" / "model.bin"
+    try:
+        comms.fetch("http://huggingface.co/x", dest, "0" * 64, 1)
+        raise AssertionError("http accepted")
+    except comms.Unavailable:
+        pass
+    try:
+        comms.fetch("https://example.com/x", dest, "0" * 64, 1)
+        raise AssertionError("other host accepted")
+    except comms.Unavailable:
+        pass
+    body = b"model bytes"
+
+    class R:
+        url, history = "https://cdn.example/x", []
+        def raise_for_status(self): pass
+        def iter_content(self, n): yield body
+    orig = requests.Session.get
+    requests.Session.get = lambda self, *a, **k: R()
+    try:
+        try:
+            comms.fetch("https://huggingface.co/x", dest, "0" * 64, len(body))
+            raise AssertionError("wrong SHA-256 accepted")
+        except comms.Unavailable:
+            pass
+        assert not dest.exists() and not dest.with_name("model.bin.part").exists()
+        comms.fetch("https://huggingface.co/x", dest, hashlib.sha256(body).hexdigest(), len(body))
+        assert dest.read_bytes() == body
+    finally:
+        requests.Session.get = orig
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("../evil.txt", "x")
+    try:
+        comms.safe_extract(zipfile.ZipFile(buf), TMP / "zx")
+        raise AssertionError("path outside accepted")
+    except comms.Unavailable:
+        pass
+    assert not (TMP / "evil.txt").exists()
+    # nothing published yet: says so, downloads nothing
+    if comms.COMPONENT is None and comms.runtime_cmd() is None:
+        try:
+            getattr(comms, "_real_get_runtime", comms.get_runtime)()
+            raise AssertionError("no component, yet it ran")
+        except comms.Unavailable as e:
+            assert "isn't published" in str(e)
+    # the pinned model is the turbo model's five files
+    assert [n for n, *_ in comms.MODEL_FILES][-1] == "model.bin" and all(len(h) == 64 for *_, h in comms.MODEL_FILES)
+    assert comms.MODEL_URL.startswith("https://huggingface.co/") and comms.MODEL_COMMIT in comms.MODEL_URL
+
+
+def test_transcribe_worker_parts_and_clean_text():
+    """The worker cuts long tracks at a quiet moment, fixes Apex words and drops Whisper's filler lines."""
+    import numpy as np
+    import pcs_transcribe as T
+    rate = T.RATE
+    pcm = (np.random.default_rng(1).normal(0, 3000, rate * 1500)).astype(np.int16)
+    pcm[rate * 590:rate * 591] = 0                     # a quiet second inside the last 30 s of part 1
+    ps = T.parts(pcm)
+    assert ps[0][0] == 0 and ps[-1][1] == len(pcm) and all(a[1] == b[0] for a, b in zip(ps, ps[1:]))
+    assert rate * 590 <= ps[0][1] <= rate * 591, ps[0][1] / rate
+    assert len(T.parts(pcm[:rate * 200])) == 1
+    assert T.fix_text("  le  Watson est a Northpad ") == "le Wattson est a North Pad"
+    assert not T.keep_segment("Sous-titrage ST' 501", -0.2, 0.1, [])
+    assert not T.keep_segment("Merci d'avoir regardé cette vidéo", -0.2, 0.1, [])
+    assert not T.keep_segment("euh", -1.5, 0.9, [])
+    assert not T.keep_segment("full", -0.2, 0.1, ["full", "full"])
+    assert T.keep_segment("il est one shot", -0.3, 0.1, ["full"])
+    from pcs_recorder import comms
+    assert comms.is_comms_file("a.comms.json") and comms.is_comms_file("a.comms.partial.json")
+    assert not comms.is_comms_file("a.scan.json")
+
 
 if __name__ == "__main__":
     sys.exit(run_all([(n, f) for n, f in list(globals().items()) if n.startswith("test_")]))

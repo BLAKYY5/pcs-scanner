@@ -74,7 +74,7 @@ jobs:
         run: |
           $data = @("app/web;web", "app/assets;assets", "scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/pcs_banner.json;.", "scanner/pcs_ranked.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--hidden-import", "pcs_ring", "--hidden-import", "pcs_respawn", "--hidden-import", "pcs_minimap", "--hidden-import", "pcs_bars", "--hidden-import", "pcs_mapicons", "--hidden-import", "pcs_usage", "--hidden-import", "pcs_fights", "--hidden-import", "pcs_ranked", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--hidden-import", "pcs_recorder.crash", "--hidden-import", "pcs_recorder.squadpaths", "--hidden-import", "pcs_recorder.weaponicons", "--hidden-import", "pcs_recorder.teamtracks", "--hidden-import", "pcs_recorder.stitch", "--hidden-import", "pcs_recorder.precheck", "--hidden-import", "pcs_recorder.serverscan", "--hidden-import", "pcs_recorder.clips", "--paths", "app")
+          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--hidden-import", "pcs_ring", "--hidden-import", "pcs_respawn", "--hidden-import", "pcs_minimap", "--hidden-import", "pcs_bars", "--hidden-import", "pcs_mapicons", "--hidden-import", "pcs_usage", "--hidden-import", "pcs_fights", "--hidden-import", "pcs_ranked", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--hidden-import", "pcs_recorder.crash", "--hidden-import", "pcs_recorder.squadpaths", "--hidden-import", "pcs_recorder.weaponicons", "--hidden-import", "pcs_recorder.teamtracks", "--hidden-import", "pcs_recorder.stitch", "--hidden-import", "pcs_recorder.precheck", "--hidden-import", "pcs_recorder.serverscan", "--hidden-import", "pcs_recorder.comms", "--hidden-import", "pcs_transcribe", "--hidden-import", "pcs_recorder.clips", "--paths", "app")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
 
@@ -90,6 +90,29 @@ jobs:
         with:
           name: PCS-Scanner-${{ env.VERSION }}
           path: dist/PCS-Scanner.exe
+
+      # The optional "Transcripts" component (comms transcripts, pcs_recorder/comms.py): faster-whisper in its own
+      # folder, never inside PCS-Scanner.exe (~200 MB that every start would unpack). Built in its own venv so the
+      # app's build never picks its libraries up. A run artifact only: it is not added to releases. The app downloads
+      # it only once the coach publishes one zip and pins its address and SHA-256 in comms.COMPONENT.
+      - name: Build the Transcripts component
+        shell: pwsh
+        run: |
+          python -m venv twenv
+          twenv\Scripts\python -m pip install --upgrade pip
+          twenv\Scripts\pip install faster-whisper==1.2.1 ctranslate2==4.9.0 onnxruntime==1.32.0 pyinstaller==6.22.3 pyinstaller-hooks-contrib==2026.8
+          twenv\Scripts\pyinstaller --noconfirm --onedir --console --name pcs-transcribe --distpath tdist --workpath tbuild --collect-data faster_whisper --collect-binaries ctranslate2 --collect-binaries onnxruntime --exclude-module av --exclude-module huggingface_hub --exclude-module tkinter --exclude-module torch app/pcs_transcribe.py
+          $r = & tdist\pcs-transcribe\pcs-transcribe.exe --selftest
+          Write-Host $r
+          if (-not "$r".StartsWith("OK")) { throw "Transcripts component self-test failed" }
+          Compress-Archive -Path tdist\pcs-transcribe -DestinationPath PCS-Transcripts.zip
+          $h = (Get-FileHash PCS-Transcripts.zip -Algorithm SHA256).Hash.ToLower()
+          Write-Host "PCS-Transcripts.zip $((Get-Item PCS-Transcripts.zip).Length) bytes, SHA-256 $h"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
+        with:
+          name: PCS-Transcripts-${{ env.VERSION }}
+          path: PCS-Transcripts.zip
 
       - name: Publish release
         if: env.RELEASE == 'True'

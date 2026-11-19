@@ -91,15 +91,22 @@ def stop_tree(proc, wait_s: float = 10) -> None:
 
 
 def result_files(out: Path) -> list[Path]:
-    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks."""
+    """The scan's files to send: everything in the results folder except an unfinished scan's kept chunks and the
+    comms transcript (`comms.py`: sent to the hub on its own, only while the player says yes, never to Drive)."""
     if not out.exists():
         return []
-    return sorted(p for p in out.rglob("*") if p.is_file() and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
+    from .comms import is_comms_file
+    return sorted(p for p in out.rglob("*") if p.is_file() and not is_comms_file(p.name)
+                  and not any(q.suffix == ".partial" for q in p.relative_to(out).parents))
 
 
-class NeedsSignIn(ConnectionError):
-    """Results couldn't be sent because the Google sign-in is missing or expired (message shows a Sign in button)."""
-    action = "signin"
+class NoHub(ConnectionError):
+    """No team hub address yet: results stay on this PC until the player joins the hub (told once, no pop-up)."""
+    kind = "nohub"
+    TEXT = "No team hub yet: your results stay on this PC until you join your team's hub (Home → Get set up)"
+
+    def __init__(self, text: str = ""):
+        super().__init__(text or self.TEXT)
 
 
 class Recorder:
@@ -126,7 +133,7 @@ class Recorder:
         self.check = None                        # precheck.RecCheck (recording check on Home), by the app
         self.events: list[dict] = []             # marks and mutes in the recording in progress
         self.muted: dict[str, bool] = {}
-        self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub / Drive, per recording
+        self.sent = retention.load_sent(self.idx, s.hub_url, clock())   # hub state per recording
         self.hub_next, self.hub_fails, self.hub_fail_url = 0.0, 0, ""   # hub retries: backoff after network errors
         self.hub_told = ""                     # why the hub can't be reached, last told in Activity (once per change)
         self.track_db = None                     # loudness of one audio track (tests); default pcs_levels.track_db
@@ -887,6 +894,17 @@ class Recorder:
         self.next_upload = self.clock() + 60
         if getattr(ex, "kind", "") == "paused":               # Apex started during a part: goes on later
             return
+        if getattr(ex, "kind", "") == "nohub":                # no hub address yet: one Activity line, no pop-up
+            note = "not sent yet: no team hub"
+            if e.note != note:
+                e.note = note
+                retention.save_index(self.idx)
+            if self.hub_told != "nohub":
+                self.hub_told = "nohub"
+                say = getattr(self.ui, "activity", None)
+                text = f"{ex}. They are sent by themselves once you join."
+                say(text) if say else self.ui.notify("Results not sent yet", text)
+            return
         reach = getattr(ex, "reach", "")
         if reach:                                             # can't reach the hub: one Activity line, no pop-up
             from .hub import reason
@@ -914,10 +932,9 @@ class Recorder:
         e.status, e.note = "uploaded", hub_note
         self.hub_told = ""
         retention.save_index(self.idx)
-        hub_ok, drive_ok = getattr(where, "hub_ok", None), getattr(where, "drive_ok", None)
+        hub_ok = getattr(where, "hub_ok", None)
         self.sent[key] = {"hub": {True: "sent", False: "pending"}.get(hub_ok, ""),
-                          "why": getattr(where, "hub_why", "") if hub_ok is False else "",
-                          "drive": {True: "sent", False: "failed"}.get(drive_ok, "")}
+                          "why": getattr(where, "hub_why", "") if hub_ok is False else ""}
         self._save_sent()
 
     def _save_sent(self) -> None:
@@ -935,7 +952,7 @@ class Recorder:
     HUB_BACKOFF = (60, 120, 240, 480, 900)
 
     def _retry_hub(self) -> None:
-        """Recordings whose results reached Drive but not the hub: sent to the hub on their own schedule until it
+        """Recordings whose results reached Drive (older versions) but not the hub: sent to the hub on their own schedule until it
         takes them. Never while Apex runs (tick), never twice once the hub said 200. A refused key waits for a new
         key or address; 429 waits for Retry-After (both known by pcs_recorder.hub without asking the hub)."""
         upload_hub = getattr(self.hub, "upload_hub", None)

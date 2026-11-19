@@ -390,10 +390,16 @@ def test_scan_queue_waits_for_apex():
     real_running, real_proc = rcore.apex_running, runtime.scan_process
     rcore.apex_running = lambda: apex[0]
     runtime.scan_process = lambda v, out: (started.append(v), P())[1]
-    b.auto = None
     sent = []
-    core_upload = core.drive_upload_quiet
-    core.drive_upload_quiet = lambda paths: sent.append(paths) or True
+
+    class Sender:                                            # the recorder's Sender, without a hub
+        @staticmethod
+        def upload(files):
+            sent.append(files)
+            raise rcore.NoHub()
+    (TMP / "queue-recs").mkdir(exist_ok=True)
+    b.auto = _Auto(str(TMP / "queue-recs"))
+    b.auto.sender = Sender()
     try:
         assert b.queue_scans([vid]) == 1
         assert b.queue_scans([vid]) == 0                     # already queued
@@ -405,9 +411,14 @@ def test_scan_queue_waits_for_apex():
                 break
             time.sleep(0.25)
         assert started == [str(VIDEO)] and sent, (started, sent)
-        assert any("done, sent to Google Drive" in m["text"] for m in b.messages), list(b.messages)
+        for _ in range(20):
+            if any("Not sent: no team hub yet" in m["text"] for m in b.messages):
+                break
+            time.sleep(0.1)
+        assert any("Not sent: no team hub yet" in m["text"] for m in b.messages), list(b.messages)
     finally:
-        rcore.apex_running, runtime.scan_process, core.drive_upload_quiet = real_running, real_proc, core_upload
+        rcore.apex_running, runtime.scan_process = real_running, real_proc
+        b.auto = None
 
 
 def test_scan_by_hand_stops_when_apex_starts():
@@ -559,53 +570,27 @@ def test_coach_role():
         _backup_done(srv, fake)
 
 
-def test_coach_email_from_settings():
-    """The scans folder on Drive is shared with the coach's address the player typed in Settings, once per address;
-    without one nothing is shared."""
+def test_coach_email_field_removed():
+    """The Settings field "Coach's Google email" is gone (the coach role comes from the hub key): the page has no
+    field, the state no coachEmail, an old saved value is kept but never read, an old page sending it is ignored."""
     b = pcs_server.Backend()
     srv = pcs_server.Server(b)
     srv.start()
-    calls = {"share": [], "folders": []}
-
-    class Svc:
-        def files(self):
-            class F:
-                def list(self, **kw):
-                    return _X({"files": [{"id": f} for f in calls["folders"]]})
-
-                def create(self, body, fields):
-                    calls["folders"].append("F1")
-                    return _X({"id": "F1"})
-            return F()
-
-        def permissions(self):
-            class P:
-                def create(self, fileId, sendNotificationEmail, body):
-                    calls["share"].append((fileId, body["emailAddress"]))
-                    return _X({})
-            return P()
-
-    class _X:
-        def __init__(self, v):
-            self.v = v
-
-        def execute(self):
-            return self.v
     try:
-        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
-        assert core.scans_folder(Svc()) == "F1" and calls["share"] == []          # no address: not shared
-        code, r, _ = call(srv, "/api/settings", {"coach_email": "not an address"})
-        assert code == 500 and "address" in r["error"]
-        code, st, _ = call(srv, "/api/settings", {"coach_email": " coach@example.com "})
-        assert code == 200 and st["coachEmail"] == "coach@example.com"
-        assert core.scans_folder(Svc()) == "F1" and calls["share"] == [("F1", "coach@example.com")]
-        core.scans_folder(Svc())
-        assert len(calls["share"]) == 1                                           # once per address
-        call(srv, "/api/settings", {"coach_email": "new.coach@example.com"})
-        core.scans_folder(Svc())
-        assert calls["share"][-1] == ("F1", "new.coach@example.com") and len(calls["share"]) == 2
+        core.SETTINGS["coach_email"], core.SETTINGS["shared_with"] = "old.coach@example.com", "old.coach@example.com"
+        code, st, _ = call(srv, "/api/settings", {"coach_email": "new.coach@example.com", "player": "Tester"})
+        assert code == 200 and "coachEmail" not in st and st["player"] == "Tester"
+        assert core.SETTINGS["coach_email"] == "old.coach@example.com"                  # left alone, not read
+        assert call(srv, "/api/settings", {"coach_email": "not an address"})[0] == 200   # no check: ignored
+        root = Path(__file__).resolve().parent.parent
+        js = (root / "app" / "web" / "app.js").read_text(encoding="utf-8")
+        assert "coach_email" not in js and "coachEmail" not in js and "Coach's Google email" not in js
+        for name in ("coach_email", "share_folder", "scans_folder", "drive_upload_quiet", "drive_service"):
+            assert not hasattr(core, name), name
+        for f in ("pcs_server.py", "pcs_app.py", "pcs_core.py"):
+            assert "shared_with" not in (root / "app" / f).read_text(encoding="utf-8"), f
     finally:
-        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None)
+        core.SETTINGS.pop("coach_email", None); core.SETTINGS.pop("shared_with", None); core.SETTINGS["player"] = ""
         core.save_settings()
         srv.stop()
 
@@ -629,21 +614,25 @@ def test_no_personal_email_in_app():
     assert "COACH_EMAIL" not in wf and "coach =" not in wf                 # nothing personal written into build.json
 
 
-def test_drive_gets_results_only():
-    """Google Drive gets the small result files only, never a mic track or a log (PRIVACY.md says so)."""
-    sent, saved = [], (core.drive_service, core.scans_folder, core.upload)
+def test_no_google_drive_results():
+    """Results never go to Google Drive any more: no Drive sign-in route, no Drive upload, no "google" (Drive) state;
+    PRIVACY.md says Drive is not used and the mic goes to the hub only."""
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
     try:
-        core.drive_service = lambda interactive=True: object()
-        core.scans_folder = lambda svc: "folder"
-        core.upload = lambda svc, folder, p, log: sent.append(os.path.basename(p))
-        assert core.drive_upload_quiet(["a/x.scan.json", "a/x.feed.json", "a/x.mic.m4a", "a/x.log", "a/x.mp4"])
+        code, st, _ = call(srv, "/api/state")
+        assert code == 200 and "google" not in st
+        assert call(srv, "/api/signin", {})[0] == 404
     finally:
-        core.drive_service, core.scans_folder, core.upload = saved
-    assert sent == ["x.scan.json", "x.feed.json"], sent
+        srv.stop()
     root = Path(__file__).resolve().parent.parent
+    for f in ("pcs_core.py", "pcs_server.py", "pcs_app.py", "pcs_recorder/runtime.py", "pcs_recorder/core.py"):
+        text = (root / "app" / f).read_text(encoding="utf-8")
+        assert "auth/drive" not in text and "'drive', 'v3'" not in text and "drive_upload" not in text, f
+        assert "PCS Scans" not in text and "google_token.json" not in text, f
     privacy = (root / "PRIVACY.md").read_text(encoding="utf-8")
-    assert "never your microphone track" in privacy and "never to Google Drive" in privacy
-
+    assert "not used any more" in privacy and "never to Google Drive" in privacy
 
 def test_team_link_weapon_icons():
     """The weapon icons come from the Google Drive link the player pastes in Settings: only Drive links are taken,
@@ -872,7 +861,7 @@ def test_sign_in_tokens_encrypted():
     version is encrypted the first time it is read, and an unreadable file means "sign in again"."""
     f = TMP / "appdata" / "test_token.json"
     info = {"token": "at-123", "refresh_token": "rt-secret-456", "client_id": "cid", "client_secret": "cs",
-            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.SCOPES}
+            "token_uri": "https://oauth2.googleapis.com/token", "scopes": core.YT_SCOPES}
     core.write_token(str(f), json.dumps(info))
     assert core.read_token(str(f)) == info
     if os.name == "nt":
@@ -884,17 +873,17 @@ def test_sign_in_tokens_encrypted():
         assert b"rt-secret-456" not in f.read_bytes()
     assert core.read_token(str(f)) == info
     # google-auth reads it back
-    creds = core._saved_creds(str(f), core.SCOPES)
+    creds = core._saved_creds(str(f), core.YT_SCOPES)
     assert creds is not None and creds.refresh_token == "rt-secret-456"
     # unreadable (another user's encryption, damaged): no sign-in, no crash
     f.write_text(json.dumps({"dpapi": "AAAA"}))
-    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.SCOPES) is None
+    assert core.read_token(str(f)) is None and core._saved_creds(str(f), core.YT_SCOPES) is None
     f.write_text("not json")
     assert core.read_token(str(f)) is None
     assert core.read_token(str(TMP / "appdata" / "missing_token.json")) is None
     # the sign-in code writes through write_token, never in clear
     src = (Path(__file__).resolve().parent.parent / "app" / "pcs_core.py").read_text(encoding="utf-8")
-    assert "write_token(TOKEN_F, creds.to_json())" in src and "write_token(YT_TOKEN_F, creds.to_json())" in src
+    assert "write_token(YT_TOKEN_F, creds.to_json())" in src
     assert "from_authorized_user_file" not in src and ".write(creds.to_json())" not in src
 
 
@@ -1826,15 +1815,16 @@ def test_tailscale_state():
 
 def test_setup_card_page():
     """Home's "Get set up" card: name, the choices (auto-record, mic sharing, transcripts: one screen, one line each),
-    hub, Google; the join call; the choices go through /api/setup/choice. Done once both questions are answered."""
+    hub; the join call; the choices go through /api/setup/choice. Done once both questions are answered."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
     order = [setup.index(t) for t in ("Your EEC name", "Your choices", "Record Apex by itself",
-                                      "Share mic tracks with my team", "Comms transcripts", "Join the team hub",
-                                      "Google Drive")]
+                                      "Share mic tracks with my team", "Comms transcripts", "Join the team hub")]
     assert order == sorted(order), order
     assert "/api/hub/join" in js and "/api/setup/choice" in js
-    assert "Only if your team agreed that comms are recorded" in setup and "Coming later" in setup
+    assert "Only if your team agreed that comms are recorded" in setup and "TRANSCRIPT_HINT" in setup
+    hint = js[js.index("const TRANSCRIPT_HINT"):js.index("function transcriptState")]
+    assert "own mic" in hint and "Coming later" not in js
     done = js[js.index("function setupDone"):js.index("function choiceHTML")]
     assert "choicesDone(st)" in done and "st.rec" not in done           # auto-record off is a valid answer
     b = pcs_server.Backend(_Auto(str(TMP / "setuprecs")))
@@ -1856,8 +1846,7 @@ def test_hub_uploads_refused_key_and_old_hub():
         f.write_text("{}")
     s = _S(str(folder))
     s.hub_url, s.player = fake.url, "Tester"
-    drive = {"ok": False}
-    sender = runtime.Sender(s, lambda paths: drive["ok"])
+    sender = runtime.Sender(s)
     try:
         hub.set_key(GOOD_KEY)
         where = sender.upload(files)
@@ -1879,17 +1868,6 @@ def test_hub_uploads_refused_key_and_old_hub():
             except ConnectionError as e:
                 assert "refused your key" in str(e) and BAD_KEY not in str(e)
         assert len([1 for _, p, a in fake.seen if a == "Bearer " + BAD_KEY]) == 1          # tried once only
-        # on the hub, Drive is never used, even signed in and with the hub refusing (leaving-Drive plan step 5)
-        drive["ok"], drive_calls = True, []
-        sender.drive_upload = lambda paths: drive_calls.append(paths) or True
-        try:
-            sender.upload(files)
-            raise AssertionError("results went somewhere while the hub refused the key")
-        except ConnectionError as e:
-            assert "refused your key" in str(e)
-        assert drive_calls == []
-        sender.drive_upload = lambda paths: drive["ok"]
-        drive["ok"] = False
         hub.set_key(GOOD_KEY)                                                            # new key: sent again
         assert sender.upload(files) == ["the team hub"]
         # an old hub: same upload, no import answer
@@ -1902,32 +1880,41 @@ def test_hub_uploads_refused_key_and_old_hub():
                 assert where == ["the team hub"] and where.hub_note == "Sent to hub"
         finally:
             old.stop()
-        # no hub set: nothing goes to a hub
+        # no hub set: nothing goes anywhere, the results stay on this PC (no Google Drive any more)
         s.hub_url = ""
         n = len(fake.seen)
-        drive["ok"] = True
-        assert sender.upload(files) == ["Google Drive"] and len(fake.seen) == n
+        from pcs_recorder.core import NoHub
+        try:
+            sender.upload(files)
+            raise AssertionError("results sent without a hub")
+        except NoHub as e:
+            assert "No team hub yet" in str(e)
+        assert len(fake.seen) == n
     finally:
         fake.stop()
         _fresh_hub()
 
 
 def test_hub_only_results_page():
-    """On the hub the page drops Google Drive (leaving-Drive plan step 5): no Drive step in Get set up, the Home tile
-    says the results go to the team hub, Settings hides the Drive sign-in and the coach's address, and saving works
-    without those fields."""
+    """No Google Drive on the page any more: Get set up has three steps (name, choices, hub) and is done only with
+    the hub; Home and Settings show "Results: Team hub", or "No team hub yet" with the results kept on this PC; no
+    Google (Drive) sign-in button or coach's address; saving works without those fields."""
     js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
-    assert "function driveOff()" in js and "r.settings.hub_url" in js[js.index("function driveOff()"):][:200]
+    assert "function hubSet()" in js and "r.settings.hub_url" in js[js.index("function hubSet()"):][:200]
+    assert "driveOff" not in js and "S.google" not in js and "/api/signin" not in js and "su-google" not in js
+    assert "function setupDone(st) { return st.name && st.hub && choicesDone(st); }" in js
     setup = js[js.index("function setupHTML"):js.index("function wireSetup")]
-    assert "const drive = !st.hub && !driveOff(), total = drive ? 4 : 3" in setup and "${n} of ${total} done" in setup and "${drive ? li(st.google" in setup
+    assert "const total = 3;" in setup and "${n} of ${total} done" in setup and "Google Drive" not in setup
+    assert "Until you join, your results stay on this PC." in setup
     home = js[js.index("function renderHome"):js.index("function renderHome") + 6000]
-    assert "driveOff() ?" in home and "Sent to the team hub" in home
+    assert "hubSet() ?" in home and "Sent to the team hub" in home and "No team hub yet" in home
+    assert "Kept on this PC until you join the hub" in home
     sett = js[js.index("function renderSettings"):js.index("function settingsBody")]
-    assert "${driveOff() ?" in sett and "Your results go to the team hub.</small>" in sett
-    assert "const fsi = $('#f-signin'); if (fsi)" in sett
+    assert "${hubSet() ?" in sett and "Your results go to the team hub.</small>" in sett
+    assert "Your results stay on this PC until you join your team's hub" in sett and "f-signin" not in sett
     body = js[js.index("function settingsBody"):js.index("function settingsBody") + 600]
-    assert "for (const k of ['team_link', 'coach_email']) { const el = $('#f-' + k); if (el)" in body
-    assert "$('#f-team_link').value" not in js and "$('#f-coach_email').value" not in js
+    assert "for (const k of ['team_link']) { const el = $('#f-' + k); if (el)" in body
+    assert "$('#f-team_link').value" not in js
 
 
 def test_team_window_signed_in():
@@ -2287,7 +2274,7 @@ def test_hub_retry_with_real_hub_requests():
     class UI:
         def notify(self, t, m, sticky=False, action=None):
             notes.append((t, m))
-    sender = runtime.Sender(s, lambda paths: True)                                      # Drive works
+    sender = runtime.Sender(s)
     rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False)
     rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
 
@@ -2301,7 +2288,7 @@ def test_hub_retry_with_real_hub_requests():
     try:
         hub.set_key(BAD_KEY)
         rec._retry_uploads()
-        assert rec.idx["k"].status == "scanned" and "not sent yet" in rec.idx["k"].note    # waits, never to Drive
+        assert rec.idx["k"].status == "scanned" and "not sent yet" in rec.idx["k"].note    # waits on this PC
         # what an older version left: results on Drive only, hub pending
         rec.idx["k"].status, rec.idx["k"].note = "uploaded", ""
         rec.sent["k"] = {"hub": "pending", "why": "Hub not reachable", "drive": "sent"}
@@ -4255,6 +4242,28 @@ def test_team_tracks_in_review_page():
     assert "pcs_recorder.teamtracks" in build
 
 
+def test_comms_in_review_page():
+    """The review player shows the player's own comms transcript: a lane under the timeline, a Comms tab with a word
+    filter, click = seek; the library item carries it; Settings says where it stands."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "laneC" in js and "function drawComms" in js and "seek(+el.dataset.t)" in js[js.index("function drawComms"):]
+    assert "transcriptState()" in js
+    srv_py = (Path(pcs_server.WEB).parent / "pcs_server.py").read_text(encoding="utf-8")
+    assert 'it["comms"] = comms.transcript_of' in srv_py and '"transcripts": self.comms.public()' in srv_py
+    build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms" in build and "pcs_transcribe" in build and "PCS-Transcripts.zip" in build
+    app_py = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+    assert "pcs_recorder.comms, pcs_transcribe" in app_py and "b.comms_tick()" in app_py
+    from pcs_recorder import comms
+    rec = TMP / "commsrev" / "Apex Legends_2026.11.19-21.00.mp4"
+    (rec.parent / (rec.stem + ".scan")).mkdir(parents=True, exist_ok=True)
+    comms.comms_path(rec).write_text(json.dumps({"kind": "comms", "speaker": "me", "language": "fr", "segments": [
+        {"start": 12.5, "end": 14, "text": "full", "speaker": "me"}, {"start": "bad", "text": "x"}]}), encoding="utf-8")
+    t = comms.transcript_of(rec)
+    assert t["segments"] == [{"start": 12.5, "end": 14, "text": "full", "speaker": "me"}] and t["language"] == "fr"
+    assert comms.transcript_of(rec.with_name("none.mp4")) is None
+
+
 # ------------------------------------------------------------------ public hub: uploads in parts, https, reachability
 class PartsHub:
     """A hub on localhost speaking the 0.6 uploads contract (`mode` "new") or a 0.5 hub without it ("old": 404 to
@@ -4635,7 +4644,7 @@ def test_hub_unreachable_told_once_in_activity():
 
         def activity(self, text):
             lines.append(text)
-    sender = runtime.Sender(s, lambda paths: True)
+    sender = runtime.Sender(s)
     clock = {"t": 1000.0}
     rec = Recorder(s, None, sender, UI(), None, is_apex_running=lambda: False, clock=lambda: clock["t"])
     rec.idx = {"k": retention.Entry(path=str(v), started=time.time(), status="scanned")}
