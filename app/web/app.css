@@ -370,3 +370,10 @@ input:disabled{opacity:.5}
 .reccheck .ck.bad .fix{color:#f3b3ad}.reccheck .ck.warn .fix{color:#f0d29a}
 .reccheck .rc-hint{margin:6px 0 0;font-size:13px}
 .reccheck .row{flex-wrap:wrap}
+/* comms transcript (own mic): one bar per line on its lane, a searchable list in the side panel */
+.tick.comms{background:#6aa0ff;opacity:.6;min-width:3px;margin-left:0;top:7px;bottom:7px}
+.tick.comms:hover{opacity:1;box-shadow:0 0 0 2px rgba(106,160,255,.35)}
+.commsbar{position:sticky;top:0;background:var(--card, var(--bg));padding:6px 0 8px;z-index:1}
+.commsbar input{width:100%;box-sizing:border-box;padding:6px 10px;border-radius:6px;border:1px solid #3a3833;background:#1c1b19;color:inherit;font:inherit}
+.ev.cline span{white-space:normal;overflow-wrap:anywhere}
+.commsnote{padding:8px 4px;font-size:12px}

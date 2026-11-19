@@ -2,7 +2,7 @@
 
 Windows app for the Apex Legends team Project Conquerors (PCS), coached by Blakey. It records Apex with its own
 private OBS, scans the recordings (drop, landing, rings, harvesters, kill feed, sound cues), sends the results to
-the team's Drive or hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
+the team hub, has a review player, and uploads scrim blocks to the team's YouTube channel.
 
 Blakey is the coach and the only person who decides what ships. He is a capable Python reader but not the one
 writing this code: explain outcomes in plain words, not internals.
@@ -35,16 +35,17 @@ scanner/pcs_ring.py, pcs_respawn.py, pcs_bars.py, pcs_mapicons.py, pcs_fights.py
 pcs_ranked.py           more readers (ring circles, respawns, own bars, care packages, fights, heals, minimap, RP)
 scanner/pcs_maps.json, pcs_fonts.json, pcs_banner.json, pcs_ranked.json, rank_rp.npy   reference data it ships with
 app/pcs_app.py          entry point: single instance, tray, window (pywebview), Tk toasts, updater finish
-app/pcs_core.py         paths, settings, Google Drive / YouTube sign-in, update check + install, run_scan
+app/pcs_core.py         paths, settings, YouTube sign-in, update check + install, run_scan
 app/pcs_server.py       localhost HTTP API + static web UI (token-protected), Backend class
 app/pcs_levels.py       loudness per track, fight and mic-peak detection for the review player
 app/pcs_recorder/       auto-record: settings, obs (portable OBS + obs-websocket), core (Recorder),
                         runtime (AutoRecorder, hotkeys, toasts), retention, youtube (blocks, queue, upload),
                         eec (results from export/hub), night (night uploads, shutdown), labels (session types),
                         hub, crash, notes, watch, talk, tracks, teamtracks, squadpaths, minimaps, weaponicons,
-                        hubbackup, stitch (team hub features, see below)
+                        hubbackup, stitch, comms (team hub features, see below), clips (clips for Discord)
+app/pcs_transcribe.py   comms transcript worker (faster-whisper; the optional "Transcripts" component, not in the exe)
 app/web/                the UI: index.html, app.css, app.js, session.js/.css (Watch together), minimap.js/.css,
-                        review-extras.js (no build step, no framework)
+                        review-extras.js, clip.js/.css (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
 tools/                  developer tools, not in the exe (region cache, check set, audio cross-check, mode emblems)
@@ -155,12 +156,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   suspended when hidden or minimized (`Window._seen`), and the page polls `/api/state` every 2 s only while seen,
   every 10 s while Apex runs unless the player uses the window, never while hidden.
 - **First-run setup** (Home → "Get set up", `setupHTML` in `app.js`): name, "Your choices", team hub (one paste of the
-  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log),
-  Google (optional once on the hub). Choices (coach's decisions 18 Nov 2026), each applied at once by
+  coach's sign-in link → `/api/hub/join`: address + key saved, tested at once; the link's address replaces an old one; or a single-use invite link `<hub>/join#code=pcsi_…`: `hub.redeem` POSTs the code in the body, no key, and keeps the key the hub gives once; `400 invalid_code` also says to paste the app link the browser showed, if the link was opened there first; the code is never logged, and `pcs_core.redact` masks `pcs_` / `pcsi_` strings in app.log).
+  No Google step (no Drive). Choices (coach's decisions 18 Nov 2026), each applied at once by
   `/api/setup/choice`: auto-record On / Off (on by default for a new install: no `recorder.json` yet, and the first
   start runs the OBS download + encoder test), "Share mic tracks with my team" Yes / No (yes = `comms_consent`,
   mic recorded, "Send my mic track" on, `share_tracks`), comms transcripts Yes / No (`transcript_consent`, default
-  off; only the answer is kept, nothing is built yet). Shown until name + (hub or Google) + both questions answered
+  off; see "Comms transcripts"). Shown until name + hub + both questions answered
   (`share_asked`, `transcript_asked`; changing either switch in Settings counts too), or hidden.
 - **Teammates' mic tracks** (`pcs_recorder/teamtracks.py`, hub `/api/team-tracks`, `PUT /api/me/sharing`): with
   `share_tracks` (plus comms consent, mic on, "Send my mic track" on) the answer goes to the hub and the teammates'
@@ -171,6 +172,26 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   The review player plays them in the mixer ("<name> mic"), each game of the recording with its own offset
   (their jump − own jump), only inside that game. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.
+- **Comms transcripts** (`pcs_recorder/comms.py`, worker `app/pcs_transcribe.py`, hub `hub/comms.py`; 19 Nov 2026):
+  with `transcript_consent` (+ `comms_consent`, mic on) the player's **own mic track** (events.json `tracks` index of
+  "mic") is turned into text after the recording was scanned: never the voice-app track (everyone's voices), never the
+  game sound, nobody else's track. Whisper large-v3-turbo on the CPU (int8, faster-whisper), one recording at a time,
+  below normal, half the logical cores; never while Apex runs, records, scans or records review talk (`_backup_busy`):
+  Apex starting stops it (`stop_tree`), finished 10-min parts stay in `<rec>.comms.partial.json` and the next run goes on
+  from there; a stop is not a failed try (3 tries, last 3 days of recordings). Output `<rec>.scan/<rec>.comms.json`
+  (segments start / end in recording seconds, text, speaker = player name), left out of `result_files` (never Drive),
+  sent to the hub on its own (`upload_hub`) only while the yes holds; state in `transcripts.json`. The worker cuts parts
+  at the quietest half second, gives a short Apex word list + the scan's map POIs as prompt, fixes a few spellings
+  (Watson -> Wattson) and drops Whisper's subtitle-credit lines on silence. **Not in the exe**: faster-whisper +
+  CTranslate2 + onnxruntime are ~200 MB that every start would unpack, so they are the optional "Transcripts"
+  component (`build.yml` builds `PCS-Transcripts.zip`, a run artifact, `pcs-transcribe.exe --selftest` checked); the app
+  downloads it once only when `comms.COMPONENT` pins a published zip (url + SHA-256 + size; None so far: Settings says
+  "Not available yet"). Publish it as a release that is never "latest" (the updater reads the latest release). The
+  model (1.6 GB, 5 files) comes from a pinned Hugging Face commit with each file's SHA-256 (`MODEL_FILES`), https only,
+  into `transcripts/` in the data folder, after the yes only. Developers: `PCS_TRANSCRIBE_PY` (a Python with
+  faster-whisper; runs the worker from source) and `PCS_WHISPER_MODEL` (a model folder). Review player: a "Your comms
+  (text)" lane under the timeline and a Comms tab with a word filter (click = seek). Hook for the hub's scan worker:
+  `Comms.where()` and the worker's `--stream 0` on a `.mic.m4a`. Measured 19 Nov 2026 (5700X3D): see the PR.
 - **Idle in the tray**: started with `--background`, the web view is told it is hidden once the page loaded
   (`Window._loaded`; pywebview's hidden start left it "seen": ~2 % of a core in WebView2's browser and GPU processes
   all day, 0.2 % for the whole app after). Hotkey thread: 20 looks a
@@ -182,10 +203,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
 - **Secrets at rest**: the hub key (`hub_key.dat`) and the Google / YouTube sign-ins (`google_token.json`,
   `youtube_token.json`, via `pcs_core.read_token` / `write_token`) are encrypted for the Windows user (DPAPI); a
   sign-in file in clear from an older version is encrypted when first read. Never write them any other way.
-- **Results to hub and Drive**: with a hub address set, results go to the hub only (Drive is not used, even signed
-  in: leaving-Drive plan, coach's decision 18 Nov 2026; Home shows "Results: Team hub", setup has no Drive step,
-  Settings hides the Drive sign-in and the coach's address); without one, to Drive. A recording is "uploaded" once its
-  destination took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
+- **Results to the hub**: results go to the team hub only. Google Drive results were removed 19 Nov 2026
+  (leaving-Drive plan, coach's decision 18 Nov 2026): no Drive sign-in, no "PCS Scans" folder, no coach address.
+  Without a hub address `Sender.upload` raises `NoHub`: the results stay on this PC (status "scanned", note "not sent
+  yet: no team hub", one Activity line, no pop-up) and are sent once the player joins; Home and Settings show
+  "Results: No team hub yet". Old settings keys (`coach_email`, `shared_with`) and an old `google_token.json` are left
+  alone and never read; `/api/settings` ignores `coach_email`. A recording is "uploaded" once the hub took its results; where they went is kept per recording in `sent.json` (not in `recordings.json`: older versions refuse unknown fields there). Results
   that reached only Drive (older versions) stay "Not on hub yet" and are sent to the hub on their own (`Recorder._retry_hub`: not
   while Apex runs; key refused = wait for a new key or address; 429 = Retry-After; network or hub errors = 1, 2, 4,
   8, then every 15 min). Recordings sent before `sent.json` existed: hub retried only if recorded in the last 3 days.
@@ -218,10 +241,8 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   others may be used alone (controller players).
 - **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
   No coach address or account name is built into the exe (a security review found one in `build.json`; removed
-  18 Nov 2026, `test_no_personal_email_in_app` guards it). The scans folder on Drive is shared with the address the
-  player types in Settings (`coach_email`, once per address: `shared_with`; shown only without a hub, never decides
-  the role): it is how the coach reads the Drive results of players without a hub. Coach-only: importing recordings
-  by hand.
+  18 Nov 2026, `test_no_personal_email_in_app` guards it). The Settings field "Coach's Google email" (`coach_email`)
+  was removed 19 Nov 2026 with the Drive results. Coach-only: importing recordings by hand.
 - **Coach notes** (`pcs_recorder/notes.py`, hub 0.4 `/api/annotations`, contract in the hub's `AGENT.md`): notes and
   drawings at a moment of one player's recording, kept on the hub. A recording = its file name without extension +
   the player who sent its scan, so a recording needs its scan on the hub, and the coach annotates a player's file
@@ -276,6 +297,24 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.15 i
   folder and file name are set back after; if that fails, the next game start prepares OBS again. Segments
   (`talk.segments`) map clock time to game time from the session states seen while recording; uploads wait in
   `talk/pending.json` until the hub takes them (4xx = kept, not resent).
+- **Clips for Discord** (`pcs_recorder/clips.py`, `web/clip.js` + `clip.css`, idea #8, 19 Nov 2026): review player →
+  Clip (key C): start / end (Here buttons, keys I / O, or a typed time) or a moment from the list (events, own marks,
+  coach notes, session bookmarks) with 3-30 s before / after; the range shows on the timeline. Sound: the recording's
+  own tracks except the voice-app track (it holds teammates' voices without their own consent; the server refuses it
+  too), plus downloaded teammates' mic tracks, each at its offset per game: only when the player shares their own
+  track (`teamtracks.active`) and the hub's `/api/team-tracks` lists that track at that moment (a teammate who said no
+  since the download, or a hub out of reach = left out, listed under the clip). Coach notes on screen in the range
+  (text + drawings, as the player shows them) are drawn with Pillow on transparent PNGs at the clip's size and laid
+  over for their time. Discord = under 10 MB (aimed at 9.0 MB: AMF overshot by 6 %; bitrate from the length, 1080 /
+  720 / 540 / 480 and 30 fps as it drops, at most ~3 min with sound; encoded again lower if still over 10 MB); Full
+  quality = the recording's size and frame rate, ~20 Mbit/s at 1440p60 (a fixed quality gave 58 Mbit/s). H.264 + AAC
+  MP4, yuv420p, faststart. Encoder on the recorder's card (NVENC / AMF / Quick Sync from `s.encoder`), decoding on the
+  card (`-hwaccel d3d11va -c:v <codec>`: AV1 needs the decoder named), then the card's encoder with CPU decoding, then
+  x264. Measured on the coach's RX 9070 XT, AV1 1440p60: 30 s -> 9.5 MB in 11 s, 85 s -> 9.6 MB in 30 s. Never while
+  Apex runs or a game records (refused; Apex starting stops it, `.part` removed), below-normal priority, one at a time.
+  Saved in a `Clips` folder next to the recording (the Recordings list doesn't look inside; retention never touches
+  it). Show in folder (`explorer /select,`) and Copy file (CF_HDROP + "Preferred DropEffect" copy, paste in Discord
+  with Ctrl+V) act only on clips the app made in this run. Nothing is uploaded.
 - **Map panel** (`app/web/minimap.js`, `pcs_recorder/minimaps.py`, hub 0.5.2 collection `minimaps`): the review player
   draws the player's path (the scan's `seen` rows: debug-overlay x, y, not while spectating, from the jump to `tEndGame`;
   without the overlay the HUD minimap's reads from `minimapTrack`, `pcs_server.seen_rows`, `seenFrom: "minimap"`)

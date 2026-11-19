@@ -55,7 +55,7 @@ const STATUS = {
   'skipped': ['Skipped', ''], 'waiting': ['Waiting', 'info'], 'scanning': ['Scanning', 'info'], 'failed': ['Failed', 'bad'], 'recording': ['Recording', 'bad'],
 };
 const statusPill = s => { const [t, c] = STATUS[s] || [s, '']; return `<span class="pill ${c}">${esc(t)}</span>`; };
-// on the team hub or not (results that reached only Drive are sent to the hub again by themselves)
+// on the team hub or not (results that reached only Drive in older versions are sent to the hub by themselves)
 const hubNote = it => {
   const h = it.hub || {}, faint = t => t ? `<span class="faint" style="font-size:12px">${esc(t)}</span>` : '';
   if (h.hub === 'pending') return `<span class="pill warn" title="Sent again by itself as soon as the hub takes it">Not on hub yet</span>${faint(h.why)}`;
@@ -193,7 +193,7 @@ function route() {
 window.addEventListener('hashchange', route);
 
 /* ------------------------------------------------------------------ home */
-function homeKey(s) { return JSON.stringify([s.recorder, s.google, s.player, s.messages.length, s.scans, s.update, s.hub]); }
+function homeKey(s) { return JSON.stringify([s.recorder, s.player, s.messages.length, s.scans, s.update, s.hub]); }
 
 /* First-run setup: the steps a new player needs, in order, each one click (or one paste). Shown on Home until the
    needed ones are done (name, auto-record, team hub or Google), or until hidden. Auto-record comes second: its
@@ -207,16 +207,15 @@ function setupSteps() {
     name: !!S.player,
     rec: !!(r && r.enabled), recBusy: !!(r && r.settingUp),
     hub: hubOk, hubName: last.ok && last.name ? last.name : '',
-    google: S.google === 'ok',
     // the choices: auto-record has a default (on for new installs); the two consent questions need an answer
     share: s.share_asked ? !!(s.share_tracks && s.comms_consent && s.send_mic && s.mic_audio) : null,
     transcripts: s.transcript_asked ? !!s.transcript_consent : null,
   };
 }
 function choicesDone(st) { return st.share !== null && st.transcripts !== null; }
-function setupDone(st) { return st.name && (st.hub || st.google) && choicesDone(st); }
-/* a hub address is set: results go to the hub only, Google Drive is not used (leaving-Drive plan step 5) */
-function driveOff() { const r = S && S.recorder; return !!(r && r.settings && r.settings.hub_url); }
+function setupDone(st) { return st.name && st.hub && choicesDone(st); }
+/* a hub address is set: results go to the hub. Without one they stay on this PC (no Google Drive any more) */
+function hubSet() { const r = S && S.recorder; return !!(r && r.settings && r.settings.hub_url); }
 /* one choice of the setup step: two buttons, the current answer highlighted (none before the first answer) */
 function choiceHTML(key, title, hint, value, yes, no, extra) {
   const b = (on, label) => `<button class="btn small ${value === on ? 'brand' : ''}" data-choice="${key}" data-on="${on ? 1 : 0}" aria-pressed="${value === on}">${label}</button>`;
@@ -231,8 +230,8 @@ function tailscaleHelp(ts) {
 function setupHTML() {
   const st = setupSteps(), r = S.recorder;
   if (!r || setupHidden() || setupDone(st)) return '';
-  const drive = !st.hub && !driveOff(), total = drive ? 4 : 3;      // on the hub: no Drive step
-  const n = [st.name, st.hub, drive && st.google, choicesDone(st)].filter(Boolean).length;
+  const total = 3;
+  const n = [st.name, st.hub, choicesDone(st)].filter(Boolean).length;
   const li = (done, busy, i, title, hint, act, msg) => `<li class="${done ? 'done' : busy ? 'busy' : ''}"><span class="num">${done ? '✓' : i}</span>
     <div><b>${title}</b><small>${hint}</small></div><div class="act">${act}</div>${msg ? `<div class="msg">${msg}</div>` : ''}</li>`;
   const recPill = st.recBusy ? ' <span class="pill info">Setting up…</span>' : '';
@@ -246,14 +245,12 @@ function setupHTML() {
         <div class="choices">
           ${choiceHTML('autorecord', 'Record Apex by itself', 'On: every Apex session is recorded and scanned. Off: nothing is recorded.', st.rec, 'On', 'Off', recPill)}
           ${choiceHTML('share', 'Share mic tracks with my team', 'Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.', st.share, 'Yes', 'No')}
-          ${choiceHTML('transcripts', 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.', st.transcripts, 'Yes', 'No')}
+          ${choiceHTML('transcripts', 'Comms transcripts', TRANSCRIPT_HINT, st.transcripts, 'Yes', 'No')}
         </div></li>
-      ${li(st.hub, false, 3, 'Join the team hub', st.hub && S.iconsFromHub ? 'Weapon icons come from the hub: no team link needed.' : 'Paste the link your coach sent you.',
+      ${li(st.hub, false, 3, 'Join the team hub', st.hub && S.iconsFromHub ? 'Weapon icons come from the hub: no team link needed.' : st.hub ? 'Your results go to the team hub.' : 'Paste the link your coach sent you. Until you join, your results stay on this PC.',
         st.hub ? `<span class="pill good">${st.hubName ? 'Connected as ' + esc(st.hubName) : 'Connected'}</span>`
           : '<input id="su-link" type="password" autocomplete="off" spellcheck="false" placeholder="Paste the link from your coach"><button class="btn small brand" id="su-join">Join</button>',
         st.hub ? '' : setupMsg || (S.hub && S.hub.refused ? '<span class="hubmsg bad">Key refused. Ask your coach for a new link.</span>' : ''))}
-      ${drive ? li(st.google, false, 4, 'Google Drive', 'No team hub yet: your results go to your Drive, shared with the coach.',
-        st.google ? '<span class="pill good">Signed in</span>' : '<button class="btn small" id="su-google">Sign in with Google</button>') : ''}
       ${r.enabled && r.check ? li(!!(!r.check.running && r.check.items && r.check.items.length && !r.check.red), !!r.check.running, total + 1,
         'Recording check', 'Recorder, encoder, sound, disk space, other capture apps. Details below.',
         `${checkSummary(r.check)}<button class="btn small" id="su-check" ${r.check.running ? 'disabled' : ''}>Check again</button>`) : ''}
@@ -287,7 +284,6 @@ function wireSetup() {
     } catch (e) { setupMsg = `<span class="hubmsg bad">${esc(e.message)}</span>`; }
     join.disabled = false; link.blur(); renderTop(); renderHome(null, true);
   };
-  const g = $('#su-google'); if (g) g.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
 }
 /* Recording check: one line per item (green / red / amber / grey), a "how to fix" line under each red or amber one */
 const CHECK_STATE = {ok: ['OK', 'good'], bad: ['Fix', 'bad'], warn: ['Check', 'warn'], wait: ['Later', ''], off: ['Off', '']};
@@ -327,7 +323,6 @@ function renderHome(prev, force) {
   else if (r.scanning || S.scans.now) { state = 'busy'; title = 'Scanning'; sub = (S.scans.now ? S.scans.now : 'Your last session') + ' · it pauses by itself if you start Apex.'; }
   else if (r.enabled) { state = 'on'; title = 'Ready'; sub = r.status === 'Waiting for Apex' ? 'Waiting for Apex. Recording starts by itself when the game opens.' : r.status; }
   const used = r ? r.used : 0, max = r ? r.settings.max_gb * 1e9 : 1, pct = Math.min(100, used / max * 100);
-  const g = {ok: ['Signed in', 'good'], expired: ['Sign-in expired', 'bad'], none: ['Not signed in', 'warn'], checking: ['Checking…', '']}[S.google] || ['?', ''];
   const recent = LIB.slice(0, 4);
   const setup = setupHTML();
   $('#main').innerHTML = `${setup}
@@ -347,9 +342,9 @@ function renderHome(prev, force) {
       <div class="kpi"><span>Storage used</span><b>${r ? fmtGB(used) : '—'}</b><small>of ${r ? r.settings.max_gb + ' GB' : '—'}</small>
         <div class="meter ${pct > 90 ? 'full' : pct > 70 ? 'warn' : ''}"><i style="width:${pct.toFixed(1)}%"></i></div></div>
       <div class="kpi"><span>Quality</span><b>${r ? r.settings.bitrate_mbps + ' Mb/s' : '—'}</b><small>${r ? '≈ ' + gbHour(r.settings.bitrate_mbps) + ' GB per hour' : ''}</small></div>
-      ${driveOff() ? `<div class="kpi"><span>Results</span><b style="font-size:22px;line-height:1.6"><span class="pill ${S.hub && S.hub.refused ? 'bad' : 'good'}" style="font-size:13px">${S.hub && S.hub.refused ? 'Key refused' : 'Team hub'}</span></b>
-        <small>Sent to the team hub</small></div>` : `<div class="kpi"><span>Google Drive</span><b style="font-size:22px;line-height:1.6"><span class="pill ${g[1]}" style="font-size:13px">${g[0]}</span></b>
-        <small>${S.google === 'ok' ? 'Results go to “PCS Scans”' : `<a href="#" id="signin">Sign in with Google</a>`}</small></div>`}
+      ${hubSet() ? `<div class="kpi"><span>Results</span><b style="font-size:22px;line-height:1.6"><span class="pill ${S.hub && S.hub.refused ? 'bad' : 'good'}" style="font-size:13px">${S.hub && S.hub.refused ? 'Key refused' : 'Team hub'}</span></b>
+        <small>Sent to the team hub</small></div>` : `<div class="kpi"><span>Results</span><b style="font-size:22px;line-height:1.6"><span class="pill warn" style="font-size:13px">No team hub yet</span></b>
+        <small>Kept on this PC until you join the hub</small></div>`}
     </div>
     <div class="grid g2">
       <section class="card"><div class="row between"><h2>Latest recordings</h2><a class="btn small ghost" href="#recordings">All recordings</a></div>
@@ -375,12 +370,21 @@ function renderHome(prev, force) {
   };
   wireSetup();
   wireCheck();
-  const si = $('#signin'); if (si) si.onclick = e => { e.preventDefault(); api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   const ps = $('#psave'); if (ps) ps.onclick = async () => {
     const v = $('#pname').value.trim(); if (!v) return;
     S = await api('/api/settings', {player: v}); toast('Saved.'); renderHome(null, true);
   };
   if (!LIB.length && !renderHome.loaded) { renderHome.loaded = true; loadLibrary(); }
+}
+// comms transcripts (pcs_recorder/comms.py): what the yes means, and where it stands on this PC
+const TRANSCRIPT_HINT = 'After a session, what you say on your own mic is turned into text on this PC and sent to the team hub. The coach sees it; teammates too if you share your mic track. Only your mic, never anyone else\'s voice.';
+function transcriptState() {
+  const t = S && S.transcripts;
+  if (!t || !t.on) return '';
+  if (t.running) return t.current ? ` Now: ${t.percent != null ? t.percent + ' % of ' : ''}the last session.` : ' Getting ready (first time: a 1.6 GB download).';
+  if (t.note) return ` Not running: ${t.note}.`;
+  if (!t.available) return ' Not available yet in this version.';
+  return t.done ? ` ${t.done} recording${t.done === 1 ? '' : 's'} turned into text.` : '';
 }
 function switchHTML(id, on, label, hint) {
   return `<label class="switch"><input type="checkbox" id="${id}" ${on ? 'checked' : ''}><span class="track"></span><span><b>${esc(label)}</b><small>${esc(hint)}</small></span></label>`;
@@ -767,6 +771,7 @@ async function renderReview(id) {
             <div class="lane sound" id="laneS"><span class="lane-label">Sound · <span id="soundState">analysing…</span></span></div>
             ${(d.marks || []).length ? '<div class="lane" id="laneM"><span class="lane-label">Your marks · muted sound</span></div>' : ''}
             <div class="lane" id="laneN" hidden><span class="lane-label">Coach notes</span></div>
+            ${commsOf(d).length ? '<div class="lane" id="laneC"><span class="lane-label">Your comms (text)</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
             <div class="legend"><span><i style="background:#e6ad45"></i>Game start</span><span><i style="background:#6aa0ff"></i>Jump</span><span><i style="background:#5fd08f"></i>Landing</span><span><i style="background:#c48bff"></i>Ring</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>We knocked / killed</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>We went down</span><span><i class="respawn"></i>Respawned</span><span><i style="background:rgba(95,208,143,.45)"></i>Fight won</span><span><i style="background:rgba(138,135,127,.5)"></i>Fight lost</span><span><i style="background:rgba(224,98,58,.45)"></i>Outside the ring</span><span><i style="background:#e6ad45;border-radius:2px"></i>Loud game sound (likely fight)</span><span><i style="background:#6aa0ff"></i>Loud call</span></div>
@@ -774,11 +779,11 @@ async function renderReview(id) {
               <button class="btn small" id="rvTheatre" title="Video across the whole window (T)">Theatre</button><button class="btn small" id="rvFull" title="Full screen (F)">Full screen</button></div>
           </div>
           <div id="mixer"></div>
-          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen · <kbd>M</kbd> map · <kbd>U</kbd> mute · <kbd>V</kbd> scanner view on/off</div>
+          <div class="keys" style="margin-top:8px"><kbd>Space</kbd> play/pause · <kbd>←</kbd><kbd>→</kbd> 5 s · <kbd>J</kbd><kbd>L</kbd> 10 s · <kbd>,</kbd><kbd>.</kbd> one frame · <kbd>[</kbd><kbd>]</kbd> previous/next event · <kbd>T</kbd> theatre · <kbd>F</kbd> full screen · <kbd>M</kbd> map · <kbd>U</kbd> mute · <kbd>V</kbd> scanner view on/off · <kbd>C</kbd> clip (<kbd>I</kbd> <kbd>O</kbd> start / end)</div>
         </div>
       </div>
       <aside class="card side">
-        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button><button data-t="notes" id="tabNotes" hidden>Coach notes</button></div>
+        <div class="tabs" id="rvTabs"><button data-t="events" class="on">Events</button><button data-t="feed">Kill feed (${(d.feed || []).length})</button><button data-t="drop">Drop</button><button data-t="notes" id="tabNotes" hidden>Coach notes</button>${commsOf(d).length ? `<button data-t="comms">Comms (${commsOf(d).length})</button>` : ''}</div>
         <div class="scroll" id="rvBody"></div>
       </aside>
     </div>`;
@@ -805,6 +810,7 @@ async function renderReview(id) {
   loadNotes(d.id);
   if (window.reviewExtras) reviewExtras(d, v);                          // session bookmarks, review talk (review-extras.js)
   if (window.minimapSetup) minimapSetup(d, v);                          // Map panel: your path on the game's minimap (minimap.js)
+  if (window.clipSetup) clipSetup(d, v);                                // Clip for Discord (clip.js)
 }
 async function showVideoError(v, id) {   /* say which: file missing, can't be read, damaged, or a format not supported */
   const code = v.error ? v.error.code : 0;
@@ -881,6 +887,9 @@ function drawTimeline() {
     // own knocks: a grey tick with a square head (grey = we went down, as on the feed ticks)
     RV.ev.filter(e => e.k === 'knock').map(e =>
     `<div class="tick knock" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('');
+  const lc = $('#laneC');
+  if (lc) lc.innerHTML = '<span class="lane-label">Your comms (text)</span>' + commsOf(RV.d).map(c =>
+    `<div class="tick comms" data-t="${c.start}" style="left:${pct(c.start)};width:${pct(Math.max(0.6, c.end - c.start))}" title="${fmtT(c.start)} · ${esc(c.text)}"></div>`).join('');
   const ln = $('#laneN'), notes = (RV.notes && RV.notes.notes) || [];
   if (ln) {
     ln.hidden = !notes.length;
@@ -888,10 +897,26 @@ function drawTimeline() {
       `<button class="mk note" data-t="${n.t}" style="left:${pct(n.t)}" title="${fmtT(n.t)} · ${esc(noteTitle(n))}">C</button>`).join('');
   }
 }
+/* The player's own comms transcript (made on this PC after the session, only with their yes; pcs_recorder/comms.py):
+   one line per thing said on the mic, in recording time. Click a line = seek; the box filters the lines. */
+function commsOf(d) { return (d && d.comms && d.comms.segments) || []; }
+function drawComms(body) {
+  const all = commsOf(RV.d), words = (RV.commsQ || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const rows = words.length ? all.filter(c => words.every(w => c.text.toLowerCase().includes(w))) : all;
+  body.innerHTML = `<div class="commsbar"><input id="commsQ" type="search" placeholder="Find in your comms" value="${esc(RV.commsQ || '')}"></div>` +
+    (rows.length ? '<div class="comms">' + rows.map(c => `<div class="ev cline" data-t="${c.start}"><time>${fmtT(c.start)}</time><i style="background:#6aa0ff"></i><span>${esc(c.text)}</span></div>`).join('') + '</div>'
+      : `<div class="empty">${all.length ? 'No line has these words.' : 'No comms text for this recording.'}</div>`) +
+    '<div class="faint commsnote">Made on this PC from your own mic track. Words can be wrong.</div>';
+  const inp = $('#commsQ', body);
+  inp.oninput = () => { RV.commsQ = inp.value; const at = inp.selectionStart; drawComms(body); const n = $('#commsQ', body); n.focus(); n.setSelectionRange(at, at); };
+  $$('[data-t]', body).forEach(el => el.onclick = () => seek(+el.dataset.t));
+  onTime(true);
+}
 function drawSide() {
   const body = $('#rvBody'); if (!body) return;
   const d = RV.d;
   if (RV.tab === 'notes') { drawNotes(body); onTime(true); return; }
+  if (RV.tab === 'comms') { drawComms(body); return; }
   if (!d.scan) { body.innerHTML = '<div class="empty"><strong>Not scanned yet</strong>Scan this recording to see its drop, landing, rings and kill feed.</div>'; return; }
   if (RV.tab === 'events') {
     let html = '', g = -1;
@@ -1426,17 +1451,14 @@ function renderSettings() {
         <label class="field"><span>EEC name</span><input id="f-player" type="text" value="${esc(S.player)}" placeholder="Your in-game name"><small>Labels your scans for the coach.</small></label>
         <label class="field"><span>Role</span><select id="f-role">${['', 'IGL', 'Fragger', 'Anchor', 'Support', 'Sub', 'Coach'].map(x => `<option ${x === S.role ? 'selected' : ''}>${x}</option>`).join('')}</select>
           <small>${S.coach ? 'Coach tools are on: import any recording or VOD, and more to come.' : 'Coach needs the coach\'s hub key.'}</small></label>
-        ${driveOff() ? `<label class="field"><span>Google Drive</span><div class="row"><span class="pill">Not used</span></div><small>Your results go to the team hub.</small></label>` : `<div class="field"><span class="muted" style="font-size:12px;letter-spacing:.06em;text-transform:uppercase">Google Drive</span>
-          <div class="row" style="margin-top:4px">${S.google === 'ok' ? '<span class="pill good">Signed in</span>' : '<span class="pill warn">Not signed in</span>'}
-          <button class="btn small" id="f-signin">${S.google === 'ok' ? 'Sign in again' : 'Sign in with Google'}</button></div></div>
-        <label class="field"><span>Coach's Google email</span><input id="f-coach_email" type="email" value="${esc(S.coachEmail || '')}" placeholder="From your coach"><small>Your scans folder on Google Drive is shared with this address.</small></label>`}
+        ${hubSet() ? `<label class="field"><span>Results</span><div class="row"><span class="pill good">Team hub</span></div><small>Your results go to the team hub.</small></label>` : `<label class="field"><span>Results</span><div class="row"><span class="pill warn">No team hub yet</span></div><small>Your results stay on this PC until you join your team's hub (Team hub below).</small></label>`}
         ${S.iconsFromHub ? `<label class="field"><span>Weapon icons</span><div class="row"><span class="pill ${S.icons ? 'good' : ''}">${S.icons ? 'Loaded' : 'Not loaded yet'}</span></div><small>From the team hub${S.icons ? ', ' + new Date(S.icons * 1000).toLocaleDateString() : ''}. No team link needed.</small></label>` : `<label class="field wide"><span>Team link</span><input id="f-team_link" type="text" value="${esc(S.teamLink || '')}" placeholder="Paste the Google Drive link from your coach">
           <small>Lets the scan name the weapons in the kill feed. Not needed once the team hub has the weapon icons. ${S.icons ? 'Weapon icons: loaded ' + new Date(S.icons * 1000).toLocaleDateString() + '.' : 'Weapon icons: not loaded yet.'} Keep this link inside the team.</small></label>`}
       </div></section>
     ${r ? `
     <section class="card section"><h2>Team hub</h2>
       <div class="form">
-        <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Your results go here (Google Drive is then not used). Empty = Google Drive.</small></label>
+        <label class="field wide"><span>Hub address</span><input id="f-hub_url" type="url" value="${esc(s.hub_url)}" placeholder="http://pcs-hub:8420"><small>From your coach. Your results go here. Empty = results stay on this PC.</small></label>
         <div class="field wide hubfield"><span>Key</span><div id="hubKey"></div><small>Your own key, or the sign-in or invite link your coach sent. Don't share it.</small></div>
       </div>
       ${switchHTML('f-server_scan', !!s.server_scan, 'Scan on the team server', 'After a session your PC sends a light copy of the recording to the team server, which scans it: about 0.7 GB an hour (one picture a second and the game sound, no voice). Your PC stays free. If the server is off or busy, your PC scans as before.')}
@@ -1478,7 +1500,7 @@ function renderSettings() {
         <div class="field">${switchHTML('f-send_mic', s.send_mic, 'Send my mic track to the team', 'With the scan results, for the comms review')}</div>
         <div class="field">${switchHTML('f-share_tracks', s.share_tracks, 'Share mic tracks with my team', 'Your mic track goes to your teammates, theirs come to you by themselves while Apex is closed' + (S.teamTracks && S.teamTracks.tracks ? ` (${S.teamTracks.tracks} here)` : ''))}</div>
       </div>
-      ${switchHTML('f-transcript_consent', s.transcript_consent, 'Comms transcripts', 'Coming later: a text of your team\'s comms, made after sessions. Only for players who say yes.')}
+      ${switchHTML('f-transcript_consent', s.transcript_consent, 'Comms transcripts', TRANSCRIPT_HINT + transcriptState())}
       <h3>Hotkeys while recording</h3>
       <p class="muted" style="margin:-6px 0 0">Active only while Apex is being recorded. A short beep confirms (two low tones = muted).
         Controller players can use a single key like F5 or a numpad key. While recording, a key used for a hotkey doesn't reach the game, so keyboard players should pick keys they don't play with.</p>
@@ -1527,7 +1549,6 @@ function renderSettings() {
   const q = $('#f-bitrate_mbps');
   const qh = () => { if (!q) return; $('#q-val').textContent = q.value + ' Mb/s'; $('#q-hint').textContent = '≈ ' + gbHour(q.value) + ' GB per hour'; };
   if (q) { q.oninput = qh; qh(); }
-  const fsi = $('#f-signin'); if (fsi) fsi.onclick = () => { api('/api/signin', {}); toast('Your browser opens for the Google sign-in…'); };
   $('#f-results').onclick = () => api('/api/open', {what: 'results'});
   const fl = $('#f-obslogs'); if (fl) fl.onclick = () => api('/api/open', {what: 'obslogs'});
   const ft = $('#f-retest'); if (ft) ft.onclick = async () => {
@@ -1595,7 +1616,7 @@ function askUnsaved(target) {
 }
 function settingsBody() {
   const body = {player: $('#f-player').value.trim(), role: $('#f-role').value};
-  for (const k of ['team_link', 'coach_email']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }   // hidden on the hub
+  for (const k of ['team_link']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }   // hidden when icons come from the hub
   if (S.recorder) {
     for (const k of ['folder', 'hub_url', 'capture', 'yt_privacy', 'yt_audio', 'yt_when', 'yt_team', 'mic_device', 'voice_app', 'voice_exe']) { const el = $('#f-' + k); if (el) body[k] = el.value.trim(); }
     for (const k of ['keep_days', 'max_gb', 'bitrate_mbps', 'scan_delay_s', 'yt_gap_min', 'night_from', 'night_to', 'night_idle_min', 'yt_wait_eec_h', 'nogame_keep_h', 'min_record_min']) { const el = $('#f-' + k); if (el) body[k] = parseInt(el.value, 10); }
