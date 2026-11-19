@@ -410,6 +410,7 @@ class Backend:
                 self.google_to_hub(force=True)          # the team hub learns which Google account this is
             except Exception as e:
                 self.say(f"YouTube sign-in failed: {e}")
+                self.check_youtube()                    # e.g. YouTube unticked on Google's page: not signed in
             finally:
                 self._signin = core.signin_kind()
         threading.Thread(target=go, daemon=True).start()
