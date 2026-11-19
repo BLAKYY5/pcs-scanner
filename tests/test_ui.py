@@ -1982,6 +1982,7 @@ class NotesHub:
         from urllib.parse import parse_qs, urlsplit
         import threading
         self.notes, self.seen, self.calls = {}, {}, []
+        self.replies, self.with_replies = {}, True        # replies under notes (hub 0.6.x); False = an older hub
         hub = self
 
         class H(BaseHTTPRequestHandler):
@@ -2012,11 +2013,33 @@ class NotesHub:
                     if not coach and want != me[0]:
                         return self._send(403, {"detail": "no", "error": "forbidden"})
                     known = q.get("recording") == hub.REC and want == "Moe"
-                    notes = [dict(x, seen=me[0] in hub.seen.get(x["id"], []), **({"seenBy": {s: "t" for s in hub.seen.get(x["id"], [])}} if coach else {}))
+                    notes = [dict(x, seen=me[0] in hub.seen.get(x["id"], []), **({"seenBy": {s: "t" for s in hub.seen.get(x["id"], [])}} if coach else {}),
+                                  **({"replies": hub.replies.get(x["id"], [])} if hub.with_replies else {}))
                              for x in hub.notes.values() if known]
                     return self._send(200, {"recording": q.get("recording"), "player": want, "known": known,
                                             "players": ["Moe"] if coach and known else [],
                                             "me": {"name": me[0], "role": me[1]}, "notes": notes})
+                if "/replies" in p and hub.with_replies:
+                    parts = p.split("/")                 # /api/annotations/<id>/replies[/<rid>]
+                    nid = parts[3]
+                    if nid not in hub.notes:
+                        return self._send(404, {"detail": "No such note.", "error": "not_found"})
+                    rs = hub.replies.setdefault(nid, [])
+                    if self.command == "DELETE":
+                        r = next((x for x in rs if x["id"] == parts[5]), None)
+                        if not r:
+                            return self._send(404, {"detail": "No such reply.", "error": "not_found"})
+                        if not coach and r["by"] != me[0]:
+                            return self._send(403, {"detail": "Only your own replies.", "error": "forbidden"})
+                        rs.remove(r)
+                        return self._send(200, {"deleted": True, "replies": rs})
+                    kind = "ack" if body.get("ack") else "text"
+                    r = next((x for x in rs if kind == "ack" and x["kind"] == "ack" and x["by"] == me[0]), None)
+                    if not r:
+                        r = {"id": f"re-{sum(map(len, hub.replies.values())) + 1}", "note": nid, "by": me[0],
+                             "role": me[1], "kind": kind, "text": body.get("text", ""), "at": "2026-11-19T20:00:00Z"}
+                        rs.append(r)
+                    return self._send(200, {"reply": r, "replies": rs})
                 if p.endswith("/seen"):
                     hub.seen.setdefault(p.split("/")[3], []).append(me[0])
                     return self._send(200, {"seen": True})
@@ -2127,6 +2150,78 @@ def test_coach_notes():
         old.stop()
         _fresh_hub()
         core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if not p.startswith(str(folder))]
+
+
+def test_note_replies():
+    """Under a note: the player sends "Got it" (once) or a short reply, the coach answers back; the replies come
+    with the notes and stay readable offline; a hub from before replies: no reply box (no `replies` field)."""
+    hub = _fresh_hub()
+    fake = NotesHub()
+    rec = TMP / "notes3" / (NotesHub.REC + ".mp4")
+    rec.parent.mkdir(exist_ok=True)
+    rec.write_bytes(b"x")
+    auto = _Auto(str(TMP / "notesrecs3"))
+    auto.s.hub_url = fake.url
+    b = pcs_server.Backend(auto)
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if x["path"] == str(rec))
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        hub.set_key(GOOD_KEY)
+        nid = b.note_change(vid, "save", {"player": "Moe", "note": {"t": 3, "text": "Rotate earlier"}})["notes"][0]["id"]
+        hub.set_key(PLAYER_KEY)
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["notes"][0]["replies"] == []
+        code, r, _ = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})
+        assert code == 200 and [(x["kind"], x["by"]) for x in r["notes"][0]["replies"]] == [("ack", "Moe")], r
+        assert fake.calls[-2][:4] == ("POST", f"/api/annotations/{nid}/replies", {}, {"ack": True})
+        call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})          # "Got it" twice: one
+        r = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "text": "  On it  "})[1]
+        assert [x["text"] for x in r["notes"][0]["replies"]] == ["", "On it"]
+        assert fake.calls[-2][3] == {"text": "On it"}
+        # empty, too long, a bad id: refused before anything reaches the hub
+        n = len(fake.calls)
+        for bad in ({"note_id": nid, "text": "  "}, {"note_id": nid, "text": "x" * 501}, {"note_id": "../x", "ack": True}):
+            assert call(srv, "/api/notes/reply", {"id": vid, **bad})[0] == 500
+        assert len(fake.calls) == n
+        # the coach answers back; the player removes his text reply
+        hub.set_key(GOOD_KEY)
+        r = call(srv, "/api/notes/reply", {"id": vid, "player": "Moe", "note_id": nid, "text": "Good"})[1]
+        assert [(x["by"], x["role"]) for x in r["notes"][0]["replies"]][-1] == ("Blakey", "coach")
+        hub.set_key(PLAYER_KEY)
+        rid = r["notes"][0]["replies"][1]["id"]
+        r = call(srv, "/api/notes/unreply", {"id": vid, "note_id": nid, "reply_id": rid})[1]
+        assert [x["text"] for x in r["notes"][0]["replies"]] == ["", "Good"]
+        assert call(srv, "/api/notes/unreply", {"id": vid, "note_id": nid, "reply_id": r["notes"][0]["replies"][1]["id"]})[0] == 500
+        # offline: the replies saved with the notes still show; sending one says why it failed
+        fake.stop()
+        r = call(srv, f"/api/library/{vid}/notes")[1]
+        assert r["offline"] and [x["text"] for x in r["notes"][0]["replies"]] == ["", "Good"]
+        code, r, _ = call(srv, "/api/notes/reply", {"id": vid, "note_id": nid, "ack": True})
+        assert code == 500 and r["error"]
+    finally:
+        srv.stop()
+        _fresh_hub()
+        core.SETTINGS["library"] = [p for p in core.SETTINGS.get("library", []) if p != str(rec)]
+    # a hub from before replies: notes come without the field, the page then shows no reply box
+    from pcs_recorder import notes
+    assert "replies" not in notes.clean_note({"id": "an-1", "t": 1})
+    n = notes.clean_note({"id": "an-1", "t": 1, "replies": [{"id": "re-1", "by": "<b>Moe</b>", "role": "admin",
+                                                              "kind": "x", "text": 5, "at": None, "junk": 1}, "bad"]})
+    assert n["replies"] == [{"id": "re-1", "by": "<b>Moe</b>", "role": "player", "kind": "text", "text": "5", "at": ""}]
+    assert notes.clean_note({"id": "an-1", "replies": "nope"})["replies"] == []
+
+
+def test_review_reply_box_in_page():
+    """The review player draws replies, a "Got it" button and a reply box under each note (only when the hub sends
+    replies), and a reply draft survives the notes list being drawn again."""
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for s in ("function repliesHTML", 'data-a="ack"', "'/api/notes/reply'", "'/api/notes/unreply'",
+              "if (!Array.isArray(n.replies)) return ''", "replyDrafts[inp.dataset.reply]", "Replies need the team hub."):
+        assert s in js, s
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    assert ".nreply{" in css and ".nreplies{" in css
 
 
 def test_coach_notes_delete():
@@ -3193,6 +3288,45 @@ def test_window_polls_only_when_seen():
     finally:
         page.close()
         srv.stop()
+
+
+def test_recording_check_on_home():
+    """Home → Recording check: in /api/state, Check again runs it (not during the encoder test), the page's words."""
+    from pcs_recorder import precheck as pc
+    from pcs_recorder import settings as st
+    a = _Auto(str(TMP / "recs"))
+    s = st.Settings(folder=str(TMP / "recs"), encoder="av1_texture_amf", comms_consent=True).clamp()
+    c = pc.RecCheck(s, None, a.rec)
+    c.threaded = False
+    runs = []
+    c._run = lambda manual=False: (runs.append(manual), c._set({"apps": pc.apps_item([("Medal.exe", "")]),
+                                             "disk": pc.item("disk", "ok", "500 GB free")}),
+                      setattr(c, "running", False))
+    a.check = c
+    b = pcs_server.Backend(a)
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        code, state, _ = call(srv, "/api/state")
+        assert code == 200 and state["recorder"]["check"] == {"running": False, "at": None, "items": [], "red": 0}
+        code, r, _ = call(srv, "/api/reccheck", {})
+        assert code == 200 and runs == [True] and r["check"]["red"] == 1, r         # Check again = manual
+        assert [i["id"] for i in r["check"]["items"]] == ["disk", "apps"]           # shown in a fixed order
+        apps = r["check"]["items"][1]
+        assert apps["state"] == "bad" and apps["label"] == "Other capture apps" and apps["fix"].startswith("Close Medal")
+        a._setting_up = True                                                        # encoder test running: refused
+        code, r, _ = call(srv, "/api/reccheck", {})
+        assert code == 500 and "set-up" in r["error"] and runs == [True]
+        a._setting_up = False
+        b2 = pcs_server.Backend(_Auto(str(TMP / "recs")))                         # no check (older stand-in): None
+        assert b2.rec_check() is None
+    finally:
+        srv.stop()
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    for words in ("Recording check", "Check again", "How to fix: ", "/api/reccheck", "Ready to record", "say something"):
+        assert words in js, words
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    assert ".reccheck .checks" in css and "animation" not in css.split("/* recording check")[1]
 
 
 def run_all(tests):

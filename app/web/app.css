@@ -343,3 +343,28 @@ input:disabled{opacity:.5}
 .upd-bar>i{display:block;height:100%;width:0;background:var(--accent)}
 .upd-fail{margin-top:16px;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
 .upd-fail p{margin:0;flex:1;min-width:200px}
+/* replies under a coach note: "Got it", short replies, the coach's answers */
+.nreplies{margin-top:6px;padding-left:8px;border-left:2px solid var(--line);display:grid;gap:3px}
+.nrep{font-size:13px;line-height:18px;overflow-wrap:anywhere}
+.nrep b{display:inline;font-weight:600}
+.nrep.coach b{color:#ffd60a}
+.nrep .ntext{white-space:pre-wrap}
+.nrep small{margin-left:4px}
+.nack{color:var(--good);font-weight:600}
+.nlink{background:none;border:0;padding:0;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;text-decoration:underline}
+.nlink:hover{color:var(--ink)}
+.nreply{display:grid;gap:6px;justify-items:start;margin-top:6px;cursor:default}
+.nreply .nrow{display:flex;gap:6px;align-items:center;width:100%}
+.nreply input{flex:1;min-width:0;width:auto;padding:4px 8px;font-size:13px}
+
+/* recording check (Home, setup) */
+.reccheck .checks{list-style:none;margin:10px 0 0;padding:0;display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,360px),1fr));gap:0 22px}
+.reccheck .ck{display:grid;grid-template-columns:14px minmax(0,1fr);gap:10px;padding:9px 0;border-top:1px solid var(--line);align-items:start}
+.reccheck .ckdot{width:10px;height:10px;border-radius:50%;margin-top:6px;background:var(--faint)}
+.reccheck .ck.ok .ckdot{background:var(--good)}.reccheck .ck.bad .ckdot{background:var(--accent)}.reccheck .ck.warn .ckdot{background:var(--warn)}
+.reccheck .ck b{font-weight:600}.reccheck .ck .pill{margin-left:4px;vertical-align:1px}
+.reccheck .cktext{display:block;color:var(--muted);font-size:13px;line-height:1.4}
+.reccheck .fix{display:block;font-size:12.5px;line-height:1.35;margin-top:3px;color:var(--ink)}
+.reccheck .ck.bad .fix{color:#f3b3ad}.reccheck .ck.warn .fix{color:#f0d29a}
+.reccheck .rc-hint{margin:6px 0 0;font-size:13px}
+.reccheck .row{flex-wrap:wrap}

@@ -731,6 +731,9 @@ class AutoRecorder:
             self.ui.actions["signin"] = ("Sign in with Google", signin)
         self.sender = Sender(self.s, drive_upload)
         self.rec = Recorder(self.s, ObsAdapter(self.s), self.sender, self.ui, scan_process)
+        from .precheck import RecCheck
+        self.check = self.rec.check = RecCheck(self.s, self.rec.obs, self.rec, self.ui,
+                                               setting_up=lambda: bool(getattr(self, "_setting_up", False)))
         self.sender.stop = lambda: self.rec.is_apex_running()     # same rule as every upload: never during a game
         from .talk import Talk
         self.rec.talk = Talk(self.rec)           # review talk (Watch together, coach's app; consent only)
@@ -746,6 +749,8 @@ class AutoRecorder:
         if yt_signin:
             self.ui.actions["ytsignin"] = ("Sign in to YouTube", yt_signin)
 
+    CHECK_DELAY_S = 20         # after the app starts (or the setup ends): the recording check runs once by itself
+
     def run_loop(self) -> None:
         if self.thread:
             return
@@ -755,6 +760,12 @@ class AutoRecorder:
         except Exception:
             log.exception("audio tracks not resumed")
         self.hotkeys.start()
+
+        def first_check():                           # the recording check on Home, once Auto-record runs
+            time.sleep(self.CHECK_DELAY_S)
+            if self.s.enabled and self.s.encoder and not getattr(self, "_setting_up", False) and self.check.at is None:
+                self.check.start()                   # automatic: never starts OBS
+        threading.Thread(target=first_check, daemon=True, name="rec-check-start").start()
 
         def loop():
             while True:
@@ -822,13 +833,17 @@ class AutoRecorder:
         self._setting_up = True
 
         def go():
+            ok = False
             try:
                 first_time_setup(self.s, self.say)
                 self.run_loop()
+                ok = True
             except Exception as e:
                 self.s.enabled = False
                 st.save(self.s)
                 self.say(f"Auto-record setup failed: {e}")
             finally:
                 self._setting_up = False
+            if ok:
+                self.check.start(manual=True)            # the setup's result on Home (OBS left as it was)
         threading.Thread(target=go, daemon=True).start()
