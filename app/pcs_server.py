@@ -33,7 +33,7 @@ UPDATE_EVERY_S = 6 * 3600           # update check in the background
 UPDATE_ON_OPEN_S = 10 * 60          # and while the window is open / when it's opened, at most this often
 REC_FIELDS = ("folder", "keep_days", "max_gb", "bitrate_mbps", "game_audio", "auto_scan", "scan_delay_s",
               "capture", "hub_url", "start_with_windows", "comms_consent", "discord_audio", "voice_app", "voice_exe",
-              "crash_reports",
+              "crash_reports", "server_scan",
               "mic_audio", "mic_device", "send_mic", "share_tracks", "transcript_consent", "share_asked",
               "transcript_asked",
               "hk_mute_game", "hk_mute_discord", "hk_mute_mic", "hk_mark", "hk_sounds",

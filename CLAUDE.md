@@ -306,6 +306,18 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.10.14 i
   build) until the scan completes: when Apex starts, the app stops the scan (`core.stop_tree`, nothing stays in
   memory) instead of suspending it, and the next run goes on from the chunks still to do. `result_files` never
   sends `.partial`. 4:3 stretched views fill only the boxes their readers look at (`view_top` rows 0..640).
+- **Scan on the team server** (`pcs_recorder/serverscan.py`, hub `hub/scanjobs.py`, setting `server_scan`, off by
+  default; prototype 19 Nov 2026): the headless scan process (`pcs_app.py --scan`) first tries the hub. It makes a
+  light copy (stream copy of the keyframe packets + track 1, `-copyts`: ~0.7-0.95 GB per hour, seconds, no decoding),
+  sends it through `/api/uploads` kind `scan-source` with the recording's length, this PC's chunk count, decoder family
+  and scanner version (results depend on all four), and polls `/api/scan-jobs/<id>`. The scanner's 60 fps reads
+  (`pcs_hud._corner`: frame-exact jump, landing, ring 1) need frames between keyframes: with `--clips DIR` the scanner
+  reads them from clips (cut `-ss a -t d -i rec -c copy -copyts`; `-t` before `-i`, or the clip comes out empty) and
+  lists missing windows in `<rec>.needs.json`; the hub's first pass asks the app for those clips, the second pass
+  re-uses the chunks (`--keep-chunks`) and only redoes the end. `--duration` cuts the chunks where the whole recording
+  would. Results land in the usual results folder and are sent as after a local scan. Any failure (worker off 409,
+  other scanner version 409, old hub, failed job, > 3 h) = local scan at once. Checked identical to a local scan (all
+  of scan.json / feed.json but perf, scannedAt) on 3 recordings, CPU and GPU decoding.
 - **Leftover unpacked copies**: the onefile exe unpacks ~600 MB to `%TEMP%\_MEI*` per start (and per scan); a crash or
   forced stop leaves it. At start the app removes such folders only when they hold its own files (`BUNDLE_MARKERS`),
   are not its own, are over 10 min old and not in use (Python's DLL, loaded by any running copy, can't be deleted:

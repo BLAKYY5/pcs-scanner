@@ -33,6 +33,7 @@ def selftest(out):
         import pcs_recorder.crash   # noqa: F401
         import pcs_recorder.hubbackup   # noqa: F401
         import pcs_recorder.teamtracks   # noqa: F401
+        import pcs_recorder.serverscan   # noqa: F401
         import pcs_recorder.stitch   # noqa: F401
         import pcs_recorder.precheck   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
@@ -62,7 +63,12 @@ def headless_scan(args):
     os.makedirs(out, exist_ok=True)
     sys.stdout = sys.stderr = open(os.path.join(out, 'scan.log'), 'a', encoding='utf-8')
     try:
-        res = core.run_scan(args, print, out)
+        res = None
+        if len(args) == 1:                       # opt-in: the team server scans it, this PC only if that fails
+            from pcs_recorder import serverscan
+            res = serverscan.scan(args[0], out, say=lambda m: print(m, flush=True))
+        if not res:
+            res = core.run_scan(args, print, out)
         print(f'done: {len(res)} result file(s)')
         return 0 if res else 2
     except Exception:
