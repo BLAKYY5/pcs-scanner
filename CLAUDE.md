@@ -292,7 +292,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   it too. Settings → Games: "Pause heavy work while any game runs" (`game_pause`, on), the games found, Add / Remove
   (`game_exes`, `game_ignore`), "Also count any full-screen program" (`game_fullscreen`, off). Home and Activity show
   "Paused while a game runs (<name>)"; the window goes quiet (`S.game`) as for Apex. Tests replace the detector's reads.
-- **Single instance**: named mutex + a local port to ask the running instance to show its window.
+- **Single instance**: named mutex + a local port (4467) to ask the running instance to show its window. A plain second
+  start (taskbar pin, Start menu, shortcut, the exe) asks it, again every 0.25 s for up to 15 s while the running app
+  is still starting, after passing on its right to come in front (`AllowSetForegroundWindow`); `--background` starts
+  stay silent. The running app shows the form, restores it only if minimized, brings it in front (`bring_to_front`:
+  Windows refused it for a request from another process, so up to 1.13.1 a taskbar click seemed to do nothing)
+  and wakes the web view (`_seen`). A request before the window exists makes it open visible.
 - **Hotkeys**: `RegisterHotKey`, only while recording. Letters/digits need a modifier; F-keys, numpad and a few
   others may be used alone (controller players).
 - **Coach role**: unlocked when the team hub says the hub key is the coach's (`/api/me` role, via `hubbackup.role`).
