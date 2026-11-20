@@ -318,8 +318,14 @@ def ulog(msg):
         with open(UPDATE_LOG, 'a', encoding='utf-8') as f: f.write(f'{time.strftime("%Y-%m-%d %H:%M:%S")} {msg}\n')
     except OSError: pass
 
+def own_exe():
+    """The file the player starts (shortcut, Start-up link): the launcher when the app is installed as a folder
+    (pcs_install), else this exe."""
+    import pcs_install
+    return (pcs_install.is_installed_app() and pcs_install.launcher_path()) or sys.executable
+
 def staged_path(cur=None):
-    cur = cur or sys.executable
+    cur = cur or own_exe()
     return os.path.join(os.path.dirname(cur), 'PCS-Scanner.update.exe')
 
 def install_update(url, log, size=None, show=False, digest=None, step=None):
@@ -335,7 +341,7 @@ def install_update(url, log, size=None, show=False, digest=None, step=None):
         raise RuntimeError("The update address isn't this app's GitHub release. Download it from the release page.")
     want = str(digest or '').lower()
     want = want[7:] if want.startswith('sha256:') else ''
-    cur = sys.executable
+    cur = own_exe()                                    # installed as a folder: the launcher (the new file replaces it)
     new = staged_path(cur)
     log('Downloading the update…')
     ulog(f'download {url} -> {new}')
@@ -414,6 +420,27 @@ def cleanup_staged():
     if getattr(sys, 'frozen', False) and os.path.abspath(sys.executable) != os.path.abspath(p) and os.path.exists(p):
         try: os.remove(p)
         except OSError: pass
+
+def settle_install(wait_s=120):
+    """Installed as a folder (pcs_install): put the small launcher at the player's own file (the big installer they
+    ran, or the old exe an update replaced), remove the downloaded installer and version folders no longer used.
+    Runs in a thread at start (the installer may still be closing)."""
+    import pcs_install
+    if not pcs_install.is_installed_app(): return
+    target = pcs_install.launcher_path()
+    src = os.path.join(os.path.dirname(sys.executable), 'launcher.exe')
+    try:
+        if target and pcs_install.adopt_launcher(target, src, wait_s=wait_s):
+            logging.info('launcher placed at %s', target)
+        p = staged_path()
+        for _ in range(int(wait_s / 2)):
+            if not os.path.exists(p): break
+            try: os.remove(p)
+            except OSError: time.sleep(2)
+        for p in pcs_install.remove_old():
+            logging.info('removed old app folder %s', p)
+    except Exception:
+        logging.exception('settling the installed app')
 
 BUNDLE_MARKERS = ('pcs_maps.json', 'pcs_fonts.json', 'build.json', os.path.join('web', 'index.html'))
 

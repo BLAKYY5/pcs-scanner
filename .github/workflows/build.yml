@@ -72,27 +72,41 @@ jobs:
           if ($env:GOOGLE_OAUTH_CLIENT) { $env:GOOGLE_OAUTH_CLIENT | Set-Content -Encoding utf8 client.json } else { Write-Warning "No GOOGLE_OAUTH_CLIENT secret: the app will scan but cannot upload." }
           "VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Build the .exe
+      # The app is built as a folder (onedir: starts without unpacking anything), plus a small launcher, and both go
+      # inside the release file PCS-Scanner.exe, which installs them (app/pcs_install.py). Old versions update to it
+      # the way they always did (--finish-update).
+      - name: Build the app folder, the launcher and the installer
         shell: pwsh
         run: |
           $data = @("app/web;web", "app/assets;assets", "scanner/pcs_maps.json;.", "scanner/pcs_fonts.json;.", "scanner/pcs_banner.json;.", "scanner/pcs_ranked.json;.", "scanner/rank_rp.npy;.", "build.json;.", "ffmpeg;ffmpeg")
           if (Test-Path client.json) { $data += "client.json;." }
-          $args = @("--noconfirm", "--onefile", "--windowed", "--name", "PCS-Scanner", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--hidden-import", "pcs_ring", "--hidden-import", "pcs_respawn", "--hidden-import", "pcs_minimap", "--hidden-import", "pcs_bars", "--hidden-import", "pcs_mapicons", "--hidden-import", "pcs_usage", "--hidden-import", "pcs_ammo", "--hidden-import", "pcs_fights", "--hidden-import", "pcs_ranked", "--hidden-import", "pcs_bans", "--hidden-import", "pcs_highlights", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--hidden-import", "pcs_recorder.crash", "--hidden-import", "pcs_recorder.squadpaths", "--hidden-import", "pcs_recorder.weaponicons", "--hidden-import", "pcs_recorder.teamtracks", "--hidden-import", "pcs_recorder.stitch", "--hidden-import", "pcs_recorder.precheck", "--hidden-import", "pcs_recorder.serverscan", "--hidden-import", "pcs_recorder.comms", "--hidden-import", "pcs_transcribe", "--hidden-import", "pcs_recorder.clips", "--hidden-import", "pcs_recorder.games", "--hidden-import", "pcs_i18n", "--paths", "app")
+          $args = @("--noconfirm", "--onedir", "--windowed", "--name", "PCS-Scanner", "--hidden-import", "pcs_install", "--icon", "app/assets/pcs.ico", "--paths", "scanner", "--hidden-import", "pcs_scan", "--hidden-import", "pcs_hud", "--hidden-import", "pcs_audio", "--hidden-import", "pcs_ring", "--hidden-import", "pcs_respawn", "--hidden-import", "pcs_minimap", "--hidden-import", "pcs_bars", "--hidden-import", "pcs_mapicons", "--hidden-import", "pcs_usage", "--hidden-import", "pcs_ammo", "--hidden-import", "pcs_fights", "--hidden-import", "pcs_ranked", "--hidden-import", "pcs_highlights", "--hidden-import", "pcs_bans", "--collect-submodules", "scipy.signal", "--collect-submodules", "numpy", "--collect-submodules", "scipy.ndimage", "--collect-all", "webview", "--hidden-import", "pystray._win32", "--collect-submodules", "pcs_recorder", "--hidden-import", "pcs_recorder.hub", "--hidden-import", "pcs_recorder.notes", "--hidden-import", "pcs_recorder.watch", "--hidden-import", "pcs_recorder.talk", "--hidden-import", "pcs_recorder.minimaps", "--hidden-import", "pcs_recorder.hubbackup", "--hidden-import", "websocket", "--hidden-import", "pcs_recorder.crash", "--hidden-import", "pcs_recorder.squadpaths", "--hidden-import", "pcs_recorder.weaponicons", "--hidden-import", "pcs_recorder.teamtracks", "--hidden-import", "pcs_recorder.stitch", "--hidden-import", "pcs_recorder.precheck", "--hidden-import", "pcs_recorder.serverscan", "--hidden-import", "pcs_recorder.comms", "--hidden-import", "pcs_transcribe", "--hidden-import", "pcs_recorder.clips", "--hidden-import", "pcs_recorder.games", "--hidden-import", "pcs_i18n", "--paths", "app")
           foreach ($d in $data) { $args += @("--add-data", $d) }
           pyinstaller @args app/pcs_app.py
+          if ($LASTEXITCODE) { exit 1 }
+          pyinstaller --noconfirm --onefile --windowed --name launcher --icon app/assets/pcs.ico --paths app --distpath dist/launcher --workpath build/launcher app/pcs_launcher.py
+          if ($LASTEXITCODE) { exit 1 }
+          Copy-Item dist/launcher/launcher.exe dist/PCS-Scanner/launcher.exe
+          pyinstaller --noconfirm --onefile --windowed --name PCS-Scanner --icon app/assets/pcs.ico --paths app --add-data "dist/PCS-Scanner;payload" --distpath dist/setup --workpath build/setup app/pcs_setup.py
+          if ($LASTEXITCODE) { exit 1 }
+          Get-ChildItem dist/setup/PCS-Scanner.exe, dist/PCS-Scanner/launcher.exe | ForEach-Object { "{0} {1:N1} MB" -f $_.Name, ($_.Length / 1MB) }
 
-      - name: Test the .exe (libraries load, ffmpeg and sign-in ID bundled)
+      - name: Test the .exe (installs, libraries load, ffmpeg and sign-in ID bundled; then through the launcher)
         shell: pwsh
         run: |
-          Start-Process -FilePath dist/PCS-Scanner.exe -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
+          Start-Process -FilePath dist/setup/PCS-Scanner.exe -ArgumentList "--selftest", "$PWD\selftest.txt" -Wait
           $r = Get-Content selftest.txt -Raw
           Write-Host $r
           if (-not $r.StartsWith("OK")) { throw "Self-test failed" }
+          Start-Process -FilePath dist/PCS-Scanner/launcher.exe -ArgumentList "--selftest", "$PWD\selftest2.txt" -Wait
+          $r = Get-Content selftest2.txt -Raw
+          Write-Host "launcher: $r"
+          if (-not $r.StartsWith("OK")) { throw "Self-test through the launcher failed" }
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02   # v4
         with:
           name: PCS-Scanner-${{ env.VERSION }}
-          path: dist/PCS-Scanner.exe
+          path: dist/setup/PCS-Scanner.exe
 
       # The optional "Transcripts" component (comms transcripts, pcs_recorder/comms.py): faster-whisper in its own
       # folder, never inside PCS-Scanner.exe (~200 MB that every start would unpack). Built in its own venv so the
@@ -124,5 +138,5 @@ jobs:
           tag_name: v${{ env.VERSION }}
           target_commitish: ${{ github.sha }}
           name: PCS Scanner ${{ env.VERSION }}
-          files: dist/PCS-Scanner.exe
+          files: dist/setup/PCS-Scanner.exe
           generate_release_notes: true

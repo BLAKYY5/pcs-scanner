@@ -781,6 +781,126 @@ def test_update_finisher():
     assert core.relaunch_args(str(cur), False, False) == [str(cur)]
 
 
+def _fake_payload(root: Path, version: str) -> Path:
+    p = root / f"payload-{version}"
+    (p / "_internal").mkdir(parents=True, exist_ok=True)
+    (p / "PCS-Scanner.exe").write_bytes(b"MZ app " + version.encode())
+    (p / "launcher.exe").write_bytes(b"MZ launcher")
+    (p / "_internal" / "python312.dll").write_bytes(b"dll")
+    (p / "_internal" / "build.json").write_text(json.dumps({"version": version}))
+    return p
+
+
+def test_installed_folder_install_and_switch():
+    """The installer copies the app folder to app\\<version>\\ and makes it current only once it is complete; a newer
+    version becomes current, one older folder is kept, older ones and half-copied ones are removed."""
+    import pcs_install
+    root = TMP / "appinst"
+    shutil.rmtree(root, ignore_errors=True)
+    assert pcs_install.current(str(root)) is None
+    cur = pcs_install.install(str(_fake_payload(TMP, "1.10.15")), "1.10.15", str(root))
+    assert cur["version"] == "1.10.15" and Path(cur["exe"]).read_bytes() == b"MZ app 1.10.15"
+    # a copy that died half-way is never current and is cleaned up
+    (root / "1.10.99.partial").mkdir()
+    for v in ("1.10.16", "1.10.17"):
+        time.sleep(0.05)
+        cur = pcs_install.install(str(_fake_payload(TMP, v)), v, str(root))
+    assert cur["version"] == "1.10.17"
+    removed = pcs_install.remove_old(str(root))
+    names = sorted(p.name for p in root.iterdir() if p.is_dir())
+    assert names == ["1.10.16", "1.10.17"], names                  # current + one older kept
+    assert any(r.endswith("1.10.15") for r in removed) and any(r.endswith(".partial") for r in removed)
+    # files missing (deleted by hand): no current app, the launcher says so instead of failing silently
+    (root / "1.10.17" / ".complete").unlink()
+    assert pcs_install.current(str(root)) is None
+    try:
+        pcs_install.run_app([], str(TMP / "PCS-Scanner.exe"), root=str(root))
+        raise AssertionError("no app should be started")
+    except FileNotFoundError:
+        pass
+
+
+def test_installed_folder_launcher_takes_players_file():
+    """The player's own file (the big installer they ran, or the old exe an update replaced) becomes the small
+    launcher, retried while the file is still in use; the launcher itself is left alone."""
+    import pcs_install
+    src = _fake_payload(TMP, "1.10.18") / "launcher.exe"
+    target = TMP / "Downloads-PCS-Scanner.exe"
+    target.write_bytes(b"MZ big installer" * 1000)
+    tries = []
+    real = shutil.copy2
+
+    def busy_once(a, b, *k, **kw):                                  # in use the first time (installer closing)
+        tries.append(b)
+        if len(tries) == 1:
+            raise PermissionError("in use")
+        return real(a, b, *k, **kw)
+    shutil.copy2 = busy_once
+    try:
+        assert pcs_install.adopt_launcher(str(target), str(src), wait_s=5, sleep=lambda s: None)
+    finally:
+        shutil.copy2 = real
+    assert target.read_bytes() == b"MZ launcher" and len(tries) == 2
+    assert not pcs_install.adopt_launcher(str(target), str(src), wait_s=1)     # already the launcher
+    assert not pcs_install.adopt_launcher(str(TMP / "missing.exe"), str(src), wait_s=1)
+
+
+def test_installed_folder_update_paths():
+    """Installed as a folder, the update goes next to the launcher (the player's file), not into the version folder,
+    and the Start-up link points to the launcher; a onefile exe or a run from source keeps sys.executable."""
+    import pcs_install
+    launcher = str(TMP / "Desktop" / "PCS-Scanner.exe")
+    real = pcs_install.is_installed_app, os.environ.get(pcs_install.LAUNCHER_ENV)
+    try:
+        pcs_install.is_installed_app = lambda: True
+        os.environ[pcs_install.LAUNCHER_ENV] = launcher
+        assert core.own_exe() == launcher
+        assert core.staged_path() == str(TMP / "Desktop" / "PCS-Scanner.update.exe")
+        os.environ[pcs_install.LAUNCHER_ENV] = "relative.exe"                   # never trusted
+        assert core.own_exe() == sys.executable
+        pcs_install.is_installed_app = lambda: False
+        os.environ[pcs_install.LAUNCHER_ENV] = launcher
+        assert core.own_exe() == sys.executable
+    finally:
+        pcs_install.is_installed_app = real[0]
+        if real[1] is None:
+            os.environ.pop(pcs_install.LAUNCHER_ENV, None)
+        else:
+            os.environ[pcs_install.LAUNCHER_ENV] = real[1]
+
+
+def test_installer_finish_update_from_old_version():
+    """What a 1.10.12+ app does today (download the release file, run it with --finish-update CUR PID) installs the
+    folder, puts the launcher at CUR and starts the installed app in the tray with --updated; --show = window."""
+    import pcs_install
+    import pcs_setup
+    root = TMP / "appinst2"
+    shutil.rmtree(root, ignore_errors=True)
+    payload = _fake_payload(TMP, "1.10.19")
+    cur = TMP / "old" / "PCS-Scanner.exe"
+    cur.parent.mkdir(exist_ok=True)
+    cur.write_bytes(b"MZ old onefile 1.10.14" * 1000)
+    started = []
+    saved = (pcs_setup.PAYLOAD, pcs_setup.LAUNCHER, pcs_install.app_root, pcs_install.run_app)
+    pcs_setup.PAYLOAD, pcs_setup.LAUNCHER = str(payload), str(payload / "launcher.exe")
+    pcs_install.app_root = lambda: str(root)
+    pcs_install.run_app = lambda args, launcher, root=None, wait=False: started.append((args, launcher, wait))
+    try:
+        assert pcs_setup.main(["--finish-update", str(cur), "999999"]) == 0
+        assert started == [(["--background", "--updated"], str(cur), False)]
+        assert cur.read_bytes() == b"MZ launcher"
+        assert pcs_install.current(str(root))["version"] == "1.10.19"
+        started.clear()
+        assert pcs_setup.main(["--finish-update", str(cur), "999999", "--show"]) == 0
+        assert started == [([], str(cur), False)]
+        started.clear()
+        assert pcs_setup.main(["--selftest", "out.txt"]) == 0                     # the build's check waits for the app
+        assert started[0][0] == ["--selftest", "out.txt"] and started[0][2] is True
+    finally:
+        pcs_setup.PAYLOAD, pcs_setup.LAUNCHER, pcs_install.app_root, pcs_install.run_app = saved
+    assert "installed 1.10.19" in Path(core.UPDATE_LOG).read_text()          # the test's data folder, not the PC's
+
+
 def test_update_waits_for_any_game():
     """Coach, 20 Nov 2026: app updates wait while any game runs, not only Apex (with "Pause heavy work while any game
     runs" on, the default). The switch off: only Apex holds the update."""
@@ -856,7 +976,38 @@ def test_update_relaunch_arguments():
     assert "show='--show' in sys.argv" in src
     # installed versions (1.10.12+) update to a new release with this same protocol: one .exe per release
     wf = (Path(__file__).resolve().parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
-    assert "files: dist/PCS-Scanner.exe" in wf and "i = sys.argv.index('--finish-update')" in src
+    # the release file is the installer (one .exe, same name); old onefile apps run it with the command line above
+    assert "files: dist/setup/PCS-Scanner.exe" in wf and "i = sys.argv.index('--finish-update')" in src
+    assert "if \"--finish-update\" in args:" in (Path(__file__).resolve().parent.parent / "app" / "pcs_setup.py").read_text(encoding="utf-8")
+    # installed as a folder: the same command, staged next to the launcher (the player's file), CUR = the launcher
+    import pcs_install
+    launcher = TMP / "inst-desk" / "PCS-Scanner.exe"
+    launcher.parent.mkdir(exist_ok=True)
+    spawned.clear()
+    saved = (pcs_install.is_installed_app, os.environ.get(pcs_install.LAUNCHER_ENV), sys.executable, core.spawn_detached,
+             core.download, getattr(sys, "frozen", None), dict(core.BUILD))
+    pcs_install.is_installed_app = lambda: True
+    os.environ[pcs_install.LAUNCHER_ENV] = str(launcher)
+    sys.executable, core.spawn_detached, sys.frozen = str(TMP / "app" / "dev-1" / "PCS-Scanner.exe"), spawned.append, True
+    core.BUILD["repo"] = "BLAKYY5/pcs-scanner"
+    core.download = lambda url, p, **k: (Path(p).write_bytes(b"MZ" + b"x" * 10), "ab" * 32)[1]
+    try:
+        assert core.install_update(url, lambda m: None, 12, show=False)
+    finally:
+        pcs_install.is_installed_app = saved[0]
+        if saved[1] is None:
+            os.environ.pop(pcs_install.LAUNCHER_ENV, None)
+        else:
+            os.environ[pcs_install.LAUNCHER_ENV] = saved[1]
+        sys.executable, core.spawn_detached, core.download = saved[2:5]
+        core.BUILD.clear()
+        core.BUILD.update(saved[6])
+        if saved[5] is None:
+            del sys.frozen
+        else:
+            sys.frozen = saved[5]
+    staged = str(launcher.parent / "PCS-Scanner.update.exe")
+    assert spawned == [[staged, "--finish-update", str(launcher), str(os.getpid())]], spawned
 
 
 def test_update_download_checked():

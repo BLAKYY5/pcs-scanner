@@ -49,8 +49,9 @@ app/web/                the UI: index.html, app.css, app.js, session.js/.css (Wa
                         review-extras.js, clip.js/.css (no build step, no framework)
 tests/test_recorder.py  recorder, youtube, eec, labels, audio, encoder logic (fake OBS and game)
 tests/test_ui.py        server API, settings, scan queue, coach role, updater, single instance
+app/pcs_install.py, pcs_setup.py, pcs_launcher.py   installed folder: installer (the release file), launcher (see Updater)
 tools/                  developer tools, not in the exe (region cache, check set, audio cross-check, mode emblems)
-.github/workflows/build.yml   Windows build, tests, PyInstaller onefile exe, selftest, release
+.github/workflows/build.yml   Windows build, tests, PyInstaller onedir app + launcher + onefile installer, selftest, release
 ```
 
 Data on a player's PC: `%LOCALAPPDATA%\PCS Scanner\` (`app.log`, `recorder.json`, `youtube.json`, `labels.json`,
@@ -140,10 +141,25 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.12.0 is
   differ, or no game at the lobby's times = `mismatch`: the lobby is not attached to that block (e.g. a tournament
   the same evening), the label comes from the scan alone, the reason is kept (`eec_rejected`, `label_why`). Nothing
   to compare = old behaviour. Display: EEC's drop wins, ours is shown next to it when different ("scan: ...").
-- **Updater**: downloads `PCS-Scanner.update.exe`, spawns it detached with `--finish-update`, which waits for
-  the old process, copies itself over the old exe and restarts. Every player is on 1.10.12 or newer (same updater):
-  their app takes the release's one `.exe` and starts it with `--finish-update <old exe> <old pid> [--show]`, so keep
-  the single `PCS-Scanner.exe` release file and that command line (`test_update_relaunch_arguments`). Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
+- **Installed folder** (`app/pcs_install.py`, `pcs_setup.py`, `pcs_launcher.py`): the release file `PCS-Scanner.exe`
+  is an installer (onefile, standard library only) carrying the app built as a folder (onedir) + an 8 MB launcher.
+  It copies the folder to `%LOCALAPPDATA%\PCS Scanner\app\<version>\` (as `.partial`, renamed when complete,
+  `current.json` points at it), puts the launcher at the player's own file and starts the app with `PCS_LAUNCHER` =
+  that file. The app starts in ~2 s instead of ~8 s and unpacks nothing (also per scan). `pcs_core.own_exe()` = the
+  launcher (updates are staged next to it, the Start-up link points to it), never a version folder; `settle_install`
+  (thread at start) places the launcher if the installer couldn't, removes the staged file and old version folders
+  (one older kept). Run by hand, the installer installs and starts the app; the app then swaps the big file for
+  the launcher once the installer has exited.
+- **Updater**: downloads `PCS-Scanner.update.exe` (next to the launcher), spawns it detached with `--finish-update
+  CUR PID`. Since the installed folder, that file is the installer: it waits for the old process, installs, puts the
+  launcher at CUR and restarts (old onefile versions 1.10.2+ send the same command, so they update to it unchanged;
+  install failing = the old version is started again). Before: it copied itself over the old exe and restarted.
+  Every player is on 1.10.12 or newer (same updater): their app takes the release's one `.exe` and starts it with
+  `--finish-update <old exe> <old pid> [--show]`, so keep the single `PCS-Scanner.exe` release file (the installer) and
+  that command line (`test_update_relaunch_arguments`, `test_installer_finish_update_from_old_version`). Going back:
+  an installed app offered an older-style onefile release takes it the same way (the onefile copies itself over the
+  launcher); the version folders stay in `app\` until removed by hand.
+  Dev builds are offered releases ≥ their `base`. The download must be an https address of this repo's releases
   (redirects: GitHub's file hosts, https only) and match the SHA-256 GitHub lists for the file (`digest`); a release
   without a digest gets the size check only. The restart is in the tray (`--background --updated`: a corner
   message says so, the app never closes itself) unless Update was pressed in the open window (`--show`).

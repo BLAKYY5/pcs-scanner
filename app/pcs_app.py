@@ -39,6 +39,7 @@ def selftest(out):
         import pcs_recorder.precheck   # noqa: F401
         import pcs_recorder.comms, pcs_transcribe   # noqa: F401
         import pcs_recorder.clips   # noqa: F401
+        import pcs_install   # noqa: F401
         import pcs_i18n   # noqa: F401
         numpy.zeros((4, 4)).sum(); scipy.ndimage.label(numpy.ones((3, 3)))
         r = tkinter.Tk(); r.withdraw(); r.destroy()
@@ -361,6 +362,7 @@ def main():
             show_running_instance()                        # the running one shows its window instead
         return
     core.cleanup_staged()
+    threading.Thread(target=core.settle_install, daemon=True, name='settle-install').start()
     try: core.remove_old_drive_signin()                    # the old Drive sign-in file of 1.10.x: not used any more
     except Exception: logging.exception('old Drive sign-in')
     if getattr(sys, 'frozen', False):                      # unpacked copies left on C: by earlier runs (crash, shutdown)
