@@ -2334,6 +2334,40 @@ def test_squads_left_counter():
     img[132:157, sk[0]:sk[0] + 25] = 40                                                       # no skull: no kills
     assert "kills" not in O.read(img) and O.read(img)["assists"] == 1
 
+    # About 2 s after a number changes the strip flashes red: plates dark red (the knocks plate bright red), icons
+    # saturated red or pink instead of white, digits still white. Read again with the icons taken on the red channel.
+    def flash(kills=None, assists=None, knocks=None, damage=None, icon=(245, 5, 15), plate=(130, 0, 0), font="B"):
+        img = np.zeros((1440, 2560, 3), np.uint8); img[:] = plate
+        d0, _ = put(img, "S", str(damage), x_end=2336)
+        img[132:156, d0 - 40:d0 - 3] = icon                                     # damage icon, red
+        left = d0 - 70
+        if knocks is not None:
+            img[126:162, left - 105:left] = (250, 0, 0)                           # bright red plate, dark icon and digits
+            img[131:157, left - 80:left - 44] = 20
+            put(img, "K", str(knocks), x_start=left - 41)
+            left -= 125
+        if kills is not None:
+            a0 = left - 20 - 15 * len(str(assists))
+            put(img, font, str(assists), x_start=a0)
+            img[132:157, a0 - 41:a0 - 3] = icon                                  # handshake
+            k0, _ = put(img, font, str(kills), x_end=a0 - 41 - 24)
+            img[132:157, k0 - 34:k0 - 9] = icon                                  # skull
+        return img
+    assert HUD.OwnStatsRed.flash(flash(kills=3, assists=1, knocks=2, damage=716))
+    assert O._read(flash(kills=3, assists=1, knocks=2, damage=716)) == {}                                # the old reader: nothing
+    red = O.read(flash(kills=3, assists=1, knocks=2, damage=716))
+    assert red == {"kills": 3, "assists": 1, "knocks": 2, "damage": 716}, red
+    pink = O.read(flash(kills=12, assists=10, knocks=6, damage=2051, icon=(250, 120, 130), plate=(90, 10, 10)))   # fading out
+    assert pink == {"kills": 12, "assists": 10, "knocks": 6, "damage": 2051}, pink
+    assert O.read(flash(damage=164)) == {"damage": 164}
+    img = flash(kills=3, assists=1, knocks=2, damage=716)
+    img[135:152, 2310:2318] = 255                                                                        # a digit smudged
+    assert "damage" not in O.read(img)                                                                   # still no guess
+    img = flash(damage=716); img[132:156, 2230:2296] = (130, 0, 0)                                       # no red icon
+    assert O.read(img) == {} and not HUD.OwnStatsRed.flash(img)
+    assert O.read(np.full((1440, 2560, 3), (200, 0, 0), np.uint8)) == {}                                # red screen, no strip
+    assert HUD.OwnStats43.read(flash(damage=716)) == {}                                                  # 4:3: unchanged
+
     # the final value of a game: the value of the last two reads, which must agree; values read twice never go down
     R = [(t, 1) for t in range(10, 20)] + [(20, 7)] + [(t, 2) for t in range(30, 50)] + [(50, 9), (51, 9), (52, 9)]
     assert HUD.stat_final(R, 0, 100) == (9, 50, 52, False), HUD.stat_final(R, 0, 100)

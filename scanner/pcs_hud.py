@@ -1133,8 +1133,18 @@ class OwnStats:
         return None if len(s) > 1 and s[0] == '0' else int(s)
     @classmethod
     def read(cls, a):
-        """a: full 16:9 frame. -> {} or {'kills', 'assists', 'knocks', 'damage'} with the numbers that could be read."""
+        """a: full 16:9 frame. -> {} or {'kills', 'assists', 'knocks', 'damage'} with the numbers that could be read.
+        For about 2 s after one of its numbers changes the strip flashes red: its icons turn red (the digits stay white),
+        so no white damage icon is found and nothing was read. Such a strip (flash()) is read again by OwnStatsRed."""
         if not cls.T: return {}
+        out = cls._read(a)
+        if 'damage' not in out and cls is OwnStats:
+            try: red = OwnStatsRed._read(a) if OwnStatsRed.flash(a) else {}
+            except Exception: red = {}
+            if 'damage' in red: return red
+        return out
+    @classmethod
+    def _read(cls, a):
         out = {}
         try: lay = cls.layout(a)
         except Exception: return out
@@ -1185,6 +1195,55 @@ def _soften(T, sx=0.5625, sy=0.75):
         out[f] = (labels, np.array(R, np.float32), Wd)
     return out
 
+class OwnStatsRed(OwnStats):
+    """The strip while it flashes red (about 2 s after one of its numbers changed): plates red or pink, the icons
+    (skull, handshake, damage) saturated red or pink instead of white, the white digits unchanged, the knocks plate
+    bright red with its dark digits. The digits are found and compared as in OwnStats (white on red stays sharp on the
+    darkest channel); the red icons are added from the red channel, so every number is found next to its icon as
+    usual and a doubtful digit is still no number. Used only when OwnStats found no damage on a strip that flash()
+    calls red."""
+    FLASH = 150                              # saturated red pixels in the damage icon's place (37 x 24 = 888 px)
+    @classmethod
+    def flash(cls, a):
+        """True when the damage icon's place (x 2235..2290, rows 132..156) holds a red / pink icon-sized patch."""
+        b = a[132:157, 2235:2291].astype(np.int16)
+        r, g, bl = b[..., 0], b[..., 1], b[..., 2]
+        return int(((r > 180) & (g < 180) & (r - np.maximum(g, bl) > 60)).sum()) >= cls.FLASH
+    INK_K = 0.3                              # the red icons are less above their red plate than white ones
+    REDDISH = 50                             # icon pixels: red channel this far above green and blue
+    @classmethod
+    def white(cls, a):
+        """The white shapes of OwnStats.white (the digits, unchanged) plus the red icons: shapes brighter than the plate
+        on the red channel AND clearly red (white digits are not). The red damage icon has darker red inside and falls
+        apart: pieces at most 3 px apart that together have the icon's size where it sits (x 2235..2290) are joined."""
+        b = a[cls.Y0:cls.Y1, cls.X0:cls.X1].astype(np.int16)
+        r = b[..., 0]; red = r - np.maximum(b[..., 1], b[..., 2])
+        def reddish(w):                                       # a light pink icon also passes the white test: not a digit
+            box = (slice(w[2] - cls.Y0, w[3] - cls.Y0), slice(w[0] - cls.X0, w[1] - cls.X0))
+            hi = r[box] > 200
+            return hi.any() and float(np.median(red[box][hi])) > cls.REDDISH
+        W0 = [w for w in OwnStats.white.__func__(cls, a) if not reddish(w)]
+        bg = cls._medfilt(np.median(r[cls.REF], axis=0))
+        m = (r > bg + np.maximum(cls.INK, (255 - bg) * cls.INK_K)) & (red > cls.REDDISH) & (bg <= cls.PLATE)
+        for w in W0: m[:, max(0, w[0] - cls.X0 - 2):w[1] - cls.X0 + 2] = False   # the digits' pink edges are not icons
+        R = cls._runs(m[3:30], cls.X0, cls.Y0 + 3)
+        icons = []; i = 0
+        while i < len(R):
+            q = R[i]; k = i; mm = q; j = None
+            if 2235 <= q[0] <= 2280:
+                while k + 1 < len(R) and R[k + 1][0] - mm[1] <= 3 and R[k + 1][1] - q[0] <= 41:
+                    k += 1; mm = (q[0], R[k][1], min(mm[2], R[k][2]), max(mm[3], R[k][3]))
+                    if 34 <= mm[1] - mm[0] <= 41 and 22 <= mm[3] - mm[2] <= 27: j = (k, mm)
+            if j:
+                icons.append(j[1]); i = j[0] + 1; continue
+            icons.append(q); i += 1
+        icons = [q for q in icons if not any(q[0] < w[1] and w[0] < q[1] for w in W0)]
+        return sorted(W0 + icons)
+    @classmethod
+    def dark(cls, a):
+        """As OwnStats.dark; the knocks icon on the red plate may fall apart in pieces: joined as in OwnStats43."""
+        return _join_knocks_icon(cls, super().dark(a))
+
 class OwnStats43(OwnStats):
     """OwnStats on a 4:3 stretched recording, read on the scanner's remapped top (pcs_scan.view_top). Its digits are
     doubtful more often (softer text), so a number may stop being read while it is still on screen with a new value:
@@ -1219,16 +1278,21 @@ class OwnStats43(OwnStats):
     def dark(cls, a):
         """As OwnStats.dark; the knocks icon's lighter middle often drops out, leaving its two sides: pieces that are
         not digits and together have the icon's size (33..38 x 24..28) are joined."""
-        D = super().dark(a); out = []; i = 0
-        while i < len(D):
-            b = D[i]; k = i; m = b; j = None
-            while k + 1 < len(D) and D[k + 1][1] - b[0] <= 38 and cls.kind(D[k + 1], True) is None:
-                k += 1; m = (b[0], D[k][1], min(m[2], D[k][2]), max(m[3], D[k][3]))
-                if 33 <= m[1] - m[0] <= 38 and 24 <= m[3] - m[2] <= 28: j = (k, m)
-            if j and cls.kind(b, True) is None:
-                out.append(j[1]); i = j[0] + 1; continue
-            out.append(b); i += 1
-        return out
+        return _join_knocks_icon(cls, super().dark(a))
+
+def _join_knocks_icon(cls, D):
+    """Dark blobs D (sorted by x): pieces that are not digits and together have the knocks icon's size (33..38 x
+    24..28) are joined into one."""
+    out = []; i = 0
+    while i < len(D):
+        b = D[i]; k = i; m = b; j = None
+        while k + 1 < len(D) and D[k + 1][1] - b[0] <= 38 and cls.kind(D[k + 1], True) is None:
+            k += 1; m = (b[0], D[k][1], min(m[2], D[k][2]), max(m[3], D[k][3]))
+            if 33 <= m[1] - m[0] <= 38 and 24 <= m[3] - m[2] <= 28: j = (k, m)
+        if j and cls.kind(b, True) is None:
+            out.append(j[1]); i = j[0] + 1; continue
+        out.append(b); i += 1
+    return out
 
 SINGLE_JUMP = 250      # damage: largest rise accepted from the read before a last value seen once (see stat_final)
 
