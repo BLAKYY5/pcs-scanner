@@ -2,10 +2,15 @@
 
 - Recorder: our private OBS starts and answers on its remote control (obs-websocket).
 - Encoder: the encoder test's result is reused (never run again here, OBS is not restarted for it): tested, same
-  graphics card, last session recorded.
+  graphics card, last session recorded, and on the chip OBS draws on (OBS's log: no "Wrong adapter" / fallback encoder,
+  not integrated graphics' encoder when OBS draws on a graphics card).
 - Game sound (track 1): Apex's sound can only be heard once Apex runs. Before: "checked when Apex starts"; then it
   is confirmed in the first minutes of the recording, from OBS's own level meters.
 - Voice app (track 2) and microphone (track 3): OBS's level meters for our own sources, a few seconds.
+- Recordings folder: made if missing (only the folder set in Settings), a small test file written and removed; OBS's
+  log of its last start ("Unable to open file"); Windows Defender's Controlled folder access (read only: its on / off
+  setting and its "blocked" events), which keeps unknown programs from writing in Videos, Documents…
+  Check again also lets our OBS record a 2-second test file there when in doubt (deleted at once).
 - Disk space on the recordings drive against one session at the chosen bitrate.
 - Other capture programs (Medal, Outplayed, Overwolf…) that are known to stop OBS's recording from starting.
 
@@ -17,11 +22,14 @@ item names, states and the names of the capture programs found, nothing personal
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
+import subprocess
 import threading
 import time
+from pathlib import Path
 
 from . import obs as obsmod
 
@@ -32,9 +40,10 @@ SIGNAL = 1e-5                  # any sound at all (-100 dBFS); a source that get
 LISTEN_S = 6                   # "Check again": seconds the meters are listened to
 CONFIRM_AFTER_S = 15           # after the recording starts, wait this long, then listen for Apex's sound…
 CONFIRM_MAX_S = 180            # …for at most this long
-ORDER = ("obs", "encoder", "game", "voice", "mic", "disk", "apps")
-LABELS = {"obs": "Recorder", "encoder": "Encoder", "game": "Game sound", "voice": "Voice app", "mic": "Microphone",
-          "disk": "Disk space", "apps": "Other capture apps"}
+ORDER = ("obs", "encoder", "folder", "game", "voice", "mic", "disk", "apps")
+LABELS = {"obs": "Recorder", "encoder": "Encoder", "folder": "Recordings folder", "game": "Game sound",
+          "voice": "Voice app", "mic": "Microphone", "disk": "Disk space", "apps": "Other capture apps"}
+DEFENDER_EVERY_S = 600         # Defender's settings are read at most every 10 min (PowerShell, about a second)
 
 # Programs known to make OBS's recording fail to start while they run (they hold the game capture or the encoder).
 BLOCKERS = {"medal.exe": "Medal", "medalencoder.exe": "Medal", "outplayed.exe": "Outplayed", "overwolf.exe": "Overwolf",
@@ -91,6 +100,100 @@ def mic_blocked() -> bool:
     return any(str(v).lower() == "deny" for v in (_reg("HKEY_CURRENT_USER", base, "Value"),
                                                    _reg("HKEY_LOCAL_MACHINE", base, "Value"),
                                                    _reg("HKEY_CURRENT_USER", base + r"\NonPackaged", "Value")))
+
+
+def protected_folders() -> list[str]:
+    """The folders Controlled folder access protects by default: the user's Documents, Pictures, Videos, Music,
+    Desktop, Favorites (where Windows has them, OneDrive included) and the Public ones."""
+    out = []
+    home = Path.home()
+    for name in ("Documents", "Pictures", "Videos", "Music", "Desktop", "Favorites"):
+        out.append(str(home / name))
+    shell = r"Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+    for v in ("Personal", "My Pictures", "My Video", "My Music", "Desktop", "Favorites"):
+        x = _reg("HKEY_CURRENT_USER", shell, v)
+        if x:
+            out.append(str(x))
+    pub = os.environ.get("PUBLIC")
+    if pub:
+        out += [str(Path(pub) / n) for n in ("Documents", "Pictures", "Videos", "Music", "Desktop")]
+    return list(dict.fromkeys(out))
+
+
+def _norm(p) -> str:
+    return os.path.normcase(os.path.normpath(str(p).replace("/", "\\"))).rstrip("\\/")
+
+
+def inside(path, folders) -> bool:
+    p = _norm(path)
+    return any(p == f or p.startswith(f + "\\") for f in (_norm(x) for x in folders if x))
+
+
+def write_test(folder) -> str:
+    """Make the recordings folder if it is missing (only this folder: the one in Settings), write a small file there
+    and remove it. -> "" (fine), "create" (the folder can't be made) or "write" (a file can't be written)."""
+    p = Path(folder)
+    try:
+        p.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        log.info("recordings folder can't be made: %s", e.__class__.__name__)
+        return "create"
+    f = p / f".pcs-write-test-{os.getpid()}.tmp"
+    try:
+        with open(f, "wb") as fh:
+            fh.write(b"PCS Scanner write test\n")
+    except OSError as e:
+        log.info("recordings folder can't be written: %s", e.__class__.__name__)
+        return "write"
+    finally:
+        try:
+            f.unlink(missing_ok=True)
+        except OSError:
+            pass
+    return ""
+
+
+_DEFENDER_PS = (
+    "$o=@{cfa=$null;blocked=@()};"
+    "try{$o.cfa=[int](Get-MpPreference -ErrorAction Stop).EnableControlledFolderAccess}catch{};"
+    "try{$o.blocked=@(Get-WinEvent -FilterHashtable @{LogName='Microsoft-Windows-Windows Defender/Operational';"
+    "Id=1123;StartTime=(Get-Date).AddDays(-14)} -MaxEvents 50 -ErrorAction Stop|ForEach-Object{"
+    ",@($_.Properties|ForEach-Object{[string]$_.Value})})}catch{};"
+    "$o|ConvertTo-Json -Depth 4 -Compress")
+
+
+def defender_state(run=subprocess.run) -> dict:
+    """Windows Defender, read only: {"cfa": EnableControlledFolderAccess (0 off, 1 on, 2 audit, 3 / 4 disks only;
+    None = unknown), "blocked": [[values of one event], ...] of its "Controlled folder access blocked" events (14 days)}."""
+    try:
+        out = run(["powershell", "-NoProfile", "-NonInteractive", "-Command", _DEFENDER_PS], capture_output=True,
+                  text=True, timeout=30, creationflags=0x08000000).stdout
+        d = json.loads(out or "{}")
+    except Exception as e:
+        log.info("Defender settings not read: %s", e)
+        return {"cfa": None, "blocked": []}
+    blocked = d.get("blocked") or []
+    if blocked and not isinstance(blocked[0], list):        # PowerShell flattens a single event
+        blocked = [blocked]
+    cfa = d.get("cfa")
+    return {"cfa": cfa if isinstance(cfa, int) and not isinstance(cfa, bool) else None,
+            "blocked": [[str(x) for x in b] for b in blocked if isinstance(b, list)]}
+
+
+def _tail(p) -> str:
+    r"""A path without its drive: Defender's events may write \Device\HarddiskVolume3\... for C:\..."""
+    return _norm(p).split(":", 1)[-1].lstrip("\\/")
+
+
+def cfa_blocked(blocked: list, exes) -> bool:
+    """A Controlled folder access event names one of these programs (our OBS, the app)."""
+    tails = [_tail(e) for e in exes if e]
+    for values in blocked or []:
+        for v in values:
+            n = _norm(v)
+            if any(t and n.endswith(t) for t in tails):
+                return True
+    return False
 
 
 def listen_levels(s, names: dict[str, str], seconds: float, stop=lambda: False, enough=lambda peaks: False) -> dict:
@@ -161,14 +264,31 @@ def obs_item(installed: bool, ok: bool, error: str = "", recording: bool = False
                 "Press Check again. Still red: Settings → Test encoder again, then send the Recorder logs to your coach.")
 
 
-def encoder_item(s, gpu_names: str | None, setting_up: bool = False, last_failed: bool = False) -> dict:
+def encoder_vendor(enc: str) -> str:
+    e = (enc or "").lower()
+    return "amd" if "amf" in e else "nvidia" if "nvenc" in e else "intel" if "qsv" in e else ""
+
+
+def encoder_item(s, gpu_names: str | None, setting_up: bool = False, last_failed: bool = False,
+                 obs_log: str = "") -> dict:
+    """obs_log: our OBS's newest log (its graphics chips, the one it draws on, "Wrong adapter" / fallback encoders)."""
     if setting_up:
         return item("encoder", "wait", "Testing your graphics card now…")
     fix = "Settings → Test encoder again (Apex closed)."
     if not s.encoder:
         return item("encoder", "bad", "Not tested yet", fix)
-    if gpu_names and s.encoder not in obsmod.encoder_candidates(obsmod.gpu_vendor(gpu_names), gpu_names):
+    adapters = obsmod.log_adapters(obs_log) if obs_log else None
+    if gpu_names and s.encoder not in obsmod.encoder_candidates(obsmod.gpu_vendor(gpu_names), gpu_names, adapters):
         return item("encoder", "bad", "Graphics card changed since the test", fix)
+    render = next((a for a in (adapters or {}).get("adapters") or [] if a["index"] == adapters.get("render")), None)
+    mine = encoder_vendor(s.encoder)
+    other_chip = bool(render and render.get("vendor") in obsmod.ENCODERS and not render["integrated"]
+                      and mine and mine != render["vendor"])
+    if other_chip or obsmod.wrong_chip(obs_log):
+        card = {"nvidia": "NVIDIA", "amd": "AMD", "intel": "Intel"}.get((render or {}).get("vendor") or "", "")
+        if card and not render["integrated"] and mine != render["vendor"]:
+            return item("encoder", "bad", f"Uses the wrong graphics chip, not your {card} card", fix)
+        return item("encoder", "bad", "Uses the wrong graphics chip", fix)
     if last_failed:
         return item("encoder", "warn", "Tested, but your last session wasn't recorded",
                     "Close other capture apps. Still failing: " + fix)
@@ -226,6 +346,46 @@ def mic_item(s, mics: list[dict] | None, blocked: bool, peak: float | None = Non
     if peak > SIGNAL:
         return item("mic", "ok", "Gets sound")
     return item("mic", "warn", "No sound from your mic", "Check it isn't muted, say something, then press Check again.")
+
+
+def display_path(p) -> str:
+    r"""A path as the player can type it, without the Windows user name: %LOCALAPPDATA%\... / %USERPROFILE%\..."""
+    out = str(p)
+    for var in ("LOCALAPPDATA", "APPDATA", "USERPROFILE"):
+        base = os.environ.get(var)
+        if base and _norm(out).startswith(_norm(base) + "\\"):
+            return f"%{var}%" + out[len(base.rstrip("\\/")):]
+    return out
+
+
+CFA_FIX = ("Allow {who} in Windows Security → Ransomware protection → Allow an app through Controlled folder access "
+           "({path}), or choose another folder in Settings → Recordings → Folder. Then press Check again.")
+FOLDER_FIX = "Choose another folder in Settings → Recordings → Folder (outside Videos and Documents), then press Check again."
+
+
+def folder_item(write: str, cfa: int | None = None, protected: bool = False, obs_failed: bool = False,
+                cfa_event: bool = False, verified: bool = False, obs_exe=None) -> dict:
+    """The recordings folder. write: write_test's result in the app; cfa: Controlled folder access (1 = on);
+    protected: a folder it protects; obs_failed: OBS's log says it couldn't open a file there (no recording started
+    since); cfa_event: Defender blocked our OBS or the app; verified: our OBS recorded in this folder."""
+    path = display_path(obs_exe or obsmod.OBS_EXE)
+    cfa_reason = cfa == 1 or cfa_event
+    who = "PCS Scanner's OBS" if not write else "PCS Scanner and its OBS"
+    cfa_fix = CFA_FIX.format(who=who, path=path)
+    if write == "create":
+        if cfa_reason:
+            return item("folder", "bad", "Can't create the recordings folder: Windows' Controlled folder access may be "
+                        "blocking it", cfa_fix)
+        return item("folder", "bad", "Can't create the recordings folder", FOLDER_FIX)
+    if write == "write" or obs_failed:
+        if cfa_reason:
+            return item("folder", "bad", "Can't write to the recordings folder: Windows' Controlled folder access may "
+                        "be blocking it", cfa_fix)
+        return item("folder", "bad", "Can't write to the recordings folder", FOLDER_FIX)
+    if cfa == 1 and protected and not verified:
+        return item("folder", "warn", "Windows' Controlled folder access protects this folder: it may block recording",
+                    cfa_fix)
+    return item("folder", "ok", "Ready")
 
 
 def disk_item(s, usage=shutil.disk_usage) -> dict:
@@ -313,6 +473,14 @@ class RecCheck:
         self.listen = listen_levels
         self.gpu: str | None = None             # graphics card names, read once (PowerShell, about a second)
         self.read_gpu = obsmod.gpu_names
+        self.obs_log = obsmod.last_recording_log  # our OBS's newest log with a recording start in it
+        self.obs_start_log = obsmod.read_log      # our OBS's newest log (its graphics chips)
+        self.write_test = write_test
+        self.protected = protected_folders
+        self.defender = defender_state           # Controlled folder access, read only (PowerShell, about a second)
+        self.defender_info: dict | None = None
+        self.defender_at = 0.0
+        self.verified: str = ""                  # the folder our OBS recorded a test file in (Check again)
         self.confirm_after, self.confirm_max, self.listen_s = CONFIRM_AFTER_S, CONFIRM_MAX_S, LISTEN_S
         self.threaded = True                    # tests: run in the calling thread
 
@@ -344,8 +512,12 @@ class RecCheck:
         except Exception:
             mics = None
         prev = self.items
+        rec_log = self._text(self.obs_log)
+        start_log = self._text(self.obs_start_log)
         out = {
-            "encoder": encoder_item(self.s, self.gpu, self.setting_up(), self._last_failed()),
+            "encoder": encoder_item(self.s, self.gpu, self.setting_up(), self._last_failed(),
+                                    self._encoder_log(start_log, rec_log)),
+            "folder": self._folder(rec_log),
             "game": game_item(self.s, apex) if not (apex and prev.get("game", {}).get("state") in ("ok", "bad"))
             else prev["game"],
             "voice": voice_item(self.s, names, apex=apex),
@@ -359,6 +531,67 @@ class RecCheck:
                 out[k] = prev[k]
         self._names = names
         return out
+
+    @staticmethod
+    def _text(fn) -> str:
+        try:
+            return fn() or ""
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _encoder_log(start_log: str, rec_log: str) -> str:
+        """The graphics chips from OBS's newest start, the encoder's lines from its newest recording."""
+        head = start_log.split("Startup complete", 1)[0] if obsmod.log_adapters(start_log) else ""
+        return head + "\n" + rec_log if head else rec_log
+
+    def _read_defender(self, force: bool = False) -> None:
+        if not force and self.defender_info is not None and time.time() - self.defender_at < DEFENDER_EVERY_S:
+            return
+        try:
+            self.defender_info = self.defender() or {}
+        except Exception:
+            self.defender_info = {}
+        self.defender_at = time.time()
+
+    def _recorded_here(self, folder: str) -> bool:
+        """A recording of the app's list is in this folder (our OBS could write there)."""
+        f = _norm(folder)
+        if self.verified == f:
+            return True
+        for e in list((getattr(self.rec, "idx", None) or {}).values()):
+            path = getattr(e, "path", "") or ""
+            if path and getattr(e, "status", "") not in ("failed",) and _norm(Path(path).parent) == f:
+                try:
+                    if Path(path).exists():
+                        return True
+                except OSError:
+                    pass
+        return False
+
+    def _folder(self, rec_log: str) -> dict:
+        folder = str(self.s.folder)
+        try:
+            w = self.write_test(folder)
+        except Exception:
+            w = "write"
+        failed = obsmod.unable_to_open(rec_log)
+        d = self.defender_info or {}
+        import sys
+        exes = [obsmod.OBS_EXE] + ([sys.executable] if getattr(sys, "frozen", False) else [])
+        try:
+            prot = inside(folder, self.protected())
+        except Exception:
+            prot = False
+        return folder_item(w, d.get("cfa"), prot, bool(failed) and _norm(failed) == _norm(folder),
+                           cfa_blocked(d.get("blocked") or [], exes), self._recorded_here(folder))
+
+    def folder_problem(self) -> dict | None:
+        """The recordings folder item when it is red (the reason a start failed, for the player), else None."""
+        self._read_defender()
+        it = self._folder(self._text(self.obs_log))
+        self._set({"folder": it})
+        return it if it["state"] == "bad" else None
 
     @staticmethod
     def _safe(fn) -> bool:
@@ -413,9 +646,13 @@ class RecCheck:
                 except Exception:
                     self.gpu = ""
             apex = self._apex()
+            self._read_defender(force=manual)
             items = self._quick(apex)
             if manual:
                 items["obs"], opened = self._obs()
+                if items["obs"]["state"] == "ok" and items["folder"]["state"] in ("bad", "warn") \
+                        and self.write_test(str(self.s.folder)) == "":
+                    items["folder"] = self._obs_write_test(items["folder"])
             else:
                 items["obs"] = self._obs_auto()
             self._set(items)
@@ -497,6 +734,30 @@ class RecCheck:
             if lock is not None:
                 lock.release()
 
+    def _obs_write_test(self, current: dict) -> dict:
+        """Check again, the app can write in the folder but OBS may not (Controlled folder access, or OBS failed
+        there): our OBS records a 2-second test file there (deleted at once). Never while Apex runs or records."""
+        test = getattr(self.adapter, "test_write", None)
+        if test is None or self._apex() or self._recording() or self.setting_up():
+            return current
+        lock = getattr(self.rec, "lock", None)
+        if lock is not None and not lock.acquire(timeout=60):
+            return current
+        try:
+            if self._apex() or self._recording():
+                return current
+            ok = test()
+        except Exception as e:
+            log.info("recording check: OBS write test failed: %s", e)
+            ok = False
+        finally:
+            if lock is not None:
+                lock.release()
+        log.info("recording check: OBS %s write in the recordings folder", "can" if ok else "can't")
+        if ok:
+            self.verified = _norm(self.s.folder)
+        return self._folder(self._text(self.obs_log))
+
     def _close_if_ours(self) -> None:
         """OBS was started by this check: close it again, unless Apex runs, records or the encoder test runs."""
         lock = getattr(self.rec, "lock", None)
@@ -522,12 +783,16 @@ class RecCheck:
         if self.items.get("game", {}).get("state") in ("wait",) and self.items["game"]["text"].startswith("Checking"):
             self._set({"game": game_item(self.s, False)})
 
-    def record_failed(self, error) -> None:
-        """Recording didn't start: the quick items now (the crash report carries them), one message with the causes."""
+    def record_failed(self, error, quiet: bool = False) -> None:
+        """Recording didn't start: the quick items now (the crash report carries them), one message with the causes
+        (quiet: none, the recorder tells the player once Apex has closed)."""
+        if self.defender_info is None:
+            self._read_defender()
         items = self._quick(True)
         items["obs"] = self.last_start = obs_item(self.installed(), False, str(error))
         self._set(items)
-        self._toast(skip={"obs"})
+        if not quiet:
+            self._toast(skip={"obs"})
 
     def apex_started(self) -> None:
         """Recording started: quick items, one message if something is red, then Apex's sound (and the voice app
@@ -536,6 +801,9 @@ class RecCheck:
         items = self._quick(True)
         items["obs"] = obs_item(True, True, recording=True)
         self.last_start = item("obs", "ok", "Started fine at the last Apex start")
+        if items.get("folder", {}).get("state") == "warn":       # OBS writes there: Controlled folder access lets it
+            self.verified = _norm(self.s.folder)
+            items["folder"] = item("folder", "ok", "Ready")
         items["game"] = game_item(self.s, True)
         self._set(items)
         self._toast()
