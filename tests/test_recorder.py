@@ -5702,9 +5702,6 @@ def test_obs_start_failure_closes_obs():
 
 
 def run_all(tests):
-
-
-def run_all(tests):
     """Run every test, even after a failure, and list the failures at the end. -> exit code (1 if any failed)."""
     import traceback
     failed = []
