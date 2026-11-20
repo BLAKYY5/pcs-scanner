@@ -16,11 +16,15 @@ removing PCS Scanner from <https://myaccount.google.com/permissions>.
 - **YouTube** (`youtube.upload`): if you turn on YouTube upload, the app uploads the videos of your scrim
   blocks to the YouTube channel you pick when signing in, with a title and description. It cannot read,
   change or delete any video.
+- **Who you are** (`openid`, `email`): the same Google sign-in tells the app your Google account id and email
+  address. If you are on your team's hub, the app sends them there once, so your coach sees which Google account
+  each hub key belongs to. Only your coach sees it; other players don't. The app keeps no copy of your email and
+  never writes it to its log. It is not used for anything else.
 
 ## What goes to your team's hub
 
 The hub is your team's own server, run by your coach (not by Google or anyone else). If you joined it, the app
-sends it, with your hub key: the scan results (small text files), your microphone track if you said yes to "Send
+sends it, with your hub key: your Google account (above), the scan results (small text files), your microphone track if you said yes to "Send
 my mic track" (only after the voice consent below), crash reports (below) and your sharing choices. Videos never
 go to the hub: they go only to YouTube, if you turn that on. Your coach and your teammates on the same hub can see
 your scan results; players of another team cannot.
