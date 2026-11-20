@@ -106,12 +106,23 @@ class Window:
         self.quitting = False
         self.done = threading.Event()
         self.on_drop = lambda paths: None
+        self._lock = threading.Lock()
+        self._started = False                              # run() has made (or is making) the window
 
     def show(self, page=None):
+        """Show the window, restored if minimized, in front, with the web view awake: the tray icon's click and a
+        second start of the app (taskbar, Start menu, shortcut, the exe) both come here."""
+        with self._lock:
+            if not self._started:                          # asked before the window exists: it opens visible
+                self.hidden, self.visible = False, True
+                if page:
+                    self.url = self.url.split('#')[0] + f'#{page}'
+                return
         if self.w is not None:
             try:
                 self.w.show()
-                self.w.restore()
+                if not self._to_front():                   # no native form (tests, other back ends)
+                    self.w.restore()
                 self._seen(True)
                 if page:
                     self.w.evaluate_js(f"location.hash = '#{page}'")
@@ -128,6 +139,8 @@ class Window:
 
     def run(self):
         """Blocks (on the main thread) until the app quits."""
+        with self._lock:
+            self._started = True                           # a show request from now on waits for the window
         try:
             import webview
             self.w = webview.create_window(f'{APP} {BUILD.get("version", "")}', self.url, width=1320, height=860,
@@ -233,6 +246,24 @@ class Window:
             self._on_gui(go)
         except Exception:
             logging.exception('web view suspend')
+
+    def _to_front(self):
+        """Restore from minimized (a maximized window stays maximized) and bring the window in front. False when
+        there is no native form to act on."""
+        form, _ = self._native()
+        if form is None:
+            return False
+
+        def go():
+            from System.Windows.Forms import FormWindowState
+            if form.WindowState == FormWindowState.Minimized:
+                form.WindowState = FormWindowState.Normal
+            bring_to_front(int(form.Handle.ToInt64()))
+        try:
+            return self._on_gui(go)
+        except Exception:
+            logging.exception('window to front')
+            return False
 
     def hide(self):
         self._seen(False, hide_form=True)
@@ -346,14 +377,71 @@ def first_instance():
     return ctypes.get_last_error() != 183                  # ERROR_ALREADY_EXISTS
 
 
-def show_running_instance():
-    try:
-        import socket
-        from pcs_recorder.runtime import GUARD_PORT
-        with socket.create_connection(('127.0.0.1', GUARD_PORT), timeout=2) as c:
-            c.sendall(b'show')
-    except Exception:
-        pass
+GUARD_PORT = 4467                                          # = pcs_recorder.runtime.GUARD_PORT (kept importable alone)
+
+
+def bring_to_front(hwnd):
+    """Put a window in front and give it the keyboard. Windows lets a program that isn't in front do that only in
+    some cases: the tray icon's click counts (the click went to this app), a request from a second start does not
+    (the click went to the taskbar, then to the new process), so the window came up behind the others or not at all.
+    The second start passes its right on (AllowSetForegroundWindow); if Windows still refuses, the window's thread
+    briefly shares input with the one in front, which Windows accepts. True when the window ends up in front."""
+    if os.name != 'nt' or not hwnd:
+        return False
+    import ctypes
+    from ctypes import wintypes
+    u = ctypes.WinDLL('user32', use_last_error=True)
+    k = ctypes.WinDLL('kernel32', use_last_error=True)
+    u.GetForegroundWindow.restype = wintypes.HWND
+    u.IsWindow.argtypes = u.IsIconic.argtypes = u.SetForegroundWindow.argtypes = u.BringWindowToTop.argtypes = \
+        [wintypes.HWND]
+    u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+    u.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+    u.GetWindowThreadProcessId.restype = wintypes.DWORD
+    u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+    if not u.IsWindow(hwnd):
+        return False
+    same = lambda: (u.GetForegroundWindow() or 0) == hwnd      # noqa: E731
+    if u.IsIconic(hwnd):
+        u.ShowWindow(hwnd, 9)                              # SW_RESTORE
+    if u.SetForegroundWindow(hwnd) and same():
+        return True
+    fg = u.GetForegroundWindow()
+    theirs = u.GetWindowThreadProcessId(fg, None) if fg else 0
+    mine = k.GetCurrentThreadId()
+    if theirs and theirs != mine and u.AttachThreadInput(mine, theirs, True):
+        try:
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+        finally:
+            u.AttachThreadInput(mine, theirs, False)
+    return same()
+
+
+def show_running_instance(port=None, wait=15.0):
+    """A second start (taskbar, Start menu, shortcut, the exe): ask the running app to show its window. The running
+    app may still be starting (its port opens a few seconds after its start): asked again until `wait` seconds.
+    True when the request was delivered."""
+    import socket
+    port = port or GUARD_PORT
+    if os.name == 'nt':
+        try:                                               # this start came from the player's click: pass the right to
+            import ctypes                                  # come in front on to the running app (ASFW_ANY)
+            ctypes.WinDLL('user32').AllowSetForegroundWindow(ctypes.c_uint(0xFFFFFFFF))
+        except Exception:
+            pass
+    end = time.monotonic() + wait
+    while True:
+        try:
+            with socket.create_connection(('127.0.0.1', port), timeout=2) as c:
+                c.sendall(b'show')
+            logging.info('second start: the running app was asked to show its window')
+            return True
+        except OSError:
+            if time.monotonic() >= end:
+                logging.warning('second start: the running app did not answer')
+                return False
+            time.sleep(0.25)
 
 
 def main():
@@ -385,6 +473,11 @@ def main():
     server = pcs_server.Server(b)
     server.start()
     win = Window(server.url, hidden=background)
+    if autorec:                                            # a second start shows this window (taskbar, shortcut, exe)
+        def show_request():
+            logging.info('show request from a second start')
+            win.show()
+        autorec.hold_guard(show_request)
     b.say(f'{APP} {BUILD.get("version")} started. Scan results are saved in {OUT}')
 
     def setup(root):
@@ -407,7 +500,6 @@ def main():
                     b.auto.ui.notify('Update not installed', why)
             threading.Thread(target=go, daemon=True).start()
         b.auto.ui.actions["update"] = ("Update", update_now)
-        autorec.hold_guard(lambda: win.show())
         # the tray menu's Update item: greyed "Updating…" while an update runs (one download at a time)
         tray_update = (lambda: 'Updating…' if b.updating() else f'Update to {b.update[0]}' if b.update else 'Update',
                        update_now, lambda: not b.updating(), lambda: bool(b.update) or b.updating())

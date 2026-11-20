@@ -1156,6 +1156,115 @@ def test_single_instance():
     pcs_app._MUTEX = first
 
 
+def test_guard_port_same_in_app_and_recorder():
+    import pcs_app
+    from pcs_recorder import runtime
+    assert pcs_app.GUARD_PORT == runtime.GUARD_PORT
+
+
+def test_second_start_asks_running_app_to_show():
+    """A plain second start (taskbar, Start menu, shortcut, the exe) asks the running app to show its window; a start
+    with --background (start with Windows, after an update) stays silent."""
+    import pcs_app
+    asked, real = [], (pcs_app.first_instance, pcs_app.show_running_instance, sys.argv)
+    pcs_app.first_instance = lambda: False
+    pcs_app.show_running_instance = lambda *a, **k: asked.append(1) or True
+    try:
+        for argv, want in ((["PCS-Scanner.exe"], 1), (["PCS-Scanner.exe", "--background"], 0),
+                           (["PCS-Scanner.exe", "--background", "--updated"], 0)):
+            asked.clear()
+            sys.argv = argv
+            pcs_app.main()
+            assert len(asked) == want, (argv, asked)
+    finally:
+        pcs_app.first_instance, pcs_app.show_running_instance, sys.argv = real
+
+
+def test_second_start_waits_for_a_starting_app():
+    """The running app opens its port a few seconds after its own start: a second start asks again until it answers,
+    and gives up after a while when nothing answers."""
+    import socket
+    import pcs_app
+    from pcs_recorder import runtime
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    t0 = time.monotonic()
+    assert pcs_app.show_running_instance(port, wait=0.6) is False
+    assert time.monotonic() - t0 < 5
+    real, runtime.GUARD_PORT = runtime.GUARD_PORT, port
+    shown, held = threading.Event(), []
+    try:
+        timer = threading.Timer(1.0, lambda: held.append(runtime.hold_guard(shown.set)))
+        timer.start()
+        assert pcs_app.show_running_instance(port, wait=8) is True
+        assert shown.wait(6), "show request not delivered"
+    finally:
+        runtime.GUARD_PORT = real
+        for s in held:
+            if s is not None:
+                s.close()
+
+
+def test_show_request_before_window_exists():
+    """A show request that comes before the window is made (the app is still starting in the tray) makes it open
+    visible, instead of opening a browser window."""
+    import pcs_app
+    launched = []
+    real = (pcs_app.subprocess.Popen, pcs_app.webbrowser.open)
+    pcs_app.subprocess.Popen = lambda *a, **k: launched.append(a)
+    pcs_app.webbrowser.open = lambda *a, **k: launched.append(a)
+    try:
+        w = pcs_app.Window("http://127.0.0.1:9/", hidden=True)
+        assert w.visible is False
+        w.show("settings")
+        assert w.hidden is False and w.visible is True
+        assert w.url.endswith("#settings")
+        assert launched == []
+    finally:
+        pcs_app.subprocess.Popen, pcs_app.webbrowser.open = real
+
+
+def test_show_request_shows_hidden_window():
+    """The window in the tray (hidden, web view asleep) is shown, restored and set seen again, like the tray click."""
+    import pcs_app
+
+    class FakeWebview:
+        def __init__(self):
+            self.calls = []
+
+        def show(self):
+            self.calls.append("show")
+
+        def restore(self):
+            self.calls.append("restore")
+
+        def hide(self):
+            self.calls.append("hide")
+
+        def evaluate_js(self, js):
+            self.calls.append(js)
+
+    w = pcs_app.Window("http://127.0.0.1:9/", hidden=True)
+    w._started = True
+    w.w = FakeWebview()
+    w.hide()
+    assert w.visible is False
+    w.show()
+    assert w.visible is True
+    assert w.w.calls[-2:] == ["show", "restore"], w.w.calls
+    w.show("recordings")
+    assert w.w.calls[-1] == "location.hash = '#recordings'"
+
+
+def test_bring_to_front_ignores_bad_handles():
+    import pcs_app
+    assert pcs_app.bring_to_front(0) is False
+    assert pcs_app.bring_to_front(None) is False
+    if os.name == "nt":
+        assert pcs_app.bring_to_front(0x7FFFFF0) is False    # no such window
+
+
 def test_update_button_and_checks():
     """The Update button appears once a newer release is found; installing waits while Apex/recording/scan runs."""
     from pcs_recorder import core as rcore
