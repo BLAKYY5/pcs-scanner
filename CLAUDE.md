@@ -549,7 +549,11 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   the skull icon left of them. For about 2 s after a number changes the strip flashes red (icons red / pink, digits
   still white): `OwnStatsRed` reads it again with the icons cut on the red channel, only when no damage was found and
   the damage icon's place is red (`flash()`); 357 more keyframes read on 5 recordings, none inconsistent, a change
-  read ~1 s earlier on average (kills 19 of 48 changes), per-game totals unchanged (21 Nov 2026). `games[].own` (+ `damageReads` = [[t, value], ...]: the damage reads as change points plus the last read, for the
+  read ~1 s earlier on average (kills 19 of 48 changes), per-game totals unchanged (21 Nov 2026). The third number
+  ('knocks', Ranked only: pubs and scrims show no such plate) is not the player's knocks: it is Ranked
+  "participation", the squad's kills the player took part in without the kill or an assist (by eye on the 17 / 18 Nov
+  Ranked recordings, 20 Nov 2026; name agreed by the coach 21 Nov 2026); `own.participation` (+ `At`, `LastRead`) has
+  the same value, `knocks` stays for the contract, the review shows it as "Participation". `games[].own` (+ `damageReads` = [[t, value], ...]: the damage reads as change points plus the last read, for the
   hub's damage per life, decision 35) = for each number the value of the last two reads of the game, which must
   agree (+ `...At`, `...LastRead`); none when values read twice went down, or when the number stopped being read
   > 10 s before the strip did. Damage often grows in the last second of a game (final fight), read once: by the

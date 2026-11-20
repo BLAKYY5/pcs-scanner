@@ -1258,5 +1258,7 @@
  "Left out: Wildcard games are not scanned": "Left out: Wildcard games are not scanned",
  "{name} is labelled Wildcard: not scanned.": "{name} is labelled Wildcard: not scanned.",
  "Labelled {label}: scanned again with every game.": "Labelled {label}: scanned again with every game.",
- "Wildcard: not scanned": "Wildcard: not scanned"
+ "Wildcard: not scanned": "Wildcard: not scanned",
+ "Participation": "Participation",
+ "Ranked only: your squad's kills you took part in, without the kill or an assist": "Ranked only: your squad's kills you took part in, without the kill or an assist"
 }

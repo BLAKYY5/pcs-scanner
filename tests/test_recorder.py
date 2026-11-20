@@ -2457,6 +2457,17 @@ def test_squads_left_counter():
                               (6, {"damage": 50}), (9, {"damage": 80})], "damage", 0, 100) == [[1, 0], [4, 50], [9, 80]]
     assert SCAN.change_reads([(1, {"damage": 7}), (2, {"damage": 7})], "damage", 0, 100) == [[1, 7], [2, 7]]
     assert SCAN.change_reads([(1, {"damage": 7})], "damage", 5, 100) == [] and SCAN.change_reads(None, "damage", 0, 9) == []
+    # the strip's third number (read as 'knocks') is Ranked "participation": the scan keeps 'knocks' (contract) and adds
+    # the same value under its right name
+    own = [(t, {"kills": 1, "knocks": 2, "damage": 300}) for t in (50, 51)]
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=own)
+    o = games[0]["own"]
+    assert (o["knocks"], o["knocksAt"], o["knocksLastRead"]) == (2, 50, 51), o
+    assert (o["participation"], o["participationAt"], o["participationLastRead"]) == (2, 50, 51), o
+    games = [{"tStart": 0.0, "drop": None, "map": "?", "select": {"tFirst": 0.0}}]
+    SCAN.timeline(games, [], own=[(t, {"kills": 1, "damage": 300}) for t in (50, 51)])
+    assert "participation" not in games[0]["own"] and "knocks" not in games[0]["own"]        # pubs: no third plate
 
 
 def test_game_end_time():

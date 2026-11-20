@@ -604,8 +604,12 @@ function gameHeadHTML(g, i, total) {
   if (sq.length) parts.push(`<span class="gsquad">${sq.map(q => q.self ? `<b title="${t('You recorded this')}">${t('{legend} (you)', {legend: esc(legendName(q.legend))})}</b>` : esc(legendName(q.legend))).join(' · ')}</span>`);
   const own = g.own, sl = g.squadsLeft || [], stats = [];
   if (own) {
-    const v = (k, tip) => `<span class="gstat"${tip ? ` title="${esc(tip)}"` : ''}><small>${k[0].toUpperCase() + k.slice(1)}</small><b>${own[k] != null ? own[k] : '–'}</b></span>`;
-    stats.push(v('kills'), v('assists'), v('knocks'), v('damage', own.damageSingleRead ? t('Read once, at the very end of the game') : ''));
+    const v = (k, tip, label) => `<span class="gstat"${tip ? ` title="${esc(tip)}"` : ''}><small>${label || k[0].toUpperCase() + k.slice(1)}</small><b>${own[k] != null ? own[k] : '–'}</b></span>`;
+    // the strip's third number is "participation" (scans before it had that name only have 'knocks', same number);
+    // Ranked only: pubs and scrims show no such plate, so no column there
+    stats.push(v('kills'), v('assists'));
+    if (own.knocks != null) stats.push(v('knocks', t("Ranked only: your squad's kills you took part in, without the kill or an assist"), t('Participation')));
+    stats.push(v('damage', own.damageSingleRead ? t('Read once, at the very end of the game') : ''));
   }
   const lv = livesOf(g);
   if (lv) stats.push(`<span class="gstat" title="${t('Lives in this game: 1 + your respawns')}${lv.lives > 1 ? ' (' + t('{list} each', {list: lv.each.map(fmtT).join(', ')}) + ')' : ''}"><small>${t('Lives')}</small><b>${lv.lives}</b></span>`,
