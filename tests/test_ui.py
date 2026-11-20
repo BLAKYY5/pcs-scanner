@@ -4682,7 +4682,7 @@ def test_ring_calls_from_the_hub():
     b = pcs_server.Backend(auto)
     b._game_running = lambda: ""
     b.add_paths([str(rec)])
-    vid = next(x["id"] for x in b.library() if x["name"] == rec.name)
+    vid = next(x["id"] for x in b.library() if os.path.normpath(x["path"]) == os.path.normpath(str(rec)))
     srv = pcs_server.Server(b)
     srv.start()
     data = Path(os.environ["PCS_DATA_DIR"]) / "squad-cache"
@@ -4710,7 +4710,7 @@ def test_ring_calls_from_the_hub():
             {"tStart": 160.0, "landing": {"exitAtExact": 220.0}, "select": {"squad": [{}, {}, {}]},
              "ringIntel": [{"t": 270.0, "by": "self", "mapCheck": "opened", "mapOpenAt": 271.0}]}]}), encoding="utf-8")
         b.add_paths([str(moe_rec)])
-        mid = next(x["id"] for x in b.library() if x["name"] == moe_rec.name)
+        mid = next(x["id"] for x in b.library() if os.path.normpath(x["path"]) == os.path.normpath(str(moe_rec)))
         c = call(srv, f"/api/ringcalls?id={mid}")[1]["games"][0]["calls"]
         assert c[0]["called"] is True and c[0]["who"] == "self" and c[0]["at"] == 272.0, c
         b._game_running = lambda: "Apex"                            # a game runs: the hub is not asked
