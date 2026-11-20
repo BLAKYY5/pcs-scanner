@@ -462,7 +462,7 @@ def clean_old_unpacked(tmp=None, current=None, min_age_s=600, now=None):
     return out
 
 # ---------------- scanning ----------------
-def run_scan(files, log, out=OUT):
+def run_scan(files, log, out=OUT, mode=None):
     import pcs_scan
     argv = sys.argv
     try:                                 # the player's highlight rules (Settings -> Highlights)
@@ -471,7 +471,7 @@ def run_scan(files, log, out=OUT):
     except Exception:
         rules = []
     try:
-        sys.argv = ['pcs_scan'] + list(files) + ['--out', out] + rules
+        sys.argv = ['pcs_scan'] + list(files) + ['--out', out] + (['--mode', mode] if mode else []) + rules
         pcs_scan.main()
     finally:
         sys.argv = argv

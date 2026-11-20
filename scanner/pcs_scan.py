@@ -762,6 +762,52 @@ def mode_seen(g, R, emblem, starts, gi):
     out['from'] = sorted(named)
     return out
 
+# Games the scan leaves out (coach, 21 Nov 2026): "ignore wildcard games whenever they are present as they use modified
+# maps, ring logic and weapons as the main game and often include LTMs so just ignore their data altogether and don't
+# scan anything if wildcard is detected." The mode is only known once the whole recording was read (the playlist emblem
+# is voted over the game's window), so the keyframe pass still looks at those frames; what comes after it is skipped:
+# the 60 fps reads (ring phases, landing; on the team server: no clips asked for them), the readers' per-game work
+# (their reads inside the game are dropped first) and every line of the game in feed.json. The game stays in the scan
+# as a minimal entry (times, map, mode, modeSeen, `skipped: "wildcard"`) so the recording's label and length stay
+# right. A mode forced with --mode (the label set by hand in the app) wins: nothing is skipped then.
+SKIP_MODES = ('wildcard',)
+MINIMAL_KEYS = ('tStart', 'tEnd', 'tEndGame', 'clockStart', 'map', 'mode', 'modeSeen', 'rankedShare')
+
+def skipped(g):
+    return g.get('mode') in SKIP_MODES
+
+def skip_windows(games):
+    """[lo, hi) of each skipped game: from 60 s before its start (not before the previous game ended) to 60 s before
+    the next game's start (the feed window of a game starts 60 s before it; that minute is the next game's lobby)."""
+    W = []
+    for i, g in enumerate(games):
+        if not skipped(g): continue
+        lo = g['tStart'] - 60
+        if i: lo = max(lo, games[i - 1].get('tEndGame', games[i - 1]['tStart']))
+        W.append((lo, max(lo, games[i + 1]['tStart'] - 60) if i + 1 < len(games) else float('inf')))
+    return W
+
+def _read_t(r):
+    if isinstance(r, dict): r = r.get('t')
+    elif isinstance(r, (list, tuple)): r = r[0] if r else None
+    try: return float(r)
+    except (TypeError, ValueError): return None
+
+def drop_skipped(reads, W):
+    """The reads (tuples / lists starting with t, dicts with 't', or plain times) outside the skipped games' windows."""
+    if not W or not reads: return reads
+    out = []
+    for r in reads:
+        t = _read_t(r)
+        if t is None or not any(lo <= t < hi for lo, hi in W): out.append(r)
+    return out
+
+def minimal(g):
+    """A skipped game as kept in the scan: when it was, where and why it was left out."""
+    out = {k: g[k] for k in MINIMAL_KEYS if k in g}
+    out.update(drop=None, harvesters=[], ring=[], landing=None, skipped=g['mode'])
+    return out
+
 def change_reads(own, key, t0, t1):
     """The own stats reads of one number inside [t0, t1) as change points: [[t, value], ...] with a read each time the
     value differs from the read before, plus the last read (so the list ends where the reading ended). Small enough to
@@ -781,6 +827,16 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
     for gi, g in enumerate(games):
         lo = g['tStart'] - (300 if g['drop'] is None and not g.get('select') else 0); hi = starts[gi + 1] if gi + 1 < len(starts) else 1e12
         S = [s for s in samples if lo <= s[0] < hi]
+        R = [r for t_, r in (rank or []) if lo <= t_ < hi]
+        g['rankedShare'] = round(sum(R) / len(R), 2) if R else None
+        # scrim only with evidence: the pre-game drop screen was read and no ranked badge. Without the drop
+        # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
+        g['modeSeen'] = seen = mode_seen(g, R, emblem, starts, gi)
+        g['mode'] = mode or seen['mode'] or 'unknown'
+        if skipped(g):          # Wildcard (coach, 21 Nov 2026): no rings, landing or own numbers; no 60 fps reads
+            g['ring'] = []; g['landing'] = None; g['samples'] = S
+            g['hud'] = {'samples': len(S), 'self': sum(1 for s in S if s[4] is not None and not s[3])}
+            continue
         g['ring'] = HUD.number_rounds(HUD.ring_segments(S), g['map'])
         if path: HUD.refine_phases(path, g['ring'], S)
         t0 = g['drop']['tLast'] if g['drop'] else lo
@@ -793,12 +849,6 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                 ld['mapCalibrated'] = g['map'] not in HUD.CAL_UNCHECKED
         g['landing'] = ld
         g['hud'] = {'samples': len(S), 'self': sum(1 for s in S if s[4] is not None and not s[3])}
-        R = [r for t_, r in (rank or []) if lo <= t_ < hi]
-        g['rankedShare'] = round(sum(R) / len(R), 2) if R else None
-        # scrim only with evidence: the pre-game drop screen was read and no ranked badge. Without the drop
-        # screen (e.g. a ranked session where the badge wasn't read) the mode is 'unknown', never 'scrim'.
-        g['modeSeen'] = seen = mode_seen(g, R, emblem, starts, gi)
-        g['mode'] = mode or seen['mode'] or 'unknown'
         g['samples'] = S
         if squads:
             g['squadsLeft'] = HUD.squads_timeline(squads, g['tStart'], hi)
@@ -863,7 +913,8 @@ def main():
     ap.add_argument('--workers', type=int, default=0, help=f'processes scanning at the same time (default {WORKERS})')
     ap.add_argument('--chunks', type=int, default=0, help='pieces the recording is cut into (default: half your CPU threads, max 8; results depend on it)')
     ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
-    ap.add_argument('--mode', choices=['ranked', 'scrim'], help='force the game mode instead of detecting the ranked badge')
+    ap.add_argument('--mode', choices=['ranked', 'scrim', 'pubs', 'wildcard'],
+                    help='force the game mode instead of detecting it (the app passes a label set by hand; wildcard = every game skipped)')
     ap.add_argument('--highlights', default='', help='highlight rules: chain seconds, enemies for a multi-kill, seconds for a double (default 8,3,5)')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
     # scan on the team server: the file is a keyframes-only copy of the recording (pcs_recorder.serverscan)
@@ -894,6 +945,12 @@ def main():
         own_reads = perf.pop('_own', [])     # the own stats strip: also the counter rises behind highlights
         timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), own_reads,
                  perf.pop('_emblem', []))
+        skip = skip_windows(games)          # Wildcard games: their reads go before any reader works on them
+        if skip:
+            for k in ('_rings', '_icons', '_cards', '_bars', '_minimap', '_usage', '_storm', '_ammo', '_bans', '_rp',
+                      '_rpLines', '_rpSeen', '_feed'):
+                if k in perf: perf[k] = drop_skipped(perf[k], skip)
+            own_reads = drop_skipped(own_reads, skip)
         try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_mapicons.attach(games, perf.pop('_icons', []))         # care packages (after the ring ends), strongholds
@@ -959,6 +1016,11 @@ def main():
             except Exception as e: perf['ringIntelError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_bans.attach(games, perf.pop('_bans', []), HUD.STRETCH)    # legends banned before each game (Ranked Diamond+)
         except Exception as e: perf['bansError'] = f'{type(e).__name__}: {e}'[:200]
+        if skip:            # the skipped games: a minimal entry each, no sound cue of theirs
+            games = [minimal(g) if skipped(g) else g for g in games]
+            if isinstance((audio or {}).get('cues'), dict):
+                audio['cues'] = {k: drop_skipped(v, skip) if isinstance(v, list) else v for k, v in audio['cues'].items()}
+            print(f'  {sum(1 for g in games if g.get("skipped"))} Wildcard game(s) left out (times and mode kept)', flush=True)
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},
@@ -967,6 +1029,7 @@ def main():
         res = {'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'scannedAt': datetime.datetime.now().isoformat(timespec='seconds'),
                'events': len(events), 'perf': {k: (round(v, 1) if isinstance(v, float) else v) for k, v in perf.items()},
                'ringLabels': labels.export(), 'games': games}
+        if skip: res['skippedGames'] = sum(1 for g in games if g.get('skipped'))
         if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)

@@ -1239,5 +1239,9 @@
  "…but at most (hours)": "…mais au plus (heures)",
  "← Recordings": "← Enregistrements",
  "≈ {n} GB per hour": "≈ {n} Go par heure",
- "● Recording talk": "● Enregistrement du commentaire"
+ "● Recording talk": "● Enregistrement du commentaire",
+ "Left out: Wildcard games are not scanned": "Laissée de côté : les parties Wildcard ne sont pas scannées",
+ "{name} is labelled Wildcard: not scanned.": "{name} est classé Wildcard : pas scanné.",
+ "Labelled {label}: scanned again with every game.": "Classé {label} : scanné à nouveau avec toutes les parties.",
+ "Wildcard: not scanned": "Wildcard : pas scanné"
 }

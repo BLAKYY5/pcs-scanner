@@ -403,6 +403,8 @@ class Comms:
                 continue
             if getattr(e, "nogame", False) or now - float(e.started or 0) > MAX_AGE_DAYS * 86400:
                 continue
+            if _wildcard_only(e.path):                   # every game left out (Wildcard): no transcript either
+                continue
             stem = Path(e.path).stem
             r = self.st["recs"].get(stem) or {}
             if comms_path(e.path).is_file() or r.get("tries", 0) >= MAX_TRIES or r.get("status") == "no_mic":
@@ -676,6 +678,20 @@ class Comms:
                 "note": self.note, "model": model_ready(), "runtime": runtime_cmd() is not None,
                 "available": runtime_cmd() is not None or bool(COMPONENT),
                 "download": ({"done": self.download[0], "total": self.download[1]} if self.download else None)}
+
+
+def _wildcard_only(rec_path: str) -> bool:
+    """Every game of the recording was left out by the scan (Wildcard, coach 21 Nov 2026), or it is labelled
+    Wildcard by hand."""
+    from . import labels
+    try:
+        if labels.skips_scan(rec_path):
+            return True
+        p = Path(rec_path)
+        scan = json.loads((p.with_suffix(".scan") / (p.stem + ".scan.json")).read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    return labels.all_skipped(scan)
 
 
 def transcript_of(rec_path: str | Path) -> dict | None:

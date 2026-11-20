@@ -599,6 +599,7 @@ function gameHeadHTML(g, i, total) {
   const mode = MODES[g.mode] || '', map = g.map && g.map !== '?' ? mapName(g.map) : '';
   const title = [t('Game {n} of {total}', {n: i + 1, total}), mode, map].filter(Boolean).join(' · ');
   const parts = [`<b class="gtitle">${esc(title)}</b>`];
+  if (g.skipped) return parts.concat(`<span class="gsquad">${t('Left out: Wildcard games are not scanned')}</span>`).join('');
   const sq = ((g.select && g.select.squad) || []).slice().sort((a, b) => a.slot - b.slot);
   if (sq.length) parts.push(`<span class="gsquad">${sq.map(q => q.self ? `<b title="${t('You recorded this')}">${t('{legend} (you)', {legend: esc(legendName(q.legend))})}</b>` : esc(legendName(q.legend))).join(' · ')}</span>`);
   const own = g.own, sl = g.squadsLeft || [], stats = [];

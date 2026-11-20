@@ -21,7 +21,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import crash, games, retention, stitch
+from . import crash, games, labels, retention, stitch
 from .settings import Settings
 
 log = logging.getLogger("recorder")
@@ -809,6 +809,13 @@ class Recorder:
                 self.queue.append(key)
             retention.save_index(self.idx)
             return
+        if labels.skips_scan(e.path):         # labelled Wildcard by hand: never scanned, nothing sent (coach, 21 Nov 2026)
+            e.status, e.note = "skipped", "Wildcard: not scanned"
+            if key in self.queue:
+                self.queue.remove(key)
+            retention.save_index(self.idx)
+            log.info("not scanned: %s is labelled Wildcard", Path(e.path).name)
+            return
         out = Path(e.path).with_suffix(".scan")
         out.mkdir(exist_ok=True)
         try:
@@ -901,6 +908,8 @@ class Recorder:
             e = self.idx.get(key)
             if not e or not e.path or key in (self.current, self.scan_key) or key in self.queue:
                 return False
+            if labels.skips_scan(e.path):                # labelled Wildcard: never scanned
+                return False
             if key in self.waiting_keys():               # waits for a possible restart or to be joined
                 return False
             mkv, mp4 = Path(e.path).with_suffix(".mkv"), Path(e.path).with_suffix(".mp4")
@@ -926,7 +935,7 @@ class Recorder:
             if ev.exists():
                 shutil.copy(ev, out / ev.name)
                 tracks = json.loads(ev.read_text(encoding="utf-8")).get("tracks", [])
-                if self.s.comms_consent and self.s.send_mic and "mic" in tracks:
+                if self.s.comms_consent and self.s.send_mic and "mic" in tracks and not labels.all_skipped(_scan_json(e)):
                     extract_track(e.path, tracks.index("mic"), out / (Path(e.path).stem + ".mic.m4a"))
         except Exception as ex:
             log.warning("extras not added: %s", ex)

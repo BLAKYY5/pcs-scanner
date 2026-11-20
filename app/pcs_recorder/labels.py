@@ -52,6 +52,32 @@ def set_label(path: str, kind: str | None) -> None:
     FILE.write_text(json.dumps(d, indent=1), encoding="utf-8")
 
 
+# The scanner's --mode for a label set by hand (it wins over what the scan reads). Wildcard is never scanned (coach,
+# 21 Nov 2026: "ignore wildcard games ... don't scan anything if wildcard is detected"): see skips_scan.
+SCAN_MODE = {"scrims": "scrim", "ranked": "ranked", "pubs": "pubs"}
+
+
+def scan_mode(path: str) -> str | None:
+    """The mode the scanner is told for this recording: its label set by hand, else None (the scan decides)."""
+    return SCAN_MODE.get(manual(path) or "")
+
+
+def skips_scan(path: str) -> bool:
+    """Labelled Wildcard by hand: not scanned, nothing sent."""
+    return manual(path) == "wildcard"
+
+
+def skipped_games(scan: dict | None) -> int:
+    """Games the scanner left out (Wildcard: `games[].skipped`, a minimal entry each)."""
+    return sum(1 for g in (scan or {}).get("games", []) if isinstance(g, dict) and g.get("skipped"))
+
+
+def all_skipped(scan: dict | None) -> bool:
+    """Every game of the recording was left out (a Wildcard-only session): no mic track or transcript for it."""
+    games = (scan or {}).get("games", [])
+    return bool(games) and skipped_games(scan) == len(games)
+
+
 def auto(scan: dict) -> str | None:
     """From the scan: scrims when the scrim drop screen was read, ranked when the ranked badge was seen,
     wildcard or pubs when the loading banner before a game said so (in that order of priority)."""

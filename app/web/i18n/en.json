@@ -1239,5 +1239,9 @@
  "…but at most (hours)": "…but at most (hours)",
  "← Recordings": "← Recordings",
  "≈ {n} GB per hour": "≈ {n} GB per hour",
- "● Recording talk": "● Recording talk"
+ "● Recording talk": "● Recording talk",
+ "Left out: Wildcard games are not scanned": "Left out: Wildcard games are not scanned",
+ "{name} is labelled Wildcard: not scanned.": "{name} is labelled Wildcard: not scanned.",
+ "Labelled {label}: scanned again with every game.": "Labelled {label}: scanned again with every game.",
+ "Wildcard: not scanned": "Wildcard: not scanned"
 }
