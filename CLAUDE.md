@@ -579,6 +579,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   circle in round k + 1's wait; `rUnits` from the map scale in `CAL`), `ringSpeed` (`closing`: radius change per
   second while the player watches it close; `ends`: radius drop / closing time). Stage = the ring phase running at
   that moment (`games[].ring`), so rounds must be numbered for stages (None otherwise).
+  **Ring console disc** (21 Nov 2026): after a ring console use the full map also shows the ring after the white next
+  ring as a see-through GREEN disc, tint strongest at its edge, fading inwards (teal / purple discs are other features).
+  `read` gives it as `reveal`: edges where green rises much more than red and blue (`edges_reveal`, `measure_reveal`),
+  same Hough + local search, support >= `REVEAL_SUPPORT` (0.4), inside the next ring (else the current one) and under
+  0.85 x it. Per game `ringReveals` (`attach_reveals`, after `ringIntel`): [{t, tLast, reads, cx, cy, r, mapX, mapY,
+  mapR, rUnits, stage, ring (by size: `ring_of_radius`), feedAt?}], a disc needs 2 reads or 1 read + a feed reveal line
+  (300 s before to 30 s after; the console shows the map while used, so the disc can come first). ~0.3 s more per ring
+  read (1.0-1.5 -> 1.3-1.8 s), current / next unchanged. Check set `pcs-handoff\checkset\checkset-ringdisc.json` (per map
+  open, dev 17 Nov 15.11, held 18 Nov 22.28 + 16.32, 7 Nov, 15 Nov): dev 30 / 30 opens with a disc found, 0 false of
+  24; held 13 / 13, 0 false of 30; circles vs the ring 2 end read later 0.07-0.11 % apart. Many reveals show no feed
+  line we caught: the disc finds more of them than `ringIntel`.
 - **Care packages and strongholds** (`pcs_mapicons.py`, every `ICONS_EVERY` = 2 s of full map, ~0.35 s a read):
   care package = a light diamond (|dx| + |dy| ~ 23.5 px at 1440p, same size zoomed or not) with a helmet inside; the
   helmet is compared with `CARE_SIGNS` (12 x 12 signs derived from the RSX `care_package_icon`, never the image).

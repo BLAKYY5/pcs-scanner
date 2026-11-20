@@ -11,6 +11,12 @@ fraction of the way to white). Both circles are found the same way:
 A circle counts only when that holds on most of its visible arc (support), so a ring partly off the map or under
 icons is still read, and lookalike discs of other map features (coloured overlays) are refused.
 
+Ring console reveal (Season 31): when a squad member uses a ring console, the full map also shows the ring after the
+next one (the end circle of the next round but one) as a see-through GREEN disc whose tint is strongest at its edge and
+fades inwards (not the teal team-colour discs of other map features). Found the same way with a third edge test: a step
+where the inside is greener than the outside (green rises, red and blue much less), and kept only inside the next ring
+(or the current ring when no next ring shows).
+
 Coordinates: the scanner's map % (pcs_maps.json space) through the map frame's own transform M (screen px -> map %),
 so circles line up with the harvesters, the landing and the drop spots. World units: map % x the map's scale in
 pcs_hud.CAL (world units per 1 % of the map).
@@ -194,7 +200,40 @@ def find_circle(edges, measure, c, T, rmin, rmax, pad, inside=None, hints=(), ac
     return {'cx': best[1], 'cy': best[2], 'r': best[3], 'support': best[4], 'visible': best[5]}
 
 
+def _green_step(di):
+    """In - out colour differences (n x 3) that look like the green overlay's edge: green up clearly, red and blue up
+    much less (a teal disc raises blue as much as green; a white disc raises all three alike)."""
+    dg = di[:, 1]; do = np.maximum(np.maximum(di[:, 0], di[:, 2]), 0)
+    return dg, do
+
+
+def edges_reveal(c, keep=20000):
+    """Edges of the green see-through disc of a ring console reveal: greenness (G - (R + B) / 2) rises towards the
+    inside, still so 6 px away (half size), with green rising much more than red and blue."""
+    xs, ys, ux, uy, m = _grad(c[..., 1] - (c[..., 0] + c[..., 2]) / 2, 2.0)
+    ok = np.ones(len(xs), bool)
+    for d in (3, 6):
+        dg, do = _green_step(_samp(c, xs + d * ux, ys + d * uy) - _samp(c, xs - d * ux, ys - d * uy))
+        ok &= (dg > 5) & (dg > 2.0 * do + 2)
+    xs, ys, ux, uy = xs[ok], ys[ok], ux[ok], uy[ok]
+    if len(xs) > keep:
+        k = np.random.default_rng(0).choice(len(xs), keep, replace=False); xs, ys, ux, uy = xs[k], ys[k], ux[k], uy[k]
+    return xs, ys, ux, uy
+
+
+def measure_reveal(c, T, cx, cy, r, d=3):
+    """Across the visible arc: (median green step, support = fraction where the inside is greener than the outside
+    with green rising much more than red and blue, visible fraction, samples)."""
+    xi, yi, xo, yo, vis = _arc(c.shape[:2], cx, cy, r, d)
+    if len(xi) < 12: return 0.0, 0.0, vis, len(xi)
+    di = _samp(c, xi, yi) - _samp(c, xo, yo)
+    dg, do = _green_step(di)
+    con = float(np.median(dg - (di[:, 0] + di[:, 2]) / 2))
+    return con, float(((dg > 4) & (dg > 1.6 * do + 1.5)).mean()), vis, len(xi)
+
+
 MIN_SUPPORT = 0.6
+REVEAL_SUPPORT = 0.4      # the green disc's edge is fainter where it crosses icons and labels; other circles: <= 0.21
 
 
 def read(a, M=None, hint=None):
@@ -202,8 +241,8 @@ def read(a, M=None, hint=None):
     M: the map transform found by MapReader (screen px -> map %); None = the unzoomed default.
     hint: an earlier result of this function (same game, a short while before): its circles are tried as starting
     guesses too (the faint next-ring disc is found more often that way; it must still pass the same tests).
-    Returns {'cur': circle or None, 'next': circle or None} (circle: cx, cy, r in map %, support, visible, px), or None
-    when the map is zoomed."""
+    Returns {'cur': circle or None, 'next': circle or None, 'reveal': circle or None} (circle: cx, cy, r in map %,
+    support, visible, px; reveal = the green disc of a ring console reveal), or None when the map is zoomed."""
     M = M_DEFAULT if M is None else np.asarray(M)
     if all(abs(M[0, 0] - u) > 0.03 * u for u in (UNZOOMED, UNZOOMED_43)): return None   # zoomed map: circles cut off, skip
     # (4:3 stretched: the map is about 7 % smaller on screen, so its unzoomed scale is UNZOOMED_43; it used to be taken for
@@ -229,6 +268,12 @@ def read(a, M=None, hint=None):
     # each ring is about half the one before (ED: 30.9 % of the map, then 15.2, 8); with no current ring on the map
     # (round 1) the next ring is the first one, about 30 %. A small white circle elsewhere is a map feature.
     if nxt and nxt['r'] < (0.3 * cur['r'] if cur else 12.0 / (DS * M[0, 0])): nxt = None
+    # ring console reveal: a green disc inside the next ring (else inside the current ring), smaller than it
+    out = nxt or cur
+    box = (out['cx'], out['cy'], out['r']) if out else None
+    rv = find_circle(edges_reveal(c), measure_reveal, c, T, 15, 300, 300, box, hints=hp('reveal'))
+    if not (rv and rv['support'] >= REVEAL_SUPPORT and rv['visible'] * 2 * np.pi * rv['r'] >= 150): rv = None
+    if rv and box and rv['r'] > 0.85 * box[2]: rv = None       # the same circle as the ring around it
 
     def to_map(d):
         if d is None: return None
@@ -237,7 +282,7 @@ def read(a, M=None, hint=None):
         return {'cx': round(float(X), 2), 'cy': round(float(Y), 2), 'r': round(float(d['r'] * DS * M[0, 0]), 2),
                 'support': round(d['support'], 2), 'visible': round(d['visible'], 2),
                 'px': [round(float(px), 1), round(float(py), 1), round(float(d['r'] * DS), 1)]}
-    return {'cur': to_map(cur), 'next': to_map(nxt)}
+    return {'cur': to_map(cur), 'next': to_map(nxt), 'reveal': to_map(rv)}
 
 
 # ---------- per game: circles per ring stage, ring ends, closing speed ----------
@@ -348,6 +393,60 @@ def closing_speed(ends, ring, circles=(), mp=None):
             drop = E[k - 1]['rUnits'] - E[k]['rUnits']; secs = C[k] - W[k]
             out.append({'ring': k, 'method': 'ends', 'drop': drop, 'seconds': round(secs, 1), 'unitsPerS': round(drop / secs, 1)})
     return out
+
+
+REVEAL_TOL = 1.0          # map %: reads of one revealed disc agree within this (centre and radius)
+# Which ring a circle is the end of, by its size (map %): the end radii are about the same on every map (our scans: ring 1
+# 30.2-31.0, ring 2 14.7-15.3, ring 3 7.5-9.3). The ring phase on screen is not used for this: when a phase was not read
+# (the player never saw that countdown) the round there is wrong by one.
+RING_BY_R = ((22.0, 1), (11.0, 2), (5.5, 3), (2.5, 4))
+
+
+def ring_of_radius(r):
+    return next((k for lim, k in RING_BY_R if r >= lim), None)
+
+
+def game_reveals(reads, ring, mp, t0, t1, intel=()):
+    """Ring console reveals seen on the map in [t0, t1): the green discs, one entry per disc (reads that agree within
+    REVEAL_TOL, in time order). A disc counts when read twice, or once with a feed reveal line ('ringIntel' times) from
+    300 s before to 30 s after it that no earlier disc took (the console shows the map while it is used, so the disc
+    can come first).
+    [{t (first read), tLast, reads, cx, cy, r (map %), mapX, mapY, mapR, rUnits?, stage (ring round when first seen),
+      ring (the ring whose end circle it shows, by its size: the ring after the white next ring's), feedAt?}]."""
+    k_u = units_per_pct(mp) if mp else None
+    groups = []
+    for t, m, r in sorted(reads, key=lambda x: x[0]):
+        v = (r or {}).get('reveal')
+        if not v or not (t0 <= t < t1) or (mp not in (None, '?') and m != mp): continue
+        c = (v['cx'], v['cy'], v['r'])
+        for gr in groups:
+            if max(abs(a - b) for a, b in zip(gr['med'], c)) <= REVEAL_TOL:
+                gr['L'].append((t, c)); gr['med'] = tuple(np.median([x[1] for x in gr['L']], 0)); break
+        else:
+            groups.append({'L': [(t, c)], 'med': c})
+    out = []; used = set()
+    for gr in sorted(groups, key=lambda g: g['L'][0][0]):
+        ts = [x[0] for x in gr['L']]
+        feed = [i for i in intel if ts[0] - 300 <= i <= ts[0] + 30 and i not in used]     # one line, one disc
+        if len(ts) < 2 and not feed: continue
+        cx, cy, r = (round(float(v), 2) for v in gr['med'])
+        rnd, kind = phase_at(ring, ts[0])
+        e = {'t': ts[0], 'tLast': ts[-1], 'reads': len(ts), 'cx': cx, 'cy': cy, 'r': r, 'mapX': cx, 'mapY': cy, 'mapR': r,
+             'stage': rnd, 'ring': ring_of_radius(r)}
+        if k_u: e['rUnits'] = int(round(r * k_u))
+        if feed: e['feedAt'] = max(feed); used.add(e['feedAt'])
+        out.append(e)
+    return out
+
+
+def attach_reveals(games, reads):
+    """Adds ringReveals (ring console reveals seen on the map) to each game that has one. Run after games[].ringIntel
+    (the feed's reveal lines) is known: a disc read once needs one of them."""
+    for i, g in enumerate(games):
+        t1 = games[i + 1]['tStart'] if i + 1 < len(games) else float('inf')
+        rv = game_reveals(reads, g.get('ring'), g.get('map'), g['tStart'] - 120, t1, [x['t'] for x in g.get('ringIntel') or []])
+        if rv: g['ringReveals'] = rv
+    return games
 
 
 def attach(games, reads):

@@ -2490,7 +2490,7 @@ def test_ring_circles_on_full_map():
     assert abs(r["next"]["cx"] - exp[0]) < 0.5 and abs(r["next"]["r"] - exp[2]) < 0.5, (r, exp)
     # nothing drawn: nothing read (the purple disc is not a ring)
     r = pcs_ring.read(_ring_frame(None, None, decoy=(1300, 700, 200), seed=7))
-    assert r == {"cur": None, "next": None}, r
+    assert r == {"cur": None, "next": None, "reveal": None}, r
     # a zoomed map is skipped
     assert pcs_ring.read(_ring_frame(cur, nxt), np.array([[0.05, 0], [0, 0.05], [-20, 0]])) is None
     # 4:3 stretched: the unzoomed map has the stretched layout's scale (scanner ST_MAP_M0); it is read, not skipped
@@ -2498,6 +2498,64 @@ def test_ring_circles_on_full_map():
     r = pcs_ring.read(_ring_frame(cur, nxt, decoy=(1000, 400, 130)), M43)
     assert r and r["cur"] and r["next"], r
     assert abs(r["cur"]["r"] - cur[2] * M43[0, 0]) < 0.5 and abs(r["next"]["r"] - nxt[2] * M43[0, 0]) < 0.5, r
+
+
+def _green_disc(a, c, colour=(110, 255, 80), edge=0.22, fade=50):
+    """A ring console reveal drawn on a frame: a see-through disc in `colour`, strongest at its edge and fading inwards
+    over `fade` px (as the game draws the revealed ring; teal = another map feature). Numbers only."""
+    import numpy as np
+    Y, X = np.mgrid[0:1440, 0:2560]
+    d = np.hypot(X - c[0], Y - c[1])
+    al = np.where(d < c[2], 0.04 + (edge - 0.04) * np.clip(1 - (c[2] - d) / fade, 0, 1), 0)[..., None]
+    return np.clip(a * (1 - al) + np.array(colour, np.float32) * al, 0, 255).astype(np.uint8)
+
+
+def test_ring_console_disc_on_full_map():
+    """The ring console's revealed ring: a green disc with a fade inwards, inside the next ring, read in map % with the
+    current and next rings unchanged; a teal disc (another map feature) is not a reveal; a green disc as big as the next
+    ring is not one either."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_ring
+    M = pcs_ring.M_DEFAULT
+    pct = lambda x, y, r: (x * M[0, 0] + M[2, 0], y * M[1, 1] + M[2, 1], r * M[0, 0])
+    cur, nxt, rv = (1300, 700, 560), (1250, 760, 360), (1150, 820, 170)
+    a = _green_disc(_ring_frame(cur, nxt, seed=3), rv)
+    r = pcs_ring.read(a)
+    assert r["cur"] and r["next"] and r["reveal"], r
+    exp = pct(*rv)
+    assert abs(r["reveal"]["cx"] - exp[0]) < 0.6 and abs(r["reveal"]["cy"] - exp[1]) < 0.6 and abs(r["reveal"]["r"] - exp[2]) < 0.6, (r["reveal"], exp)
+    assert abs(r["next"]["r"] - pct(*nxt)[2]) < 0.5, r["next"]
+    # a teal disc of the same look (team colour): no reveal
+    r = pcs_ring.read(_green_disc(_ring_frame(cur, nxt, seed=3), rv, colour=(60, 230, 230)))
+    assert r["next"] and r["reveal"] is None, r
+    # no disc at all: no reveal
+    assert pcs_ring.read(_ring_frame(cur, nxt, seed=4))["reveal"] is None
+
+
+def test_ring_console_reveals_per_game():
+    """games[].ringReveals: reads of one green disc grouped (first and last read, median circle, world units, the ring
+    it shows = the round after the one running), a disc read once needs the feed's reveal line, other games' reads and
+    games without reveals left alone."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_ring
+    ring = [{'round': 1, 'kind': 'wait', 'endsAt': 175.0}, {'round': 1, 'kind': 'closing', 'endsAt': 440.0},
+            {'round': 2, 'kind': 'wait', 'endsAt': 565.0}]
+    c = lambda cx, cy, r: {'cx': cx, 'cy': cy, 'r': r}
+    reads = [(300.0, 'ED', {'cur': None, 'next': c(50, 50, 30), 'reveal': c(40.0, 55.0, 15.0)}),
+             (303.0, 'ED', {'cur': None, 'next': c(50, 50, 30), 'reveal': c(40.2, 55.1, 15.1)}),
+             (330.0, 'ED', {'cur': None, 'next': c(50, 50, 30), 'reveal': None}),
+             (500.0, 'ED', {'cur': c(50, 50, 30), 'next': c(40, 55, 15), 'reveal': c(45.0, 52.0, 8.0)}),   # once, with a feed line
+             (520.0, 'ED', {'cur': c(50, 50, 30), 'next': c(40, 55, 15), 'reveal': c(20.0, 20.0, 6.0)}),   # once, no line: dropped
+             (2500.0, 'ED', {'cur': None, 'next': None, 'reveal': c(1, 1, 1)})]
+    games = [{'map': 'ED', 'tStart': 100.0, 'ring': ring, 'ringIntel': [{'t': 280.0}, {'t': 490.0}]},
+             {'map': 'ED', 'tStart': 2000.0, 'ring': []}]
+    pcs_ring.attach_reveals(games, reads)
+    rv = games[0]['ringReveals']
+    assert [(e['t'], e['tLast'], e['reads'], e['stage'], e['ring'], e.get('feedAt')) for e in rv] ==         [(300.0, 303.0, 2, 1, 2, 280.0), (500.0, 500.0, 1, 2, 3, 490.0)], rv      # ring by size: 15 % = 2, 8 % = 3
+    assert (rv[0]['cx'], rv[0]['cy'], rv[0]['r']) == (40.1, 55.05, 15.05) and rv[0]['mapR'] == rv[0]['r'], rv[0]
+    assert rv[0]['rUnits'] == round(15.05 * pcs_ring.units_per_pct('ED')), rv[0]
+    assert 'ringReveals' not in games[1]          # one read, no feed line in that game: not a reveal
 
 
 def test_ring_ends_and_speed():
