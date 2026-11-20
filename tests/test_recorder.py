@@ -5638,7 +5638,7 @@ def test_start_checks_the_folder_first():
         asked = []
         obs.ensure_ready = lambda: asked.append(1)
         r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"], clock=lambda: now["t"])
-        r.check = _check_for(s, rec=r, ui=ui)
+        r.check = _check_for(s, rec=r, ui=ui, peaks={"game": 0.3})          # Apex sound heard once recording
         apex["on"] = True; r.tick()
         assert asked == [] and not obs.rec and r.status == "Couldn't start recording: Can't create the recordings folder"
         assert {i["id"]: i["state"] for i in r.check.public()["items"]}["folder"] == "bad"
@@ -5658,7 +5658,8 @@ def test_start_checks_the_folder_first():
         obs.start = lambda: setattr(obs, "rec", True)
         r.tick()
         assert len(asked) == 2 and obs.rec and r.status == "Recording Apex"
-        assert not [n for n in ui.notes if n[0] != "Recording check"] and len(sent) == 1, (ui.notes, sent)
+        assert not [n for n in ui.notes if n[0] != "Recording check"], ascii(ui.notes)
+        assert len(sent) == 1, ascii([x.get("error") for x in sent])
     finally:
         _crash_teardown()
 
