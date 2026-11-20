@@ -80,6 +80,12 @@ def _ring(a):
 def _dbg(a):
     pos, vel = HUD.read_dbg(a)
     return None if pos is None and vel is None else {'pos': pos, 'vel': vel}
+class _NoWeapons:
+    def match(self, a): return None
+def _ringreveal(a):
+    """A ring console reveal line in the feed on this frame (the scan's Feed, fresh, on this one frame)."""
+    f = HUD.Feed(_NoWeapons()); f.read(a, 0.0)
+    return any('ringReveal' in l for l in f.lines)
 READERS = {
     'legends': (('left',), _legends),
     'banner':  (('left', 'banner'), HUD.Banner.read),
@@ -88,6 +94,7 @@ READERS = {
     'ranked':  (('counters',), lambda a: HUD.ranked(a) or None),
     'ring':    (('left',), _ring),
     'dbg':     (('dbg',), _dbg),
+    'ringreveal': (('feed',), _ringreveal),                                  # "<name> revealed the next ring on map"
     'ownbar':  (('squad',), lambda a: __import__('pcs_bars').read_own(a)),    # own card: shield, health, knocked
     'heal':    (('heal',), lambda a: __import__('pcs_usage').read_heal(a)),   # heal panel: item, bar colour, progress
     'abil':    (('abil',), lambda a: {k: v for k, v in __import__('pcs_usage').read_abilities(a).items() if 'Mask' not in k and v} or None),

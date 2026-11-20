@@ -21,6 +21,7 @@ it on unseen games; decide the split before tuning). Any subset of fields per tr
   self                  Legends.read: the slot (1..3) of the recording player
   ranked                Legends.read: rank badges on the select screen (true / false)
   mode, map             Banner.read: the loading banner's mode key (ranked, wildcard, pubs) and map code (SP, ED...)
+  ringReveal            Feed.read on that frame: a "<name> revealed the next ring on map" line is in the feed (true / false)
 Two measures per truth: the read at the nearest keyframe, and 'any read within +-3 s' (more lenient: correct when
 one of the reads in the window gives the truth, read when any gives a value).
 The real truth files reference private recordings: keep them out of this repo (tools/checkset_example.json is a
@@ -41,6 +42,7 @@ FIELDS = {   # field -> (reader in region_cache.READERS, function(read value) ->
     'ranked':     ('legends', lambda v: bool(v.get('ranked'))),
     'mode':       ('banner', lambda v: v.get('mode')),
     'map':        ('banner', lambda v: v.get('map')),
+    'ringReveal': ('ringreveal', lambda v: bool(v)),
 }
 WINDOW = 3.0
 

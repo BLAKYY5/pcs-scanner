@@ -2788,6 +2788,31 @@ def test_own_bars_and_knocks():
     assert st['mates'] == [[[5.0, 'blue', 75, 100]]] and games[1]['ownKnocks'] == [], (st, games[1])
 
 
+def test_ring_console_reveal_line():
+    """pcs_hud.ring_reveal: the feed line "<name> revealed the next ring on map" (a squad member used a ring console)
+    is told from other feed lines by the shape of its words (table in pcs_banner.json); ring_intel keeps one reveal per
+    line even when the line was captured twice."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+    T = HUD._ring_reveal_template()
+    assert T is not None and T.shape == (14, 174)
+
+    def line(words):                                     # a saved line picture: a name block, then the words
+        a = np.full((22, 330, 3), 30, np.uint8)
+        a[8:16, 6:60] = 235                                # stands in for the player's name
+        a[4:18, 70:70 + words.shape[1]] = (120 + 100 * words)[..., None].astype(np.uint8)   # grey = white-letter strength
+        return a
+    assert HUD.ring_reveal(line(T)) >= 0.95
+    rng = np.random.default_rng(5)
+    other = (rng.random((14, 174)) > 0.6).astype(np.float32)          # some other words
+    assert HUD.ring_reveal(line(other)) < HUD.RING_REVEAL_MIN
+    assert HUD.ring_reveal(np.zeros((22, 100, 3), np.uint8)) == 0.0      # too short / empty: nothing
+    lines = [{'t': 100.0}, {'t': 130.0, 'ringReveal': 0.9}, {'t': 139.0, 'ringReveal': 0.7}, {'t': 400.0, 'ringReveal': 0.8},
+             {'t': 900.0, 'ringReveal': 0.8}]
+    assert HUD.ring_intel(lines, 0, 800) == [{'t': 130.0}, {'t': 400.0}]
+
+
 def test_highlights_key_plays():
     """pcs_highlights: the player's own takedowns need two sources (kill line in his colour + kills number, a fight or
     damage); a line captured twice counts once; a kill line the kills number did not follow is not his; a knock and its
