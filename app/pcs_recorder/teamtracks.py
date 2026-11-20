@@ -14,7 +14,8 @@ the same games, so the review player can play them next to the player's own soun
 - Where: only the app's own folder, `team-tracks/<recording>/<player>-<scan id>.mic.m4a`. Written as `.part`, renamed
   when complete. A recording's folder is removed with the recording (retention, delete); nothing else is touched.
 - The player's answer goes to the hub (`PUT /api/me/sharing`), so teammates' apps skip a player who said no and the
-  hub refuses their mic track to teammates. Never answered = nothing sent (the hub keeps its default).
+  hub refuses their mic track to teammates. Never answered = no (coach, 21 Nov 2026, like transcripts and clips): the
+  hub is told no as well (an older hub let teammates download the track of a player who never answered).
 - Clips are a separate yes (coach, 20 Nov 2026): sharing the mic with the team does not put the player's voice in a
   teammate's clip (Discord). "Allow my voice in teammates' clips" (`share_clips`, off by default) goes to the hub
   with the sharing answer (`share_clips`); the hub lists it per track (`share_clips` in `GET /api/team-tracks`), and a
@@ -70,13 +71,10 @@ def rec_dir_name(stem: str) -> str:
     return re.sub(r"[^A-Za-z0-9 ._()-]", "_", stem).strip(" .")[:150] or "recording"
 
 
-def sharing_answer(s) -> bool | None:
-    """What this player told the team: True = shares (and so gets theirs), False = said no, None = never asked."""
-    if s.comms_consent and s.send_mic and s.mic_audio and s.share_tracks:
-        return True
-    if s.share_tracks or s.share_asked:
-        return False
-    return None
+def sharing_answer(s) -> bool:
+    """What this player tells the team: True = shares (and so gets theirs), False = said no or never answered (coach,
+    21 Nov 2026: no answer counts as no, like transcripts and clips)."""
+    return bool(s.comms_consent and s.send_mic and s.mic_audio and s.share_tracks)
 
 
 def active(s) -> bool:
