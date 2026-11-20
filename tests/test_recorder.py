@@ -1,6 +1,7 @@
 ﻿"""Tests for the recorder's logic with a fake OBS, fake Apex process and fake scanner.
 Run:  python tests/test_recorder.py
 """
+import json
 import os
 import sys
 import tempfile
@@ -5268,6 +5269,8 @@ def _check_for(s, rec=None, adapter=None, ui=None, procs=(), peaks=None):
     c.mic_blocked = c.amd_replay = c.gamebar = lambda: False
     c.installed = lambda: True
     c.read_gpu = lambda: "amd radeon rx 9070 xt"
+    c.obs_log = c.obs_start_log = lambda: ""         # no OBS log of this PC, no Defender read (PowerShell)
+    c.defender = lambda: {"cfa": 0, "blocked": []}
     ad = c.adapter
     obs_ = ad.obs if isinstance(ad, _FakeAdapter) else {"on": False}
     c.obs_state, c.closes = obs_, []
@@ -5293,8 +5296,8 @@ def test_rec_check_full_run():
     st_ = {i["id"]: i["state"] for i in pub["items"]}
     assert ad.calls == 1 and not pub["running"] and pub["at"], pub
     assert c.closes == [1] and not c.obs_state["on"]                       # started by the check: closed again
-    assert st_ == {"obs": "ok", "encoder": "ok", "game": "wait", "voice": "ok", "mic": "warn", "disk": "ok",
-                   "apps": "ok"}, st_
+    assert st_ == {"obs": "ok", "encoder": "ok", "folder": "ok", "game": "wait", "voice": "ok", "mic": "warn",
+                   "disk": "ok", "apps": "ok"}, st_
     assert c.listened == [(["discord", "mic"], c.listen_s)]                 # game sound is not listened before Apex
     assert pub["red"] == 0
     # OBS doesn't answer: red with a fix, the meters aren't asked
@@ -5383,26 +5386,322 @@ def test_rec_check_at_apex_start():
 
 
 def test_rec_check_in_failed_start_report():
-    """Recording doesn't start: the crash report carries the check (what was red), one message with the cause."""
+    """Recording doesn't start: the crash report carries the check (what was red), once per Apex session. Nothing on
+    the screen during the game (the reason on Home and one Activity line); one message with the cause and its fix once
+    Apex has closed. Tried again after 30 s, 1 min, 2 min, then every 5 min, not every tick."""
     crash, s, sent = _crash_setup()
     try:
         retention.INDEX_FILE.unlink(missing_ok=True)
         s.folder = str(TMP / f"vids-{time.time_ns()}")
-        apex = {"on": False}
+        apex, now = {"on": False}, {"t": 1000.0}
         obs, ui = FakeOBS(s.folder_path), FakeUI(False)
+        ui.lines = []
+        ui.activity = ui.lines.append
+        tries = []
 
         def bad_start():
+            tries.append(now["t"])
             raise RuntimeError("OBS didn't answer on port 4466")
         obs.start = bad_start
-        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"])
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"], clock=lambda: now["t"])
         r.check = _check_for(s, rec=r, ui=ui, procs=[("Outplayed.exe", "")])
-        apex["on"] = True; r.tick(); r.tick(); r.tick()          # the recorder tries again every tick
+        r.check.read_gpu = lambda: "nvidia geforce rtx 3060"               # the encoder (jim_nvenc) fits: green
+        apex["on"] = True
+        for _ in range(3):
+            r.tick(); now["t"] += 3                              # ticks every 3 s: no new try before 30 s
+        assert len(tries) == 1, tries
+        for _ in range(40):
+            r.tick(); now["t"] += 3
+        assert [round(t - tries[0]) for t in tries] == [0, 30, 90], tries
+        assert len(sent) == 1, sent                              # one crash report per Apex session
         ctx = sent[0]["context"]["check"]
         assert sent[0]["kind"] == "record_start" and "obs:bad(" in ctx and "apps:bad(Outplayed)" in ctx, ctx
-        msgs = [n for n in ui.notes if n[0] == "Recording check"]
-        assert len(msgs) == 1 and "Outplayed" in msgs[0][1], ui.notes
+        assert ui.notes == [], ui.notes                          # nothing on the screen during the game
+        assert ui.lines == ["Recording didn't start: OBS didn't answer on port 4466"], ui.lines
+        assert r.status.startswith("Couldn't start recording: OBS didn't answer")
+        apex["on"] = False; r.tick()
+        assert len(ui.notes) == 1 and ui.notes[0][0] == "Recording didn't start" and ui.notes[0][2] is True, ui.notes
+        assert "wasn't recorded" in ui.notes[0][1] and "Fix: Close Outplayed" in ui.notes[0][1], ui.notes
+        r.tick()
+        assert len(ui.notes) == 1                                # said once
+        apex["on"] = True; r.tick()                              # next session: tried at once again
+        assert len(tries) == 4                                   # (the same report again waits: crash.REPEAT_S)
     finally:
         _crash_teardown()
+
+
+# ------------------------------------------------------------------ graphics chips and the recordings folder (20 Nov 2026)
+
+def _fake_obs_log(render=0, cards=(("NVIDIA GeForce RTX 5070", 12523143168), ("AMD Radeon(TM) Graphics", 509353984)),
+                  record=""):
+    """An OBS log as OBS 33 writes it at start-up (made up here, no player's log), plus the recording lines given."""
+    lines = ["10:00:00.000: OBS 33.0.1 (64-bit, windows)", "10:00:00.001: Initializing D3D11...",
+             "10:00:00.002: Available Video Adapters: "]
+    for i, (name, vram) in enumerate(cards):
+        lines += [f"10:00:00.003: \tAdapter {i}: {name}", f"10:00:00.003: \t  Dedicated VRAM: {vram} (x GiB)",
+                  "10:00:00.003: \t  Shared VRAM:    16704622592 (15.6 GiB)"]
+    lines += [f"10:00:00.004: Loading up D3D11 on adapter {cards[render][0]} ({render})",
+              "10:00:01.000: ==== Startup complete ==============================================="]
+    return "\n".join(lines) + "\n" + record
+
+
+def test_encoder_order_follows_the_chip_obs_draws_on():
+    """An RTX 5070 next to a Ryzen 7800X3D's Radeon chip (a player's PC, 20 Nov 2026): NVENC first, AMD's encoder
+    last, whatever order Windows lists the chips in and also when Windows' list can't be read. "Wrong adapter" and
+    fallback encoders are seen in OBS's log."""
+    from pcs_recorder import obs as obsmod
+    ad = obsmod.log_adapters(_fake_obs_log())
+    assert ad["render"] == 0 and [a["vendor"] for a in ad["adapters"]] == ["nvidia", "amd"], ad
+    assert [a["integrated"] for a in ad["adapters"]] == [False, True] and ad["adapters"][1]["vram_gb"] < 1
+    both = "amd radeon(tm) graphics\nnvidia geforce rtx 5070"
+    assert obsmod.gpu_vendor(both) == "nvidia" and obsmod.gpu_vendor("amd radeon(tm) graphics") == "amd"
+    for names in (both, "", "amd radeon(tm) graphics"):
+        c = obsmod.encoder_candidates(obsmod.gpu_vendor(names) if names else "unknown", names, ad)
+        assert c[0] == "obs_nvenc_av1_tex", (names, c)
+        assert c.index("obs_nvenc_h264_tex") < c.index("h265_texture_amf") and not any("qsv" in e for e in c), c
+    c = obsmod.encoder_candidates("amd", both)                      # no OBS log yet: Windows' names alone
+    assert c[0] == "obs_nvenc_av1_tex" and c[-1] == "h264_texture_amf", c
+    # other PCs keep their order: a Radeon card with an Intel chip, an Intel chip + NVIDIA laptop, AMD only
+    c = obsmod.encoder_candidates("amd", "intel(r) uhd graphics 770\namd radeon rx 9070 xt")
+    assert c[0] == "av1_texture_amf" and c[-1].startswith("obs_qsv"), c
+    assert obsmod.encoder_candidates("nvidia", "intel(r) iris(r) xe graphics\nnvidia geforce rtx 4060 laptop gpu")[0] == "obs_nvenc_av1_tex"
+    assert obsmod.encoder_candidates("amd", "amd radeon rx 6700 xt")[0] == "h265_texture_amf"
+    assert obsmod.encoder_candidates("amd", "amd radeon(tm) graphics")[0] == "h265_texture_amf"   # only the chip
+    # an Arc card drawing in OBS with a Radeon chip too
+    arc = obsmod.log_adapters(_fake_obs_log(cards=(("Intel(R) Arc(TM) A770 Graphics", 16 * 1024 ** 3),
+                                                   ("AMD Radeon(TM) Graphics", 536870912))))
+    assert obsmod.encoder_candidates("amd", "", arc)[0] == "obs_qsv11_av1"
+    # the log lines
+    wrong = "10:00:02.044: [texture-amf-h264] amf_avc_create_texencode: Wrong adapter\n" \
+            "10:00:02.117: [fallback-amf-h264: 'advanced_video_recording'] settings:\n"
+    assert "Wrong adapter" in obsmod.wrong_chip(wrong)
+    assert "fallback-amf" in obsmod.wrong_chip("x\n[fallback-amf-hevc: 'advanced_video_recording'] settings:\n")
+    assert obsmod.wrong_chip("[obs-nvenc: 'advanced_video_recording'] settings:\n==== Recording Start ====\n") == ""
+    fail = "10:00:02.121: [mp4 output: 'adv_file_output'] Unable to open file 'X:/Rec Folder/Apex Legends_x.mp4'\n"
+    assert Path(obsmod.unable_to_open(fail)) == Path("X:/Rec Folder")
+    assert obsmod.unable_to_open(fail + "10:05:00.000: ==== Recording Start ===============================\n") == ""
+    assert obsmod.unable_to_open("==== Recording Start ====\n" + fail)
+
+
+def test_encoder_test_skips_the_wrong_chip():
+    """The encoder test reorders the candidates once OBS has said which chip it draws on (Windows' list empty here,
+    as when it can't be read), and an encoder whose test shows "Wrong adapter" / a fallback encoder in OBS's log is
+    skipped; it is kept only when no other encoder records."""
+    from pcs_recorder import obs as obsmod
+    log_text = {"text": ""}
+    current, calls = {}, []
+    works = {"all": True}
+
+    class Fake:
+        def __init__(self, s):
+            self.s = s
+
+        def connect(self):
+            log_text["text"] = _fake_obs_log()                    # OBS writes its start-up lines
+
+        def prepare(self, w, h, enc):
+            pass
+
+        @property
+        def c(self):
+            class C:
+                def start_record(self):
+                    calls.append(current["enc"])
+                    if "amf" in current["enc"]:
+                        log_text["text"] += ("[texture-amf-h264] amf_avc_create_texencode: Wrong adapter\n"
+                                             "[fallback-amf-h264: 'advanced_video_recording'] settings:\n")
+                    log_text["text"] += "==== Recording Start ===============================================\n"
+            return C()
+
+        def recording(self):
+            return works["all"] or "amf" in current["enc"]
+
+        def stop(self):
+            return None
+    fake_log = TMP / "fake-obs.txt"
+    saved = (obsmod.OBS, obsmod.close, obsmod.write_config, obsmod.launch, obsmod.gpu_names, obsmod.time.sleep,
+             obsmod.obs_adapters, obsmod.newest_log, obsmod.log_size, obsmod.read_log)
+    obsmod.OBS = Fake
+    obsmod.close = lambda: None
+    obsmod.write_config = lambda s, enc, w, h: current.update(enc=enc)
+    obsmod.launch = lambda: None
+    obsmod.gpu_names = lambda: ""                                  # Windows' list couldn't be read
+    obsmod.time.sleep = lambda x: None
+    obsmod.obs_adapters = lambda: obsmod.log_adapters(log_text["text"])
+    obsmod.newest_log = lambda: fake_log if log_text["text"] else None
+    obsmod.log_size = lambda p=None: len(log_text["text"])
+    obsmod.read_log = lambda p=None, start=0: log_text["text"][start:]
+    try:
+        enc = obsmod.pick_encoder(settings.Settings(), 1920, 1080, progress=lambda m: None)
+        assert enc == "obs_nvenc_av1_tex" and calls == ["obs_nvenc_av1_tex"], (enc, calls)
+        # no NVENC records: AMD's fallback is better than nothing, after every other one was tried
+        log_text["text"], calls[:] = "", []
+        works["all"] = False
+        enc = obsmod.pick_encoder(settings.Settings(), 1920, 1080, progress=lambda m: None)
+        assert enc == "h265_texture_amf" and calls[0] == "obs_nvenc_av1_tex", calls
+        assert calls.index("h265_texture_amf") > calls.index("jim_nvenc") and "h264_texture_amf" in calls, calls
+    finally:
+        (obsmod.OBS, obsmod.close, obsmod.write_config, obsmod.launch, obsmod.gpu_names, obsmod.time.sleep,
+         obsmod.obs_adapters, obsmod.newest_log, obsmod.log_size, obsmod.read_log) = saved
+
+
+def test_rec_check_recordings_folder():
+    """Recordings folder item: made when missing, a test file written; a folder that can't be made or written, or in
+    which OBS couldn't open its file, is red, with Controlled folder access named when Windows Defender has it on
+    or blocked our OBS (read only). The encoder item says when the encoder runs on the wrong chip."""
+    from pcs_recorder import precheck as pc
+    from pcs_recorder import obs as obsmod
+    # write test: a missing folder is made (only that one), the test file removed
+    f = TMP / f"recf-{time.time_ns()}" / "My Apex VODs"
+    assert pc.write_test(f) == "" and f.is_dir() and list(f.iterdir()) == []
+    blocker = TMP / f"afile-{time.time_ns()}"
+    blocker.write_text("x")
+    assert pc.write_test(blocker / "sub") == "create"
+    # the items
+    assert pc.folder_item("")["state"] == "ok"
+    it = pc.folder_item("", cfa=1, obs_failed=True, obs_exe="C:/Data/PCS Scanner/obs/bin/64bit/obs64.exe")
+    assert it["state"] == "bad" and "Controlled folder access" in it["text"] and "Allow PCS Scanner's OBS" in it["fix"]
+    assert "obs64.exe" in it["fix"] and "Settings → Recordings → Folder" in it["fix"]
+    assert pc.folder_item("", cfa=0, obs_failed=True)["text"] == "Can't write to the recordings folder"
+    assert pc.folder_item("write", cfa_event=True)["fix"].startswith("Allow PCS Scanner and its OBS")
+    assert pc.folder_item("create")["text"] == "Can't create the recordings folder"
+    assert pc.folder_item("", cfa=1, protected=True)["state"] == "warn"
+    assert pc.folder_item("", cfa=1, protected=True, verified=True)["state"] == "ok"
+    assert pc.folder_item("", cfa=2, protected=True)["state"] == "ok"               # audit mode blocks nothing
+    # every sentence the player reads is in both tables
+    tables = {c: json.loads((Path(__file__).resolve().parent.parent / "app" / "web" / "i18n" / f"{c}.json")
+                            .read_text(encoding="utf-8")) for c in ("en", "fr")}
+    for txt in (it["text"], pc.folder_item("create")["text"], pc.CFA_FIX, pc.FOLDER_FIX, "Recordings folder",
+                "Uses the wrong graphics chip", "Uses the wrong graphics chip, not your {card} card",
+                "PCS Scanner's OBS", "This Apex session wasn't recorded: {why}. Fix: {fix}"):
+        assert txt in tables["en"] and tables["fr"][txt] != txt, txt
+    # paths the player sees never carry the Windows user name
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        assert pc.display_path(Path(base) / "PCS Scanner" / "obs" / "bin" / "64bit" / "obs64.exe").startswith("%LOCALAPPDATA%\\")
+    assert pc.inside("C:/Users/x/Videos/My Apex VODs", ["C:\\Users\\x\\Videos"])
+    assert not pc.inside("C:/Users/x/Videos2", ["C:\\Users\\x\\Videos"])
+    # Defender: read only, one PowerShell call; a single event comes back flattened
+    exe = "C:\\Users\\x\\AppData\\Local\\PCS Scanner\\obs\\bin\\64bit\\obs64.exe"
+
+    class _Run:
+        def __init__(self, out):
+            self.stdout = out
+    one = json.dumps({"cfa": 1, "blocked": ["2026-11-20", "x", "C:\\Users\\x\\Videos\\My Apex VODs\\a.mp4",
+                                            "\\Device\\HarddiskVolume3\\Users\\x\\AppData\\Local\\PCS Scanner\\obs\\bin\\64bit\\obs64.exe"]})
+    d = pc.defender_state(lambda *a, **k: _Run(one))
+    assert d["cfa"] == 1 and len(d["blocked"]) == 1 and pc.cfa_blocked(d["blocked"], [exe])
+    assert not pc.cfa_blocked(d["blocked"], ["C:\\Program Files\\other\\obs64.exe"])
+    assert pc.defender_state(lambda *a, **k: _Run(""))["cfa"] is None
+    assert pc.defender_state(lambda *a, **k: (_ for _ in ()).throw(OSError("no powershell")))["cfa"] is None
+    assert "Get-MpPreference" in pc._DEFENDER_PS and "Set-" not in pc._DEFENDER_PS and "Add-" not in pc._DEFENDER_PS
+    # the whole check, as on that player's PC: AMD encoder on the Radeon chip, OBS couldn't open its file
+    s = _check_settings(encoder="h264_texture_amf")
+    c = _check_for(s)
+    rec_log = _fake_obs_log(record="[texture-amf-h264] amf_avc_create_texencode: Wrong adapter\n"
+                                   "[fallback-amf-h264: 'advanced_video_recording'] settings:\n"
+                                   f"[mp4 output: 'adv_file_output'] Unable to open file '{s.folder}/Apex Legends_x.mp4'\n")
+    c.obs_log = c.obs_start_log = lambda: rec_log
+    c.read_gpu = lambda: "nvidia geforce rtx 5070\namd radeon(tm) graphics"
+    c.defender = lambda: {"cfa": 1, "blocked": []}
+    c.start()
+    st_ = {i["id"]: i for i in c.public()["items"]}
+    assert st_["folder"]["state"] == "bad" and "Controlled folder access" in st_["folder"]["text"], st_["folder"]
+    assert st_["encoder"]["state"] == "bad" and st_["encoder"]["text"] == "Uses the wrong graphics chip, not your NVIDIA card"
+    assert "folder:bad" in c.summary() and "My Apex" not in c.summary()
+    # Check again: the app can write, OBS records a test file there: green once OBS could
+    ad = _FakeAdapter()
+    c2 = _check_for(s, adapter=ad)
+    c2.obs_log = c2.obs_start_log = lambda: rec_log
+    c2.defender = lambda: {"cfa": 1, "blocked": []}
+    ad.test_write = lambda: (setattr(c2, "obs_log", lambda: rec_log + "==== Recording Start ====\n"), True)[1]
+    c2.start(manual=True)
+    assert {i["id"]: i["state"] for i in c2.public()["items"]}["folder"] == "ok"
+    # NVENC on the card: fine
+    assert pc.encoder_item(_check_settings(encoder="obs_nvenc_av1_tex"), "nvidia geforce rtx 5070", obs_log=_fake_obs_log())["state"] == "ok"
+
+
+def test_start_checks_the_folder_first():
+    """Before every start the recordings folder is made and written to; when that fails OBS is never asked (its error
+    box would show in the game). OBS saying it couldn't open the file = no new try in this Apex session, unless
+    another folder is chosen."""
+    from pcs_recorder import obs as obsmod
+    crash, s, sent = _crash_setup()
+    try:
+        retention.INDEX_FILE.unlink(missing_ok=True)
+        blocker = TMP / f"afile-{time.time_ns()}"
+        blocker.write_text("x")
+        s.folder = str(blocker / "My Apex VODs")                  # can't be made
+        apex, now = {"on": False}, {"t": 1000.0}
+        obs, ui = FakeOBS(TMP), FakeUI(False)
+        asked = []
+        obs.ensure_ready = lambda: asked.append(1)
+        r = Recorder(s, obs, FakeHub(), ui, fake_scan, is_apex_running=lambda: apex["on"], clock=lambda: now["t"])
+        r.check = _check_for(s, rec=r, ui=ui)
+        apex["on"] = True; r.tick()
+        assert asked == [] and not obs.rec and r.status == "Couldn't start recording: Can't create the recordings folder"
+        assert {i["id"]: i["state"] for i in r.check.public()["items"]}["folder"] == "bad"
+        now["t"] += 31; r.tick()
+        assert asked == []                                            # tried again (the app's own test), still no OBS
+        # OBS couldn't open the file (Controlled folder access lets the app write, not OBS)
+        s.folder = str(TMP / f"vids-{time.time_ns()}")
+
+        def refused():
+            raise obsmod.FolderError("Can't write to the recordings folder")
+        obs.start = refused
+        now["t"] += 1; r.tick()
+        assert len(asked) == 1 and r.start_retry_at == float("inf")
+        now["t"] += 3600; r.tick()
+        assert len(asked) == 1                                        # not again in this Apex session
+        s.folder = str(TMP / f"vids-{time.time_ns()}")                 # another folder chosen: at once
+        obs.start = lambda: setattr(obs, "rec", True)
+        r.tick()
+        assert len(asked) == 2 and obs.rec and r.status == "Recording Apex"
+        assert not [n for n in ui.notes if n[0] != "Recording check"] and len(sent) == 1, (ui.notes, sent)
+    finally:
+        _crash_teardown()
+
+
+def test_obs_start_failure_closes_obs():
+    """OBS can't open the recording file: the adapter sees it in OBS's log within seconds, closes OBS (and its error
+    box with it) and says why."""
+    from pcs_recorder import obs as obsmod
+    from pcs_recorder import runtime
+    text = {"t": "start-up lines\n"}
+    closed = []
+    saved = (obsmod.newest_log, obsmod.log_size, obsmod.read_log, obsmod.close, runtime.time.sleep)
+    obsmod.newest_log = lambda: TMP / "fake-obs.txt"
+    obsmod.log_size = lambda p=None: len(text["t"])
+    obsmod.read_log = lambda p=None, start=0: text["t"][start:]
+    obsmod.close = lambda: closed.append(1)
+    runtime.time.sleep = lambda x: None
+    try:
+        a = runtime.ObsAdapter(settings.Settings())
+        a.ready = True
+
+        class O:
+            rec = False
+
+            def start(self):
+                text["t"] += "[mp4 output: 'adv_file_output'] Unable to open file 'X:/v/Apex Legends_x.mp4'\n"
+
+            def recording(self):
+                return self.rec
+        a.obs = O()
+        try:
+            a.start()
+            raise AssertionError("no error")
+        except obsmod.FolderError as e:
+            assert str(e) == "Can't write to the recordings folder"
+        assert closed == [1] and a.ready is False
+        a.obs.start = lambda: setattr(a.obs, "rec", True)              # fine: returns at once, OBS left alone
+        a.start()
+        assert closed == [1]
+    finally:
+        obsmod.newest_log, obsmod.log_size, obsmod.read_log, obsmod.close, runtime.time.sleep = saved
+
+
+def run_all(tests):
 
 
 def run_all(tests):

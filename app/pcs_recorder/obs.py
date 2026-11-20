@@ -83,11 +83,39 @@ def gpu_names() -> str:
         return ""
 
 
-def gpu_vendor(names: str | None = None) -> str:
-    out = gpu_names() if names is None else names
+# Integrated graphics (the chip inside the CPU): names without a model number. Its encoder is a last resort: on a PC
+# with a graphics card, OBS draws on the card, and the chip's encoder then falls back to a slow copy ("Wrong adapter").
+_INTEGRATED = re.compile(r"radeon\(tm\) graphics|radeon graphics|radeon\(tm\) \d{3}m|radeon \d{3}m|vega \d+ graphics|"
+                         r"uhd graphics|hd graphics|iris|intel\(r\) graphics|^intel graphics|"
+                         r"microsoft basic|basic display|meta virtual|parsec|virtual display|remote display")
+INTEGRATED_VRAM_GB = 1.5        # OBS's log: dedicated VRAM under this = integrated (0.5 GB on a Ryzen 7000)
+
+
+def vendor_of(name: str) -> str:
+    n = (name or "").lower()
     for v in ("nvidia", "amd", "intel"):
-        if v in out or (v == "amd" and "radeon" in out):
+        if v in n or (v == "amd" and "radeon" in n):
             return v
+    return ""
+
+
+def is_integrated(name: str, vram_gb: float | None = None) -> bool:
+    n = (name or "").lower().strip()
+    if _INTEGRATED.search(n):
+        return True
+    return vram_gb is not None and vram_gb < INTEGRATED_VRAM_GB
+
+
+def gpu_vendor(names: str | None = None) -> str:
+    """The main graphics card's vendor: a card before integrated graphics (an RTX 5070 next to a Ryzen's Radeon
+    chip = nvidia, whatever order Windows lists them in)."""
+    out = gpu_names() if names is None else names
+    lines = [x for x in out.lower().splitlines() if x.strip()] or [out.lower()]
+    for want_card in (True, False):
+        for line in lines:
+            v = vendor_of(line)
+            if v and is_integrated(line) != want_card:
+                return v
     return "unknown"
 
 
@@ -104,19 +132,154 @@ def vendors_present(names: str) -> list[str]:
     return [v for v in ("nvidia", "amd", "intel") if v in n or (v == "amd" and "radeon" in n)]
 
 
-def encoder_candidates(vendor: str, names: str = "") -> list[str]:
+# ------------------------------------------------------------------ what OBS's own log says
+
+LOGS = CONFIG / "logs"
+
+
+def newest_log() -> Path | None:
+    try:
+        logs = sorted(LOGS.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return None
+    return logs[-1] if logs else None
+
+
+def log_size(path: Path | None = None) -> int:
+    path = path or newest_log()
+    try:
+        return path.stat().st_size if path else 0
+    except OSError:
+        return 0
+
+
+def read_log(path: Path | None = None, start: int = 0) -> str:
+    """The text of OBS's newest log (or `path`), from byte `start`; "" if there is none."""
+    path = path or newest_log()
+    if path is None:
+        return ""
+    try:
+        with open(path, "rb") as f:
+            f.seek(start)
+            return f.read(4_000_000).decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+_RECORD_TRY = re.compile(r"==== Recording Start|Unable to open file '|'advanced_video_recording'\] settings|"
+                         r"Wrong adapter")
+
+
+class FolderError(RuntimeError):
+    """OBS couldn't create the recording file in the recordings folder (or the app couldn't write there)."""
+
+
+def last_recording_log(max_logs: int = 8) -> str:
+    """Our OBS's newest log in which it tried to record ("" if none of the last few did): the encoder's and the
+    output's lines of the last recording try. A later start without a recording (Check again) doesn't hide them."""
+    try:
+        logs = sorted(LOGS.glob("*.txt"), key=lambda p: p.stat().st_mtime)[-max_logs:]
+    except OSError:
+        return ""
+    for p in reversed(logs):
+        text = read_log(p)
+        if _RECORD_TRY.search(text):
+            return text
+    return ""
+
+
+def log_adapters(text: str) -> dict | None:
+    """OBS's start-up lines "Adapter N: <name>" / "Dedicated VRAM: <bytes>" and "Loading up D3D11 on adapter <name> (N)"
+    -> {"adapters": [{"index", "name", "vram_gb", "vendor", "integrated"}], "render": the index OBS draws on, or None}.
+    None when the log has no adapter list (OBS not started yet)."""
+    adapters, cur = [], None
+    for line in (text or "").splitlines():
+        m = re.search(r"\bAdapter (\d+): (.+?)\s*$", line)
+        if m:
+            cur = {"index": int(m.group(1)), "name": m.group(2), "vram_gb": None}
+            adapters.append(cur)
+            continue
+        m = re.search(r"Dedicated VRAM:\s*(\d+)", line)
+        if m and cur is not None and cur["vram_gb"] is None:
+            cur["vram_gb"] = round(int(m.group(1)) / 1024 ** 3, 2)
+    if not adapters:
+        return None
+    render = None
+    for m in re.finditer(r"Loading up D3D11 on adapter .*\((\d+)\)", text):
+        render = int(m.group(1))                     # the last start in the text wins
+    by = {}
+    for a in adapters:                               # one list per OBS start: keep the last of each index
+        a["vendor"] = vendor_of(a["name"])
+        a["integrated"] = is_integrated(a["name"], a["vram_gb"])
+        by[a["index"]] = a
+    return {"adapters": [by[i] for i in sorted(by)], "render": render}
+
+
+def obs_adapters() -> dict | None:
+    """The graphics chips as our OBS saw them at its last start (its newest log), or None."""
+    return log_adapters(read_log())
+
+
+def render_vendor(adapters: dict | None) -> str:
+    """The vendor of the chip OBS draws on ("" when unknown)."""
+    for a in (adapters or {}).get("adapters") or []:
+        if a["index"] == (adapters or {}).get("render"):
+            return a.get("vendor") or ""
+    return ""
+
+
+# "Wrong adapter": AMD's texture encoder on a chip OBS doesn't draw on; it then falls back to a slow copy through the
+# CPU ("fallback-amf-…"). NVIDIA / Intel say "falling back" in the same case. Such an encoder records, but it is never
+# the right one when the card OBS draws on has its own.
+_WRONG_CHIP = re.compile(r"wrong adapter|\[fallback-|falling back to (?:non-texture|software|ffmpeg)|"
+                         r"fallback to (?:non-texture|software)", re.I)
+
+
+def wrong_chip(text: str) -> str:
+    """The first log line saying the encoder isn't running on the chip OBS draws on, else ""."""
+    m = _WRONG_CHIP.search(text or "")
+    if not m:
+        return ""
+    a, b = text.rfind("\n", 0, m.start()) + 1, text.find("\n", m.end())
+    return text[a:b if b >= 0 else None].strip()[:200]
+
+
+def unable_to_open(text: str) -> str:
+    """OBS couldn't create the recording file: the folder it was given (as the log writes it), else "".
+    Only a failure after the last successful recording start in the text counts."""
+    last = None
+    for m in re.finditer(r"Unable to open file '([^'\n]+)'|==== Recording Start", text or ""):
+        last = m.group(1) if m.group(1) else None
+    return str(Path(last).parent) if last else ""
+
+
+def encoder_candidates(vendor: str, names: str = "", adapters: dict | None = None) -> list[str]:
     """Only the encoders of graphics chips this PC has: OBS shows a "missing encoder" box for any other one.
-    (A PC with two, e.g. Intel + NVIDIA, gets both, the main card's first.)"""
+    Order: the chip OBS draws on (its log; else the main card), then other cards, integrated graphics last. (An RTX
+    5070 next to a Ryzen 7800X3D's Radeon chip: NVENC first, AMD's encoder only when no NVENC works.)"""
     present = vendors_present(names) if names else []
     if vendor in ENCODERS and vendor not in present:
         present.insert(0, vendor)
+    listed = (adapters or {}).get("adapters") or []
+    for a in listed:
+        if a.get("vendor") and a["vendor"] not in present:
+            present.append(a["vendor"])
+    if listed:
+        cards = {a["vendor"] for a in listed if a.get("vendor") and not a["integrated"]}
+        integrated = {a["vendor"] for a in listed if a.get("vendor") and a["integrated"]} - cards
+    else:
+        lines = [x for x in names.lower().splitlines() if x.strip()]
+        cards = {vendor_of(x) for x in lines if not is_integrated(x)}
+        integrated = {vendor_of(x) for x in lines if is_integrated(x)} - cards
+    render = render_vendor(adapters)
     if not present:
         present = list(ENCODERS)                       # unknown card: try everything
-    present.sort(key=lambda v: v != vendor)
-    order = [e for v in present for e in ENCODERS[v]]
-    if not has_av1_encoder(names):
-        order = [e for e in order if "av1" not in e]
-    return order
+    present = [v for v in present if v in ENCODERS]
+    present.sort(key=lambda v: (v in integrated, bool(render) and v != render, v != vendor))
+    # AV1 per vendor: an RTX 5070 has it, the Radeon chip next to it doesn't (OBS would fail with an error box)
+    lines = [x for x in (names.lower().splitlines() + [a["name"].lower() for a in listed]) if x.strip()]
+    av1 = {v for v in present if has_av1_encoder("\n".join(x for x in lines if vendor_of(x) == v))}
+    return [e for v in present for e in ENCODERS[v] if "av1" not in e or v in av1]
 
 
 HYBRID_MP4_SINCE = (30, 2)     # OBS 30.2 added "hybrid MP4": an mp4 that stays readable if OBS stops abruptly
@@ -479,11 +642,20 @@ class OBS:
 def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
     """First-run self test: try encoders until one actually records (2-second test file, then deleted).
     OBS only reads the encoder when it starts, so it is restarted with each candidate's settings
-    (changing the encoder while OBS runs has no effect: every test would use the first one)."""
+    (changing the encoder while OBS runs has no effect: every test would use the first one).
+    The order follows the chip OBS draws on, read from OBS's own log once it has started (Windows' list alone put a
+    Ryzen's Radeon chip before an RTX 5070, 20 Nov 2026). An encoder whose test shows in OBS's log that it runs on
+    another chip ("Wrong adapter", a fallback encoder) is skipped, and kept only as a last resort."""
     names = gpu_names()
     vendor = gpu_vendor(names)
+    adapters = obs_adapters()
     tried, why = [], []
-    for enc in encoder_candidates(vendor, names):
+    second_best = ""                                     # recorded, but on the wrong chip
+    while True:
+        todo = [e for e in encoder_candidates(vendor, names, adapters) if e not in tried]
+        if not todo:
+            break
+        enc = todo[0]
         tried.append(enc)
         step = "starting OBS"
         try:
@@ -493,9 +665,19 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
             obs = OBS(s)
             step = "connecting to OBS"
             obs.connect()
+            seen = obs_adapters()
+            if seen and seen != adapters:                # OBS's own list (first start): maybe another order
+                adapters = seen
+                better = [e for e in encoder_candidates(vendor, names, adapters) if e not in tried or e == enc]
+                if better and better[0] != enc:
+                    tried.remove(enc)
+                    log.info("OBS draws on %s: encoder order now %s", render_vendor(adapters) or "?", better)
+                    continue
             step = "setting up the scene"
             obs.prepare(width, height, enc)
             step = "starting the test recording"
+            at = newest_log()
+            mark = log_size(at)
             obs.c.start_record()
             time.sleep(3)
             if obs.recording():
@@ -503,6 +685,12 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
                 time.sleep(2)
                 for f in Path(path or "").parent.glob(Path(path or "x").stem + "*") if path else []:
                     f.unlink(missing_ok=True)
+                bad = wrong_chip(read_log(at, mark)) if at is not None and at == newest_log() else ""
+                if bad:
+                    log.info("encoder %s runs on another chip than OBS draws on: %s", enc, bad)
+                    why.append(f"{enc}: runs on the wrong graphics chip")
+                    second_best = second_best or enc
+                    continue
                 progress(f"Recording with {enc} ({vendor} graphics card).")
                 return enc
             log.info("encoder %s didn't start", enc)
@@ -510,6 +698,13 @@ def pick_encoder(s: Settings, width: int, height: int, progress=print) -> str:
         except Exception as e:
             log.info("encoder %s not usable (%s): %s", enc, step, e)
             why.append(f"{enc}: {step} failed ({e})")
+    if second_best:                                      # better a slow encoder than no recording
+        log.warning("only %s recorded, on another chip than OBS draws on (tried %s)", second_best, tried)
+        close()
+        write_config(s, second_best, width, height)
+        launch()
+        progress(f"Recording with {second_best} ({vendor} graphics card).")
+        return second_best
     close()                                                # also closes any error box OBS left open
     log.warning("no encoder worked on %r (tried %s)", names, tried)
     raise RuntimeError(f"No hardware encoder worked on this PC ({names.strip() or 'unknown graphics card'}): "

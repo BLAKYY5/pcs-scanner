@@ -134,8 +134,70 @@ class ObsAdapter:
             self.obs.prepare(w, h, self.s.encoder or None)
             self.ready = True
 
+    START_WAIT_S = 8
+
     def start(self):
-        self.obs.start()
+        """Start recording. When OBS's log says it couldn't open the file (Controlled folder access, a folder it may
+        not write in), OBS is closed at once: that also closes the error box OBS puts on the screen, in the game."""
+        at = obsmod.newest_log()
+        mark = obsmod.log_size(at)
+        err = None
+        try:
+            self.obs.start()
+        except Exception as e:                       # OBS's error box can hold the answer until it times out
+            err = e
+        end = time.time() + self.START_WAIT_S
+        while True:
+            try:
+                if err is None and self.obs.recording():
+                    return
+            except Exception:
+                pass
+            if at is not None and obsmod.unable_to_open(obsmod.read_log(at, mark)):
+                obsmod.close()
+                self.ready = False
+                raise obsmod.FolderError("Can't write to the recordings folder")
+            if time.time() >= end or err is not None:
+                break
+            time.sleep(0.25)
+        if err is not None:
+            raise err                                # else: the recorder's own check 30 s later
+
+    def test_write(self) -> bool:
+        """Check again: OBS records a 2-second test file in the recordings folder (named "PCS write test …", deleted
+        at once). False = OBS can't write there; OBS is then closed (its error box with it)."""
+        c = self.obs.c
+        test_name = "PCS write test %CCYY-%MM-%DD %hh-%mm-%ss"
+        ok = False
+        try:
+            c.set_profile_parameter("Output", "FilenameFormatting", test_name)
+            try:
+                c.start_record()
+            except Exception as e:
+                log.info("write test: start refused: %s", e)
+            for _ in range(16):
+                time.sleep(0.25)
+                if self.obs.recording():
+                    ok = True
+                    break
+            if ok:
+                time.sleep(1.5)
+                path = self.obs.stop()
+                time.sleep(1.5)
+                if path:
+                    p = Path(path)
+                    for f in p.parent.glob(p.stem + "*"):
+                        if f.name.startswith("PCS write test "):
+                            f.unlink(missing_ok=True)
+        finally:
+            try:
+                c.set_profile_parameter("Output", "FilenameFormatting", obsmod.FILENAME)
+            except Exception:
+                pass
+            if not ok:
+                obsmod.close()
+                self.ready = False
+        return ok
 
     def stop(self):
         return self.obs.stop()

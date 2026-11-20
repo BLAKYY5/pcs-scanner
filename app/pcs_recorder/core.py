@@ -198,6 +198,8 @@ class Recorder:
                 self.game = game
             hold = apex or bool(game)            # Apex is recorded; any game holds the heavy work
             self.hold = hold
+            if not apex and (getattr(self, "start_fails", 0) or getattr(self, "start_retry_at", 0)):
+                self._start_failed_closed()          # the session wasn't recorded: said once, now
             if not apex and self.check is not None:
                 self.check.apex_closed()             # next Apex session: the check may tell again
             if apex and self.talk is not None and self.talk.active:
@@ -232,21 +234,34 @@ class Recorder:
                     log.exception("night tick failed")
 
     # ---------------------------------------------------------- recording
+    START_RETRY_S = (30, 60, 120, 300)        # a failed start is tried again after these waits (same Apex session)
+
+    def _folder_ready(self) -> None:
+        """Before every start: the recordings folder (the one in Settings, nothing else) is made if missing and a small
+        file is written there and removed. Failing that, OBS isn't asked to record: it would put an error box on the
+        screen, in the game."""
+        from .obs import FolderError
+        from .precheck import write_test
+        w = write_test(self.s.folder)
+        if w:
+            e = FolderError("Can't create the recordings folder" if w == "create"
+                            else "Can't write to the recordings folder")
+            e.by_app = True
+            raise e
+
     def _start(self) -> None:
+        if getattr(self, "start_fail_folder", None) not in (None, self.s.folder):
+            self.start_retry_at, self.start_fail_folder = 0, None     # another folder chosen: try at once
+        if self.clock() < getattr(self, "start_retry_at", 0):
+            return
         try:
+            self._folder_ready()
             self.obs.ensure_ready()
             self.obs.start()
         except Exception as e:
-            self.status = f"Couldn't start recording: {e}"
-            self.ui.notify("PCS Recorder", f"Recording didn't start: {e}")
-            log.exception("start failed")
-            if self.check is not None:
-                try:
-                    self.check.record_failed(e)      # what else is red (Medal running…), one message
-                except Exception:
-                    log.exception("recording check failed")
-            crash.report_exception("record_start", e, crash.obs_log_tail(), self._check_ctx())
+            self._start_failed(e)
             return
+        self.start_fails, self.start_retry_at = 0, 0
         key = f"rec-{int(self.clock())}"
         n = 2
         while key in self.idx:                   # unique even if two sessions start within the same second
@@ -268,6 +283,53 @@ class Recorder:
             self._restarted(key)
         except Exception:
             log.exception("restart check failed")
+
+    def _start_failed(self, e: Exception) -> None:
+        """Recording didn't start. During the game nothing on the screen: the reason on Home (status, recording
+        check) and one Activity line; once Apex has closed, one corner message. One crash report per Apex session.
+        Tried again after 30 s, 1, 2, then every 5 min; when OBS itself couldn't write in the folder, not again in
+        this Apex session (each try would flash OBS's error box) unless the folder is changed in Settings."""
+        from .obs import FolderError
+        log.warning("start failed: %s", e, exc_info=not isinstance(e, FolderError))
+        why, fix = str(e), ""
+        if self.check is not None:
+            try:
+                self.check.record_failed(e, quiet=True)   # what else is red (Medal running…), for the report
+                if isinstance(e, FolderError):
+                    it = self.check.folder_problem()
+                    if it:
+                        why, fix = it["text"], it.get("fix") or ""
+                else:
+                    reds = [i for i in self.check.reds() if i["id"] != "obs"]
+                    fix = reds[0].get("fix", "") if reds else ""
+            except Exception:
+                log.exception("recording check failed")
+        self.status = f"Couldn't start recording: {why}"
+        n = getattr(self, "start_fails", 0) + 1
+        self.start_fails = n
+        self.start_fail_folder = self.s.folder              # another folder chosen in Settings: tried at once
+        self.start_fail_tell = (why, fix)                   # the latest reason is the one told after the game
+        if isinstance(e, FolderError) and not getattr(e, "by_app", False):
+            self.start_retry_at = float("inf")
+        else:
+            self.start_retry_at = self.clock() + self.START_RETRY_S[min(n, len(self.START_RETRY_S)) - 1]
+        if n == 1:
+            activity = getattr(self.ui, "activity", None)
+            if activity is not None:
+                activity(f"Recording didn't start: {why}")
+            else:
+                log.info("Recording didn't start: %s", why)
+            crash.report_exception("record_start", e, crash.obs_log_tail(), self._check_ctx())
+
+    def _start_failed_closed(self) -> None:
+        """Apex closed: forget the retry wait; if this session wasn't recorded, say it once (corner message)."""
+        tell = getattr(self, "start_fail_tell", None)
+        self.start_fails, self.start_retry_at, self.start_fail_tell = 0, 0, None
+        self.start_fail_folder = None
+        if tell:
+            why, fix = tell
+            self.ui.notify("Recording didn't start", f"This Apex session wasn't recorded: {why}."
+                           + (f" Fix: {fix}" if fix else ""), True)
 
     def _check_ctx(self) -> dict:
         """The recording check's one-line summary for a crash report (item states, capture app names only)."""

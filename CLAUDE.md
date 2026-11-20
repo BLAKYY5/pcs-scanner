@@ -90,8 +90,27 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.0 is
 
 - **OBS**: portable OBS driven over obs-websocket (port 4466). The encoder is read only at OBS start, so the
   encoder test restarts OBS per candidate; only encoders of GPU vendors actually present are tried (otherwise a
-  "missing encoder" dialog blocks). AV1 only on RTX 40/50, RX 7000/9000, Arc. Other capture software running
+  "missing encoder" dialog blocks). AV1 only on RTX 40/50, RX 7000/9000, Arc (judged per vendor). Other capture software running
   (Medal, etc.) can make recording start fail. Sources removed are awaited before being re-created.
+  **Which chip** (20 Nov 2026, a player's RTX 5070 + Ryzen 7800X3D got AMD's encoder on the CPU's Radeon chip:
+  "Wrong adapter", then a slow `fallback-amf`): the order follows the chip OBS draws on, read from OBS's own log
+  (`obs.log_adapters`: "Adapter N", "Dedicated VRAM", "Loading up D3D11 on adapter … (N)"), then other cards;
+  integrated graphics (name without a model, or < 1.5 GB dedicated VRAM) last. Windows' list alone (`gpu_names`, may
+  come back empty: then every vendor is tried, AMD first) is used only before OBS has started once; the encoder test
+  reorders after its first OBS start. A candidate whose test shows "Wrong adapter" / a fallback encoder in the log is
+  skipped (kept only when nothing else records). The recording check's Encoder item is red "Uses the wrong graphics
+  chip" for such an encoder (fix: Test encoder again).
+- **Recordings folder** (same player: `Unable to open file` in OBS's log; Windows Defender's Controlled folder access
+  keeps unknown programs, our portable OBS included, from writing in Videos / Documents…): before every start
+  `Recorder._folder_ready` makes the folder in Settings if missing (nothing else) and writes + removes a small file;
+  failing that OBS is not asked (it would show its error box in the game). OBS failing anyway (`ObsAdapter.start` reads
+  "Unable to open file" in its log) = OBS closed at once (its box with it), `FolderError`, no new try that Apex session
+  unless the folder changes. Other start failures: tried again after 30 s, 1, 2, 5 min, not every tick. During the game
+  nothing on the screen: status on Home + one Activity line; one corner message once Apex closed. Recording check
+  item "Recordings folder" (`precheck.folder_item`): write test, OBS's last recording log, Controlled folder access
+  read only (`Get-MpPreference` EnableControlledFolderAccess + Defender event 1123 naming our obs64.exe, one PowerShell
+  every 10 min at most); on in a protected folder = amber until our OBS recorded there; Check again then lets OBS
+  record a 2 s "PCS write test" file there (deleted). Fix text names the OBS path as `%LOCALAPPDATA%\…` (no user name).
 - **Audio tracks**: 1 = Apex only (process capture), 2 = the voice app only (`voice_app`: Discord by default,
   TeamSpeak = classic `ts3client_win64.exe` and new `TeamSpeak.exe` both captured on track 2, or another program
   by exe name `voice_exe`; keys `discord_audio`, `hk_mute_discord`, track key `discord` and OBS input
