@@ -188,7 +188,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   shared mic tracks of the app's own uploaded recordings (last 7 days; asked again hourly for 3 days) are downloaded
   into `team-tracks/<recording>/<player>-<scan id>.mic.m4a` in the data folder: one at a time, background priority,
   never while Apex runs, records or scans (Apex starting stops the download, partial removed). Said no = the hub is
-  told (teammates then get 403 for this player's track); never answered = nothing sent. Removed with the recording.
+  told (teammates then get 403 for this player's track); never answered = no (coach, 21 Nov 2026, like transcripts and clips: the hub is told no too). Removed with the recording.
   The review player plays them in the mixer ("<name> mic"), each game of the recording with its own offset
   (their jump − own jump), only inside that game. A Tailscale hub (100.64.0.0/10, `*.ts.net`) that doesn't answer gets `tailscale_state`: missing /
   off / on, looked up on this PC only (install folder, a 100.x address), never a request.

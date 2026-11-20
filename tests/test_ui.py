@@ -4490,7 +4490,8 @@ def test_team_tracks_download():
     """Agreed: the answer goes to the hub, teammates' shared tracks of the app's own uploaded recordings come into the
     app's folder (team-tracks/), once; the review gets them with their time offset. Never during Apex (no request at
     all); stopped when Apex starts mid-download (no partial file left). A player who said no or never answered gets
-    nothing; "no" is told to the hub. Removed with the recording; nothing else in the folder is touched."""
+    nothing; "no" is told to the hub, also when the player never answered (coach, 21 Nov 2026: no answer = no).
+    Removed with the recording; nothing else in the folder is touched."""
     from pcs_recorder import retention, teamtracks
     hub = _fresh_hub()
     hub.set_key(GOOD_KEY)
@@ -4513,12 +4514,18 @@ def test_team_tracks_download():
     clock = {"t": now}
     tt = teamtracks.TeamTracks(lambda: s, lambda: idx, lambda: busy["why"], now=lambda: clock["t"])
     try:
-        # never asked: nothing sent, nothing fetched
-        assert teamtracks.sharing_answer(s) is None and not tt.tick() and fake.calls == []
-        # said no: the hub is told, nothing is fetched
+        # never answered = no: the hub is told no, nothing is fetched
+        assert not s.share_asked and teamtracks.sharing_answer(s) is False and not teamtracks.active(s)
+        assert not tt.tick() and fake.shared == [False] and fake.bodies[-1] == {"share_tracks": False, "share_clips": False}
+        assert not any(c[1].startswith("/api/team-tracks") for c in fake.calls)
+        # said no: same answer, not sent again; nothing is fetched
         s.share_asked = True
         assert not tt.tick() and fake.shared == [False]
         assert not any(c[1].startswith("/api/team-tracks") for c in fake.calls)
+        # a yes without the mic going to the team (no comms consent) is still a no
+        s.share_tracks = True
+        assert teamtracks.sharing_answer(s) is False and not tt.tick() and fake.shared == [False]
+        s.share_tracks = False
         # agreed (setup step): told once, the teammate's track downloaded for the recording
         s.share_tracks = s.comms_consent = s.mic_audio = s.send_mic = True
         busy["why"] = "Apex is running"
