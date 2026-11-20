@@ -776,6 +776,23 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   (`pcs_banner.json` `ringReveal`, grey cells from our own recordings; English text only). Feed lines get `ringReveal`
   (score), games get `ringIntel` [{t}] (recording time; [] = none seen). A line is checked when first saved and on
   its next 4 captures (it is often saved while fading in). Check set field `ringReveal` (reader `ringreveal`).
+  **Who and what next** (coach's decision 2, 21 Nov 2026): `ring_reveal_by` = 'self' when the line starts with "You"
+  (74-77 px from the first word to the fixed words on the saved picture and the shape of "You", `ringRevealYou`),
+  'mate' for a wider name, none when unsure (first word at the picture's edge); lines get `ringRevealBy`, `ringIntel`
+  items `by`. While the player is dead the feed is the spectated player's: their "You" is a teammate
+  (`spectatedYou`). `pcs_ring.check_map_opens` (from the scan's full-map keyframes) adds `mapOpenAt` (first map open
+  from 10 s before the line to the game's end) and `mapCheck`: opened (within `MAP_OPEN_S` = 20 s: on 13 lines the
+  map was opened 10 s before to 12 s after when it was opened for the reveal, else 24 s or more later) | notOpened |
+  dead | died (within the 20 s). Keyframes are ~1 s apart: a glance under a second can be missed.
+  Callout (`pcs_recorder/ringcalls.py`, `/api/ringcalls?id=`): a ring / zone word (EN, FR) from 10 s before to 30 s
+  after the line, said by the one who scanned: own scan = the player's own transcript (`<rec>.comms.json`, only with
+  their transcripts yes); a teammate's = the lines the hub's replay of that game gives this key (`/api/replay/<gk>`
+  `comms`: only teammates who said yes and share their mic track; `squadpaths.game_comms`, cached in `squad-cache/`,
+  never asked while a game runs). "Not called out" only when that transcript exists (a teammate's scan: every
+  teammate's, the line doesn't say which one). Review player: "Ring scanned" (green round-head tick on the rings lane,
+  Events "by you / by a teammate · map opened after 0:08") and the misses "Ring scanned · map not opened" (with
+  "opened 0:26 later") and "Ring scanned · not called out" (orange square-head ticks); legend items only when the
+  recording has scans.
 - **Sound cues**: correlation on mel spectrograms and Shazam-style hashing both failed in the 3D game mix.
   What works: narrowband tone strength against its ±30 Hz neighbourhood (ring alarm = 374 + 533 Hz pulses).
   Screen and sound check each other (`pcs_audio.attach`, branch `audio-cross`): a countdown end read on screen lets a

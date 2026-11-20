@@ -638,8 +638,11 @@ class Feed:
                     dup[4] += 1
                     try:
                         c2 = Image.fromarray(reg[max(0, y0 - 5):y1 + 5, x0:].astype(np.uint8))
-                        s = ring_reveal(np.asarray(c2.resize((max(1, c2.width * 2 // 3), max(1, c2.height * 2 // 3)), Image.LANCZOS)))
-                        if s >= RING_REVEAL_MIN: ln['ringReveal'] = round(s, 2)
+                        c2 = np.asarray(c2.resize((max(1, c2.width * 2 // 3), max(1, c2.height * 2 // 3)), Image.LANCZOS))
+                        s = ring_reveal(c2)
+                        if s >= RING_REVEAL_MIN:
+                            ln['ringReveal'] = round(s, 2); by = ring_reveal_by(c2)
+                            if by: ln['ringRevealBy'] = by
                     except Exception: pass
                 continue
             rec = [t, sig, w]; self.recent.append(rec)
@@ -666,7 +669,9 @@ class Feed:
             if 'weapon' not in line:
                 try:
                     s = ring_reveal(np.asarray(crop))
-                    if s >= RING_REVEAL_MIN: line['ringReveal'] = round(s, 2)
+                    if s >= RING_REVEAL_MIN:
+                        line['ringReveal'] = round(s, 2); by = ring_reveal_by(np.asarray(crop))
+                        if by: line['ringRevealBy'] = by
                 except Exception: pass
             rec += [line, 0]
             self.lines.append(line)
@@ -718,12 +723,55 @@ def ring_reveal(a):
     s[pn < 1e-3] = 0
     return float(s.max())
 
+# Who used the console: the line starts with "You" for the recording player, else with the user's name (white too).
+# Read on the same picture: from where "the next ring on map" sits, back over "revealed " to the first word (letters
+# 1-2 px apart, words 4-6 px, at the picture's 2/3 size). "You revealed " is 74-77 px wide there and its first word
+# matches the shape of "You" (pcs_banner.json 'ringRevealYou', 2 lines of our recordings: 0.90-0.91; names: <= 0.52);
+# a name is wider than 92 px (our 15 name lines: 104-162). A line whose first word runs into the picture's left edge
+# (white scenery behind the feed) is left undecided.
+YOU_W = (66, 86)              # width of "You revealed " (px of the saved picture)
+YOU_MIN = 0.7
+_RY = []
+def _you_template():
+    t = BANNER_T.get('ringRevealYou') or {}
+    try: return np.array([[int(c, 16) for c in row] for row in t['cells']], np.float32) / 15
+    except Exception: return None
+
+def ring_reveal_by(a):
+    """'self' ("You revealed..."), 'mate' (a name), or None (unsure) for a reveal line picture (RGB, saved size)."""
+    if not _RR: _RR.append(_ring_reveal_template())
+    if not _RY: _RY.append(_you_template())
+    T, Y = _RR[0], _RY[0]
+    b = _reveal_band(np.asarray(a))
+    if T is None or Y is None or b is None or b.shape[1] < T.shape[1]: return None
+    tw = T.shape[1]; Tz = T - T.mean(); tn = float(np.sqrt((Tz * Tz).sum()))
+    P = np.lib.stride_tricks.sliding_window_view(b, (RING_REVEAL_H, tw))[0]
+    Pz = P - P.mean((1, 2), keepdims=True); pn = np.sqrt((Pz * Pz).sum((1, 2)))
+    x = int(np.argmax((Pz * Tz).sum((1, 2)) / np.maximum(pn * tn, 1e-6)))
+    col = (b > 0.5).any(0); st = x; gap = 0
+    for i in range(x - 1, -1, -1):           # back to the start of the first word: a gap of 8+ empty columns ends it
+        if col[i]: st = i; gap = 0
+        else:
+            gap += 1
+            if gap > 7: break
+    w = x - st
+    if st < 2: return None
+    if w > 92: return 'mate'
+    if not (YOU_W[0] <= w <= YOU_W[1]) or st + Y.shape[1] > b.shape[1]: return None
+    g = b[:, st:st + Y.shape[1]]; gz = g - g.mean(); yz = Y - Y.mean()
+    c = float((gz * yz).sum() / max(np.sqrt((gz * gz).sum() * (yz * yz).sum()), 1e-6))
+    return 'self' if c >= YOU_MIN else 'mate' if c < 0.4 else None
+
 def ring_intel(lines, t0, t1, same_s=20.0):
-    """The ring console reveals of one game (feed lines between t0 and t1): [{'t'}], one per reveal (the same line
-    captured again within same_s counts once)."""
-    out = []
+    """The ring console reveals of one game (feed lines between t0 and t1): [{'t', 'by'?}], one per reveal (the same
+    line captured again within same_s counts once). by = 'self' (the recording player used the console) or 'mate',
+    from the captures of that line that could tell (the most common answer; none when they disagree evenly)."""
+    out = []; votes = []
     for l in sorted((l for l in lines if 'ringReveal' in l and t0 <= l['t'] < t1), key=lambda l: l['t']):
-        if not out or l['t'] - out[-1]['t'] > same_s: out.append({'t': l['t']})
+        if not out or l['t'] - out[-1]['t'] > same_s: out.append({'t': l['t']}); votes.append([])
+        if l.get('ringRevealBy'): votes[-1].append(l['ringRevealBy'])
+    for o, v in zip(out, votes):
+        if v and v.count('self') != v.count('mate'): o['by'] = max(('self', 'mate'), key=v.count)
     return out
 
 

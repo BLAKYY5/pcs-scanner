@@ -167,7 +167,8 @@ GAME_FIELDS = ("map", "mode", "tStart", "tEnd", "tEndGame", "ring", "landing", "
                "fights", "ringDamage",   # pcs_fights: fights [{t0, t1, result, thirdParty...}] as bands, time outside the ring   # pcs_mapicons: [{t, n, mapX, mapY, ...}], [{t, mapX, mapY, state, ...}] on the map panel
                "heals", "abilities",     # pcs_usage: [{t, item, done}], [{t, kind: ult | tactical, legend}]: small marks in the review
                "ammoEvents", "ammoSummary",
-               "highlights")             # pcs_highlights: key plays [{t0, t1, kind, count, score...}], best first   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
+               "highlights",
+               "ringIntel", "ringReveals")   # ring console: feed reveal lines [{t, by, mapOpenAt, mapCheck}], green discs             # pcs_highlights: key plays [{t0, t1, kind, count, score...}], best first   # pcs_ammo: low-ammo fights and out-of-heals marks, a summary in the game bar
 
 
 # the game's minimap transform per map (world -> picture), as in scanner/pcs_minimap.MAPS and the hub's minimaps
@@ -1139,6 +1140,42 @@ class Backend:
             jump = None
         return squadpaths.get(url, recording=Path(it["path"]).stem, jump=jump)
 
+    def ring_calls(self, q: dict) -> dict:
+        """Ring console scans of a recording (scan games[].ringIntel) with the callout check (pcs_recorder.ringcalls):
+        the player's own transcript, and teammates' lines the hub lets this key see. The hub is not asked while a game
+        runs. {"games": [{g, calls: [{t, by, mapCheck, mapOpenAt, called, at?, who?, text?}]}]}."""
+        from pcs_recorder import ringcalls, squadpaths, comms
+        it = self.find((q.get("id") or [""])[0])
+        if not it:
+            raise RuntimeError("Recording not found")
+        scan, _ = scan_files(it["path"])
+        games = json.loads(scan.read_text(encoding="utf-8")).get("games", []) if scan else []
+        tr = comms.transcript_of(it["path"])
+        own = tr["segments"] if tr else None              # the recording player's own words (made on this PC)
+        me = {ringcalls.slug((tr or {}).get("speaker") or ""), ringcalls.slug(self.auto.s.player if self.auto else "")}
+        url = self.auto.s.hub_url if self.auto else ""
+        try:
+            calm = not self._game_running()
+        except Exception:
+            calm = False
+        mates, owns = {}, {}
+        for i, g in enumerate(games):
+            j = ringcalls.jump_of(g)
+            if not g.get("ringIntel") or j is None or not url or not calm:
+                continue
+            got = squadpaths.game_comms(url, Path(it["path"]).stem, j)
+            if got is None:
+                mates[i] = None
+                continue
+            # the recording's player = whoever sent its scan to the hub (the coach reviewing a player's file: that
+            # player, whose own lines then come from the hub); everyone else of the squad is a teammate
+            rec_by = {ringcalls.slug(got["owner"])} if got.get("owner") else set()
+            who = rec_by or me
+            mates[i] = [x for x in got["lines"] if ringcalls.slug(x["player"]) not in who | me]
+            if own is None and rec_by and not rec_by & me:
+                owns[i] = [x for x in got["lines"] if ringcalls.slug(x["player"]) in rec_by] or None
+        return {"games": ringcalls.check_recording(games, own, mates, owns)}
+
     # ------------------------------------------------------------- hub backup copy (coach's hub key only)
     @property
     def hubbackup(self):
@@ -1820,6 +1857,8 @@ class Server:
                         return self._json(b.poi_names())
                     if path == "/api/squadpaths":                # teammates' paths on the map (minimap.js)
                         return self._json(b.squad_paths(q))
+                    if path == "/api/ringcalls":                 # ring console scans: called out? (pcs_recorder.ringcalls)
+                        return self._json(b.ring_calls(q))
                     if path.startswith("/talk/"):               # review talk from the hub (downloaded once)
                         return self._video(None, str(b.watch.audio(path.split("/")[2])))
                     if path.startswith("/audio/"):

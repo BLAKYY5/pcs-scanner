@@ -449,6 +449,44 @@ def attach_reveals(games, reads):
     return games
 
 
+# Ring console reveal -> did the recording player look at the map? (coach's question 2, 21 Nov 2026)
+MAP_OPEN_S = 20.0         # the map opened within this many seconds after the feed line counts as "looked"
+MAP_OPEN_BEFORE = 10.0    # ... or up to this long before it: using a console shows the map (the line comes after)
+# Measured on 13 reveal lines of 3 recordings (7, 17, 18 Nov): when the player opened the map for the reveal it was
+# 10 s before to 12 s after the line; the other first opens came 24, 26, 50 and 113 s later (looked for something else).
+
+
+def _dead_at(g, t):
+    """The recording player was dead (spectating or out) at t: an own death before t and no own respawn since."""
+    deaths = [d for d in g.get('ownDeaths') or [] if d <= t + 0.5]
+    if not deaths: return False
+    back = [r['t'] for r in g.get('respawns') or [] if r.get('who') == 'self' and isinstance(r.get('t'), (int, float))]
+    return not any(max(deaths) < b <= t for b in back)
+
+
+def check_map_opens(games, map_times):
+    """For each feed reveal of each game (games[].ringIntel), whether the recording player opened the full map:
+    mapOpenAt = the first full-map keyframe from MAP_OPEN_BEFORE s before the line to the game's end (None: never),
+    mapCheck = 'opened' (within MAP_OPEN_S s), 'notOpened', 'dead' (dead at the line: the feed is the spectated
+    player's, their "You" is not the recording player; spectatedYou marks such a line), 'died' (died within
+    MAP_OPEN_S s, map not opened before). map_times: times of the full-map keyframes (scan events kind 'map')."""
+    M = sorted(map_times)
+    for i, g in enumerate(games):
+        end = g.get('tEndGame') or (games[i + 1]['tStart'] if i + 1 < len(games) else float('inf'))
+        for x in g.get('ringIntel') or []:
+            t = x['t']
+            seen = [m for m in M if t - MAP_OPEN_BEFORE <= m <= end + 2]
+            x['mapOpenAt'] = seen[0] if seen else None
+            if _dead_at(g, t):
+                x['mapCheck'] = 'dead'
+                if x.get('by') == 'self': x['spectatedYou'] = True
+                continue
+            if seen and seen[0] <= t + MAP_OPEN_S: x['mapCheck'] = 'opened'; continue
+            died = [d for d in g.get('ownDeaths') or [] if t < d <= t + MAP_OPEN_S]
+            x['mapCheck'] = 'died' if died else 'notOpened'
+    return games
+
+
 def attach(games, reads):
     """Adds ringCircles (per stage and phase), ringEnds (end circle per ring) and ringSpeed to each game."""
     for i, g in enumerate(games):
