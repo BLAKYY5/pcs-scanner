@@ -4195,6 +4195,7 @@ def test_crash_reports_from_the_recorder():
         obs.start = lambda: None
         obs.elapsed = lambda: None
         crash.R.sent.clear()
+        clock["t"] += 31                                   # a failed start is tried again after 30 s
         r.tick(); n = len(sent)
         clock["t"] += 31; r.tick(); r.tick()
         assert len(sent) == n + 1 and "isn't recording" in sent[-1]["error"], sent[-1]
