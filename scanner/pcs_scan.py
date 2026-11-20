@@ -495,7 +495,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                     hint = R[-1][2] if R[-1][1] == d['map'] and t - R[-1][0] < 90 else None    # same ring a moment ago
                     try: rr = pcs_ring.read(view_map(img) if st else img, mr.cache[1], hint)
                     except Exception: rr = None
-                    if rr and (rr['cur'] or rr['next']): perf.setdefault('_rings', []).append((round(t, 2), d['map'], rr))
+                    if rr and (rr['cur'] or rr['next'] or rr.get('reveal')): perf.setdefault('_rings', []).append((round(t, 2), d['map'], rr))
                 if t - icons_at >= ICONS_EVERY:    # care packages and strongholds (pcs_mapicons)
                     icons_at = t
                     try: ic = pcs_mapicons.read(view_map(img) if st else img, mr.cache[1], pcs_mapicons.SCALE_43 if st else 1.0)
@@ -951,7 +951,8 @@ def main():
                       '_rpLines', '_rpSeen', '_feed'):
                 if k in perf: perf[k] = drop_skipped(perf[k], skip)
             own_reads = drop_skipped(own_reads, skip)
-        try: pcs_ring.attach(games, perf.pop('_rings', []))               # ring circles per stage, ring ends, speed
+        ring_reads = perf.pop('_rings', [])
+        try: pcs_ring.attach(games, ring_reads)               # ring circles per stage, ring ends, speed
         except Exception as e: perf['ringError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_mapicons.attach(games, perf.pop('_icons', []))         # care packages (after the ring ends), strongholds
         except Exception as e: perf['mapIconsError'] = f'{type(e).__name__}: {e}'[:200]
@@ -1014,6 +1015,8 @@ def main():
         for i, gm in enumerate(games):       # ring console reveals in the feed: the squad knew the next ring early
             try: gm['ringIntel'] = HUD.ring_intel(feed_lines, gm['tStart'] - 60, games[i + 1]['tStart'] if i + 1 < len(games) else float('inf'))
             except Exception as e: perf['ringIntelError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_ring.attach_reveals(games, ring_reads)     # the revealed ring as a green disc on the full map
+        except Exception as e: perf['ringRevealError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_bans.attach(games, perf.pop('_bans', []), HUD.STRETCH)    # legends banned before each game (Ranked Diamond+)
         except Exception as e: perf['bansError'] = f'{type(e).__name__}: {e}'[:200]
         if skip:            # the skipped games: a minimal entry each, no sound cue of theirs
