@@ -2871,6 +2871,47 @@ def test_ring_console_reveal_line():
     assert HUD.ring_intel(lines, 0, 800) == [{'t': 130.0}, {'t': 400.0}]
 
 
+def test_ring_console_who_and_map_open():
+    """Who used the console: "You revealed..." (the shape of "You", 74-77 px before the fixed words) = the recording
+    player, a wider name = a teammate, a first word running into the picture's edge = unsure; ring_intel keeps the
+    answer of the captures. Then: did the player open the full map within 20 s (or while using the console)? A line
+    seen while dead is the spectated player's feed (their "You")."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD, pcs_ring
+    T, Y = HUD._ring_reveal_template(), HUD._you_template()
+    assert Y is not None and Y.shape == (14, 28)
+
+    def line(first, gap_to_words, x0=10):        # a saved line picture: first word, "revealed" block, the fixed words
+        a = np.full((22, x0 + gap_to_words + 200, 3), 30, np.uint8)
+        put = lambda x, w: a.__setitem__((slice(4, 18), slice(x, x + w.shape[1])), (120 + 100 * w)[..., None].astype(np.uint8))
+        put(x0, first)
+        blk = np.zeros((14, 40), np.float32); blk[3:11, ::3] = 1        # stands in for "revealed"
+        put(x0 + gap_to_words - 45, blk)
+        put(x0 + gap_to_words, T)
+        return a
+    assert HUD.ring_reveal(line(Y, 75)) >= 0.9
+    assert HUD.ring_reveal_by(line(Y, 75)) == 'self'
+    name = np.zeros((14, 70), np.float32); name[3:11, ::2] = 1
+    assert HUD.ring_reveal_by(line(name, 118)) == 'mate'
+    assert HUD.ring_reveal_by(line(name[:, :28], 75)) == 'mate'              # a short name: not the shape of "You"
+    assert HUD.ring_reveal_by(line(name, 118, x0=0)) is None                 # runs into the picture's left edge
+    lines = [{'t': 100.0, 'ringReveal': 0.9, 'ringRevealBy': 'self'}, {'t': 102.0, 'ringReveal': 0.8},
+             {'t': 300.0, 'ringReveal': 0.9, 'ringRevealBy': 'mate'}, {'t': 301.0, 'ringReveal': 0.9, 'ringRevealBy': 'self'},
+             {'t': 500.0, 'ringReveal': 0.9, 'ringRevealBy': 'mate'}]
+    assert HUD.ring_intel(lines, 0, 1000) == [{'t': 100.0, 'by': 'self'}, {'t': 300.0}, {'t': 500.0, 'by': 'mate'}]
+    # map opened? (map keyframe times from the scan's events)
+    g = {'tStart': 0.0, 'tEndGame': 900.0, 'ownDeaths': [600.0, 800.0], 'respawns': [{'who': 'self', 't': 700.0}],
+         'ringIntel': [{'t': 100.0, 'by': 'self'}, {'t': 200.0}, {'t': 300.0}, {'t': 590.0}, {'t': 650.0, 'by': 'self'},
+                       {'t': 720.0}, {'t': 850.0}]}
+    maps = [95.0, 96.0, 230.0, 780.0]
+    pcs_ring.check_map_opens([g, {'tStart': 1000.0}], maps)
+    got = [(x['t'], x['mapCheck'], x['mapOpenAt']) for x in g['ringIntel']]
+    assert got == [(100.0, 'opened', 95.0), (200.0, 'notOpened', 230.0), (300.0, 'notOpened', 780.0), (590.0, 'died', 780.0),
+                   (650.0, 'dead', 780.0), (720.0, 'notOpened', 780.0), (850.0, 'dead', None)], got
+    assert g['ringIntel'][4].get('spectatedYou') and 'spectatedYou' not in g['ringIntel'][5]
+
+
 def test_highlights_key_plays():
     """pcs_highlights: the player's own takedowns need two sources (kill line in his colour + kills number, a fight or
     damage); a line captured twice counts once; a kill line the kills number did not follow is not his; a knock and its

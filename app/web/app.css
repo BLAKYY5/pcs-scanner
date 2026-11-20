@@ -200,6 +200,15 @@ select.label:disabled{opacity:.5;cursor:default}
 .tick.knock::before{content:"";position:absolute;left:50%;top:-7px;width:8px;height:8px;margin-left:-4px;border:2px solid #8a877f;background:var(--bg);box-sizing:border-box;pointer-events:none}
 .tick.knock:hover::before{background:#8a877f}
 .ev.respawn i,.legend i.respawn{background:transparent!important;border:2px solid var(--respawn)}
+/* ring console scans on the rings lane: green round head; a miss (map not opened / not called out): orange square head */
+.tick.ringscan,.tick.ringmiss{width:2px;margin-left:-1px;top:9px;bottom:3px;opacity:1;z-index:2}
+.tick.ringscan{background:#7ed957}
+.tick.ringscan::before{content:"";position:absolute;left:50%;top:-7px;width:10px;height:10px;margin-left:-5px;border-radius:50%;border:2px solid #7ed957;background:var(--bg);box-sizing:border-box;pointer-events:none}
+.tick.ringmiss{background:#f08a3c;z-index:3}
+.tick.ringmiss::before{content:"";position:absolute;left:50%;top:-7px;width:9px;height:9px;margin-left:-4.5px;border:2px solid #f08a3c;background:#f08a3c;box-sizing:border-box;pointer-events:none}
+.tick.ringscan:hover,.tick.ringmiss:hover{box-shadow:0 0 0 2px rgba(240,138,60,.35)}
+.legend i.ringscan{background:transparent!important;border:2px solid #7ed957;border-radius:50%}
+.legend i.ringmiss{background:#f08a3c!important;border-radius:1px}
 .mk.heal,.mk.ult,.mk.tac{width:8px;height:8px;border-width:1px;top:78%;font-size:0}   /* heals and abilities: small, low in the lane */
 .mk.heal{background:#5fd0c8}.mk.ult{background:#4aa3ff;width:10px;height:10px;border-radius:2px;transform:translate(-50%,-50%) rotate(45deg)}.mk.tac{background:#9db8d9;top:22%}
 .mk.lowammo,.mk.noheals{width:8px;height:8px;border-width:1px;top:50%;font-size:0;border-radius:1px}   /* ammo / heals (pcs_ammo) */

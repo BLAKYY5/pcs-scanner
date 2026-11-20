@@ -568,7 +568,7 @@ async function scan(ids) {
 
 /* ------------------------------------------------------------------ review */
 const HEALN = {cell: 'Shield cell', battery: 'Shield battery', syringe: 'Syringe', medkit: 'Med kit', phoenix: 'Phoenix kit'};   // game items: English in every language
-const KIND = {select: ['S', t('Legend select')], drop: ['D', t('Drop map')], start: ['G', t('Game start')], jump: ['J', t('Jumped')], land: ['L', t('Landed')], ring: ['R', t('Ring')], ringclose: ['R', t('Ring')], feed: ['', t('Kill feed')], respawn: ['', t('Respawn')], knock: ['', t('Knocked')], mark: ['★', t('Your mark')], mute: ['', t('Mute')], fight: ['', t('Fight')], call: ['!', t('Loud call')], scanfight: ['', t('Fight')], ringout: ['', t('Outside the ring')], heal: ['', t('Heal')], ult: ['', t('Ultimate')], tac: ['', t('Tactical')], lowammo: ['', t('Low on ammo')], noheals: ['', t('Out of heals')]};
+const KIND = {select: ['S', t('Legend select')], drop: ['D', t('Drop map')], start: ['G', t('Game start')], jump: ['J', t('Jumped')], land: ['L', t('Landed')], ring: ['R', t('Ring')], ringclose: ['R', t('Ring')], feed: ['', t('Kill feed')], respawn: ['', t('Respawn')], knock: ['', t('Knocked')], mark: ['★', t('Your mark')], mute: ['', t('Mute')], fight: ['', t('Fight')], call: ['!', t('Loud call')], scanfight: ['', t('Fight')], ringout: ['', t('Outside the ring')], heal: ['', t('Heal')], ult: ['', t('Ultimate')], tac: ['', t('Tactical')], lowammo: ['', t('Low on ammo')], noheals: ['', t('Out of heals')], ringscan: ['', t('Ring scanned')], ringmiss: ['', t('Ring scanned')]};
 const TRACKN = {game: t('Game sound'), discord: t('Voice app'), mic: t('Microphone')};
 const VOICE_NAMES = {discord: 'Discord', teamspeak: 'TeamSpeak'};
 function voiceName(s) {          /* the voice app recorded on track 2, as the player calls it */
@@ -697,6 +697,8 @@ function buildEvents(d) {
       else if (a.kind === 'tactical') ev.push({t: a.t, k: 'tac', g: gi, title: t('Tactical used'), sub: who, laneOnly: true});
     });
     (g.ammoEvents || []).forEach(e => { const x = ammoEvent(e, gi); if (x) ev.push(x); });
+    // ring console scans (feed line "... revealed the next ring on map"): did the player open the map? (scanner)
+    (g.ringIntel || []).forEach(x => { if (x && typeof x.t === 'number') ev.push(...ringScanEvents(x, gi)); });
   });
   (d.marks || []).forEach(m => {
     if (m.kind === 'mark') ev.push({t: m.t, k: 'mark', title: t('Marked moment'), sub: t('hotkey pressed in game')});
@@ -774,6 +776,37 @@ function ringOutEvent(s, gi) {
   return {t: s.t0, t1: s.t1, k: 'ringout', g: gi, title: t('Outside the ring'),
           sub: [fmtT(Math.max(0, s.t1 - s.t0)), typeof s.damage === 'number' ? t('about {n} damage', {n: s.damage}) : ''].filter(Boolean).join(' · ')};
 }
+/* a ring console scan of the squad (scan games[].ringIntel: t, by self | mate, mapOpenAt, mapCheck): one 'Ring scanned'
+   event, and a miss for the coach when the recording player did not open the full map within 20 s of it
+   (mapCheck 'notOpened'; dead or dying players are left alone) */
+function ringScanEvents(x, gi) {
+  const self = x.by === 'self' && !x.spectatedYou;
+  const by = self ? t('by you') : x.by ? t('by a teammate') : '';
+  const opened = typeof x.mapOpenAt === 'number' ? Math.max(0, x.mapOpenAt - x.t) : null;
+  const map = x.mapCheck === 'opened' ? t('map opened after {time}', {time: fmtT(opened || 0)}) :
+    x.mapCheck === 'dead' ? t('you were dead') : x.mapCheck === 'died' ? t('you died just after') : '';
+  const out = [{t: x.t, k: 'ringscan', g: gi, title: t('Ring scanned'), sub: [by, map].filter(Boolean).join(' · '), scan: x}];
+  if (x.mapCheck === 'notOpened')
+    out.push({t: x.t, k: 'ringmiss', g: gi, title: t('Ring scanned · map not opened'),
+              sub: opened != null ? t('opened {time} later', {time: fmtT(opened)}) : t('not opened again in this game')});
+  return out;
+}
+/* the callout check (pcs_recorder.ringcalls, /api/ringcalls): a ring / zone word said by the one who scanned, from
+   the comms transcripts we may read (own; teammates' through the hub). Only a known "no" adds a miss. */
+async function ringCalls(d) {
+  if (!(d.games || []).some(g => (g.ringIntel || []).length)) return;
+  let r; try { r = await api('/api/ringcalls?id=' + encodeURIComponent(d.id)); } catch (e) { return; }
+  if (!RV || RV.d !== d || !r || !Array.isArray(r.games)) return;
+  r.games.forEach(gg => (gg.calls || []).forEach(c => {
+    const scan = RV.ev.find(e => e.k === 'ringscan' && e.g === gg.g && Math.abs(e.t - c.t) < 0.5);
+    if (c.called === true && scan) scan.sub = [scan.sub, t('called out: “{text}”', {text: c.text || ''})].filter(Boolean).join(' · ');
+    if (c.called === false)
+      RV.ev.push({t: c.t, k: 'ringmiss', g: gg.g, title: t('Ring scanned · not called out'),
+                  sub: c.by === 'self' ? t('no ring or zone word in your comms') : c.by === 'mate' ? t('no ring or zone word from your teammates') : t('no ring or zone word from the squad')});
+  }));
+  RV.ev.sort((a, b) => a.t - b.t);
+  drawTimeline(); drawSide();
+}
 /* one knock of the recording player (scan field ownKnocks): 'You were knocked', and whether he got up */
 function knockEvent(k, gi) {
   const long = typeof k.end === 'number' && k.end > k.t ? fmtT(k.end - k.t) : '';
@@ -824,7 +857,7 @@ async function renderReview(id) {
             ${commsOf(d).length ? '<div class="lane" id="laneC"><span class="lane-label">' + t('Your comms (text)') + '</span></div>' : ''}
           </div><div class="head-line" id="playhead" style="left:0"></div><div class="hover-time" id="hoverT" hidden></div></div>
           <div class="row between" style="margin-top:8px">
-            <div class="legend"><span><i style="background:#e6ad45"></i>${t('Game start')}</span><span><i style="background:#6aa0ff"></i>${t('Jump')}</span><span><i style="background:#5fd08f"></i>${t('Landing')}</span><span><i style="background:#c48bff"></i>${t('Ring')}</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>${t('We knocked / killed')}</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>${t('We went down')}</span><span><i class="respawn"></i>${t('Respawned')}</span><span><i style="background:#ffd60a"></i>${t('Highlight')}</span><span><i style="background:rgba(95,208,143,.45)"></i>${t('Fight won')}</span><span><i style="background:rgba(138,135,127,.5)"></i>${t('Fight lost')}</span><span><i style="background:rgba(224,98,58,.45)"></i>${t('Outside the ring')}</span><span><i style="background:#e6ad45;border-radius:2px"></i>${t('Loud game sound (likely fight)')}</span><span><i style="background:#6aa0ff"></i>${t('Loud call')}</span></div>
+            <div class="legend"><span><i style="background:#e6ad45"></i>${t('Game start')}</span><span><i style="background:#6aa0ff"></i>${t('Jump')}</span><span><i style="background:#5fd08f"></i>${t('Landing')}</span><span><i style="background:#c48bff"></i>${t('Ring')}</span><span><i style="background:var(--accent);border-radius:2px;width:4px"></i>${t('We knocked / killed')}</span><span><i style="background:#8a877f;border-radius:2px;width:4px"></i>${t('We went down')}</span><span><i class="respawn"></i>${t('Respawned')}</span><span><i style="background:#ffd60a"></i>${t('Highlight')}</span><span><i style="background:rgba(95,208,143,.45)"></i>${t('Fight won')}</span><span><i style="background:rgba(138,135,127,.5)"></i>${t('Fight lost')}</span><span><i style="background:rgba(224,98,58,.45)"></i>${t('Outside the ring')}</span><span><i style="background:#e6ad45;border-radius:2px"></i>${t('Loud game sound (likely fight)')}</span><span><i style="background:#6aa0ff"></i>${t('Loud call')}</span>${(d.games || []).some(g => (g.ringIntel || []).length) ? `<span><i class="ringscan"></i>${t('Ring scanned')}</span><span><i class="ringmiss"></i>${t('Ring scan missed')}</span>` : ''}</div>
             <div class="row"><select id="speed" style="width:auto;padding:4px 8px">${[0.25, 0.5, 1, 1.5, 2, 4].map(s => `<option value="${s}" ${s === 1 ? 'selected' : ''}>${s}×</option>`).join('')}</select>
               <button class="btn small" id="rvTheatre" title="${t('Video across the whole window (T)')}">${t('Theatre')}</button><button class="btn small" id="rvFull" title="${t('Full screen (F)')}">${t('Full screen')}</button></div>
           </div>
@@ -858,7 +891,8 @@ async function renderReview(id) {
   $('#rvTheatre').onclick = () => theatre(); theatre(theatreOn(), true);
   setupInk(v);
   loadNotes(d.id);
-  if (window.reviewExtras) reviewExtras(d, v);                          // session bookmarks, review talk (review-extras.js)
+  if (window.reviewExtras) reviewExtras(d, v);
+  ringCalls(d);                                                         // ring scans: called out? (comms transcripts)                          // session bookmarks, review talk (review-extras.js)
   if (window.minimapSetup) minimapSetup(d, v);                          // Map panel: your path on the game's minimap (minimap.js)
   if (window.clipSetup) clipSetup(d, v);                                // Clip for Discord (clip.js)
 }
@@ -913,8 +947,11 @@ function drawTimeline() {
       `<i class="sqt" data-t="${at}" style="left:${pct(at)}" title="${fmtT(at)} · ${n === 1 ? t('1 squad left') : t('{n} squads left', {n})}"></i>`).join('')).join('');
   $('#laneE').innerHTML = `<span class="lane-label">${[t('Start · jump · landing · rings'), RV.ev.some(e => USEK.includes(e.k)) ? t('heals · abilities') : '', RV.ev.some(e => AMMOK.includes(e.k)) ? t('ammo') : ''].filter(Boolean).join(' · ')}</span>` + RV.ev.filter(e => e.k === 'ringout').map(e =>
     `<div class="ringout" data-t="${e.t}" style="left:${pct(e.t)};width:${pct(Math.max(1, e.t1 - e.t))}" title="${fmtT(e.t)} · ${esc(e.title)} · ${esc(e.sub)}"></div>`).join('') +
-    RV.ev.filter(e => !['feed', 'respawn', 'knock', 'mark', 'mute', 'fight', 'call', 'scanfight', 'ringout'].includes(e.k)).map(e =>
-    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.tip || e.sub) : ''}">${KIND[e.k][0]}</button>`).join('');
+    RV.ev.filter(e => !['feed', 'respawn', 'knock', 'mark', 'mute', 'fight', 'call', 'scanfight', 'ringout', 'ringscan', 'ringmiss'].includes(e.k)).map(e =>
+    `<button class="mk ${e.k}${e.after ? ' after' : ''}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.tip || e.sub) : ''}">${KIND[e.k][0]}</button>`).join('') +
+    // ring console scans: a green tick with a round head; a miss (map not opened / not called out): orange, square head
+    RV.ev.filter(e => e.k === 'ringscan' || e.k === 'ringmiss').map(e =>
+    `<div class="tick ${e.k}" data-t="${e.t}" style="left:${pct(e.t)}" title="${fmtT(e.t)} · ${esc(e.title)}${e.sub ? ' · ' + esc(e.sub) : ''}"></div>`).join('');
   const lm = $('#laneM');
   if (lm) {
     const marks = RV.d.marks || [], spans = [], open = {};
@@ -976,7 +1013,7 @@ function drawSide() {
     RV.ev.forEach((e, i) => {
       if (e.g != null && e.g !== g) { g = e.g; const sp = RV.spans[g]; html += `<div class="gamehead">${t('Game {n} · {map}', {n: g + 1, map: esc(mapName(sp.map))})}</div>`; }
       if (e.laneOnly) return;
-      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff', scanfight: e.result === 'won' ? '#5fd08f' : '#e6ad45', ringout: '#e0623a', heal: '#5fd0c8', ult: '#4aa3ff', tac: '#9db8d9', lowammo: '#e6ad45', noheals: '#e0623a'}[e.k];
+      const col = e.lost ? '#8a877f' : {select: '#e6ad45', start: '#e6ad45', drop: '#e6ad45', jump: '#6aa0ff', land: '#5fd08f', ring: '#c48bff', ringclose: '#8f5ee0', feed: 'var(--accent)', respawn: 'var(--respawn)', mark: '#f1efea', mute: '#6d6a63', fight: '#e6ad45', call: '#6aa0ff', scanfight: e.result === 'won' ? '#5fd08f' : '#e6ad45', ringout: '#e0623a', heal: '#5fd0c8', ult: '#4aa3ff', tac: '#9db8d9', lowammo: '#e6ad45', noheals: '#e0623a', ringscan: '#7ed957', ringmiss: '#f08a3c'}[e.k];
       html += `<div class="ev${e.k === 'respawn' ? ' respawn' : ''}" data-i="${i}" data-t="${e.t}"><time>${fmtT(e.t)}</time><i style="background:${col}"></i><span><b>${esc(e.title)}</b>${e.sub ? `<small${e.tip ? ` title="${esc(e.tip)}"` : ''}>${esc(e.sub)}</small>` : ''}</span></div>`;
     });
     body.innerHTML = html || '<div class="empty">' + t('No events found.') + '</div>';

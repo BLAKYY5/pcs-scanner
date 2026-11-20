@@ -202,3 +202,44 @@ def get(url: str, *, game_key: str = "", recording: str = "", jump: float | None
         mp = next((g["map"] for g in games if g["gameKey"] == game_key and g.get("map")), None)
         return {"available": True, "gameKey": game_key, "map": mp, "offline": offline,
                 "players": sorted(players, key=lambda p: p["player"].lower())}
+
+
+def game_comms(url: str, recording: str, jump: float) -> dict | None:
+    """What the players said in the game of our recording whose jump is at `jump` s, as the hub lets this key see it
+    (`/api/replay/<gameKey>` -> `comms`: a teammate's lines only when they said yes to transcripts and share their mic
+    track; the coach sees every line). {"owner": the player who sent this recording's scan (the coach reviewing a
+    player's file: that player), "lines": [{start, end, text, player}] in OUR recording's seconds (game time + jump)},
+    or None when the hub can't say (no hub or key, game not on the hub, offline). Cached per game for LIST_TTL
+    (offline: the last copy)."""
+    if not url or not hub.get_key():
+        return None
+    with _lock:
+        try:
+            lists, offline = _lists(url)
+        except (hub.HubError, ValueError, OSError):
+            return None
+        mine = [g for g in lists.get("games", []) if g["file"] == recording and abs(g["jumpAt"] - jump) <= SAME_JUMP_S]
+        if not mine:
+            return None
+        gk = mine[0]["gameKey"]
+        name = "comms-" + re.sub(r"[^A-Za-z0-9_-]+", "_", gk)[:80] + ".json"
+        c = _read(name)
+        fresh = c.get("url") == url and time.time() - float(c.get("at") or 0) < LIST_TTL
+        if not fresh and not offline:
+            try:
+                d = hub.get_json(url, "/api/replay/" + gk, timeout=10)
+                lines = [x for x in (d.get("comms") if isinstance(d, dict) else None) or [] if isinstance(x, dict)]
+                c = {"url": url, "at": time.time(), "lines": lines}
+                _write(name, c)
+            except (hub.HubError, ValueError, OSError) as e:
+                log.info("game comms not read: %s", e)
+        if c.get("url") != url or not isinstance(c.get("lines"), list):
+            return None
+        out = []
+        for x in c["lines"]:
+            t, e = _num(x.get("t")), _num(x.get("end"))
+            if t is None or not isinstance(x.get("text"), str):
+                continue
+            out.append({"start": round(t + jump, 2), "end": round((e if e is not None else t) + jump, 2),
+                        "text": x["text"], "player": str(x.get("player") or "")})
+        return {"owner": mine[0]["player"], "lines": out}

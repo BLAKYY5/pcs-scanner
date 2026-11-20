@@ -1017,6 +1017,8 @@ def main():
             except Exception as e: perf['ringIntelError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ring.attach_reveals(games, ring_reads)     # the revealed ring as a green disc on the full map
         except Exception as e: perf['ringRevealError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_ring.check_map_opens(games, [e['t'] for e in events if e['kind'] == 'map'])   # reveal -> map opened?
+        except Exception as e: perf['ringMapError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_bans.attach(games, perf.pop('_bans', []), HUD.STRETCH)    # legends banned before each game (Ranked Diamond+)
         except Exception as e: perf['bansError'] = f'{type(e).__name__}: {e}'[:200]
         if skip:            # the skipped games: a minimal entry each, no sound cue of theirs

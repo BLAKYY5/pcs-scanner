@@ -3381,6 +3381,7 @@ class SquadHub:
              "samples": [[150, 0, None, False, 5, 5, 0, 0], [221, 0, None, False, 1000, -2000, 0, 0], [222, 0, None, False, 1010, -2010, 0, 0],
                       [223, 0, None, True, 0, 0, 0, 0], [240, 0, None, False, 1100, -2100, 0, 0], [500, 0, None, False, 9, 9, 0, 0]]}]}
         self.files = {"7": me_scan, "9": moe_scan}
+        self.replay = {}            # gameKey -> /api/replay answer (comms lines in game time)
         self.timings = [
             {"id": "tm-a", "data": {"gameKey": "g-1", "uploadedBy": "Blakey", "map": "SP", "recording": {"file": self.REC_ME, "jumpAt": 100.0}}},
             {"id": "tm-b", "data": {"gameKey": "g-1", "uploadedBy": "Moe", "map": "SP", "recording": {"file": self.REC_MOE, "jumpAt": 220.0}}},
@@ -3416,6 +3417,8 @@ class SquadHub:
                 parts = self.path.split("/")
                 if len(parts) == 5 and parts[:3] == ["", "api", "scans"] and parts[4] == "file" and parts[3] in hub.files:
                     return self._send(200, hub.files[parts[3]])
+                if len(parts) == 4 and parts[:3] == ["", "api", "replay"] and parts[3] in hub.replay:
+                    return self._send(200, hub.replay[parts[3]])
                 return self._send(404, {"detail": "Not Found"})
 
         self.httpd = ThreadingHTTPServer(("127.0.0.1", 0), H)
@@ -4613,6 +4616,121 @@ def test_team_tracks_in_review_page():
     assert '"/teamtrack/"' in srv_py and 'it["teamAudio"]' in srv_py
     build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
     assert "pcs_recorder.teamtracks" in build
+
+
+def test_ring_calls_rules():
+    """pcs_recorder.ringcalls: a ring console scan is 'called out' when the one who scanned said a ring / zone word (EN or
+    FR) from 10 s before the feed line to 30 s after; 'not called out' only when that player's transcript is there;
+    a teammate's scan needs every teammate's transcript to say no; "You" on a spectated teammate's feed is theirs."""
+    from pcs_recorder import ringcalls as R
+    assert R.RING_WORDS.search("next Ring is north") and R.RING_WORDS.search("la zone est à l'est")
+    assert R.RING_WORDS.search("le cercle se ferme") and R.RING_WORDS.search("end zone Lotus")
+    assert not R.RING_WORDS.search("bring the shields") and not R.RING_WORDS.search("ringing") and not R.RING_WORDS.search("ozone")
+    sq3 = {"squad": [{"slot": 1}, {"slot": 2}, {"slot": 3}]}
+    g = {"select": sq3, "ringIntel": [
+        {"t": 100.0, "by": "self", "mapCheck": "opened", "mapOpenAt": 104.0},
+        {"t": 300.0, "by": "self", "mapCheck": "notOpened", "mapOpenAt": None},
+        {"t": 500.0, "by": "mate"}, {"t": 700.0}, {"t": 900.0, "by": "self", "spectatedYou": True}]}
+    own = [{"start": 95.0, "end": 97.0, "text": "I scan the ring"},            # said while scanning: 5 s before
+           {"start": 340.0, "end": 342.0, "text": "zone north"},               # 40 s after: too late
+           {"start": 705.0, "end": 707.0, "text": "nothing"}]
+    mates = [{"start": 520.0, "end": 522.0, "text": "La zone est au sud", "player": "Moe"},
+             {"start": 905.0, "end": 906.0, "text": "go go", "player": "Ana"}]
+    c = R.check(g, own, mates, 0, 2000)
+    assert [(x["t"], x["called"]) for x in c] == [(100.0, True), (300.0, False), (500.0, True), (700.0, False), (900.0, False)], c
+    assert c[0]["who"] == "self" and c[0]["text"] == "I scan the ring" and c[2]["player"] == "Moe"
+    assert c[4]["by"] == "mate" and c[1]["mapCheck"] == "notOpened"
+    # a teammate's scan with only one teammate's text (squad of 3): can't say no
+    c = R.check(g, own, [mates[0] | {"text": "go"}], 0, 2000)
+    assert [x["called"] for x in c][2:] == [None, None, None], c
+    # no transcripts at all: nothing known, nothing marked
+    assert [x["called"] for x in R.check(g, None, None, 0, 2000)] == [None] * 5
+    # lines of another game are not this game's
+    assert R.check(g, own, mates, 1000, 2000)[0]["called"] is False
+    games = [{"tStart": 50.0, **g}, {"tStart": 3000.0, "ringIntel": []}]
+    r = R.check_recording(games, own, {0: mates})
+    assert [x["g"] for x in r] == [0] and len(r[0]["calls"]) == 5
+    assert R.jump_of({"landing": {"exitAtExact": 12.5, "exitAt": 12}}) == 12.5 and R.jump_of({}) is None
+
+
+def test_ring_calls_from_the_hub():
+    """/api/ringcalls: the scan's ring console scans with the callout check: own transcript from this PC, teammates'
+    lines from the hub's replay of the same game (game time -> our recording's time), our own hub lines left out;
+    the review page shows the misses (map not opened, not called out) in Events and on the rings lane."""
+    from pcs_recorder import comms
+    hub = _fresh_hub()
+    fake = SquadHub()
+    # game time = our recording time - 100 (our jump); Blakey's own lines on the hub are ours: never a teammate's
+    fake.replay["g-1"] = {"comms": [{"t": 52.0, "end": 54.0, "player": "Moe", "text": "ring is north"},
+                                    {"t": 205.0, "end": 206.0, "player": "Blakey", "text": "zone zone"},
+                                    {"t": 210.0, "end": 211.0, "player": "Ana", "text": "rotate"}]}
+    folder = TMP / "ringcalls"
+    sd = folder / (SquadHub.REC_ME + ".scan")
+    sd.mkdir(parents=True, exist_ok=True)
+    rec = folder / (SquadHub.REC_ME + ".mp4")
+    rec.write_bytes(b"x" * 10)
+    (sd / (SquadHub.REC_ME + ".scan.json")).write_text(json.dumps({"games": [
+        {"tStart": 40.0, "landing": {"exitAtExact": 100.0}, "select": {"squad": [{}, {}, {}]},
+         "ringIntel": [{"t": 150.0, "by": "mate", "mapCheck": "opened", "mapOpenAt": 151.0},
+                       {"t": 305.0, "by": "mate", "mapCheck": "notOpened", "mapOpenAt": 340.0},
+                       {"t": 400.0, "by": "self", "mapCheck": "notOpened", "mapOpenAt": None}]}]}), encoding="utf-8")
+    comms.comms_path(rec).write_text(json.dumps({"kind": "comms", "speaker": "Blakey", "segments": [
+        {"start": 380.0, "end": 382.0, "text": "loot here"}]}), encoding="utf-8")
+    auto = _Auto(str(TMP / "ringcallrecs"))
+    auto.s.hub_url = fake.url
+    auto.s.player = "Blakey"
+    b = pcs_server.Backend(auto)
+    b._game_running = lambda: ""
+    b.add_paths([str(rec)])
+    vid = next(x["id"] for x in b.library() if os.path.normpath(x["path"]) == os.path.normpath(str(rec)))
+    srv = pcs_server.Server(b)
+    srv.start()
+    data = Path(os.environ["PCS_DATA_DIR"]) / "squad-cache"
+    try:
+        r = call(srv, f"/api/ringcalls?id={vid}")[1]               # no key yet: own transcript only
+        calls = r["games"][0]["calls"]
+        assert [x["called"] for x in calls] == [None, None, False] and not fake.calls, r
+        hub.set_key(GOOD_KEY)
+        calls = call(srv, f"/api/ringcalls?id={vid}")[1]["games"][0]["calls"]
+        # 150: Moe said "ring" 2 s after; 305: Ana and Moe have text (both teammates), no ring word -> no;
+        # 400: our own scan, our transcript has no ring word -> no (Blakey's hub line "zone zone" at 305 is ours)
+        assert [x["called"] for x in calls] == [True, False, False], calls
+        assert calls[0]["player"] == "Moe" and calls[0]["at"] == 152.0 and calls[1]["mapCheck"] == "notOpened"
+        assert "/api/replay/g-1" in fake.calls and not any(GOOD_KEY in c for c in fake.calls)
+        n = len(fake.calls)
+        call(srv, f"/api/ringcalls?id={vid}")                       # kept: not asked again at once
+        assert len(fake.calls) == n
+        # the coach reviewing Moe's recording (imported by hand, no transcript on this PC): Moe's own words come from
+        # the hub (Moe sent that recording's scan); Moe jumped at 220 s, his line at game time 52 = 272 s there
+        moe_rec = folder / (SquadHub.REC_MOE + ".mp4")
+        moe_rec.write_bytes(b"x" * 10)
+        msd = folder / (SquadHub.REC_MOE + ".scan")
+        msd.mkdir(exist_ok=True)
+        (msd / (SquadHub.REC_MOE + ".scan.json")).write_text(json.dumps({"games": [
+            {"tStart": 160.0, "landing": {"exitAtExact": 220.0}, "select": {"squad": [{}, {}, {}]},
+             "ringIntel": [{"t": 270.0, "by": "self", "mapCheck": "opened", "mapOpenAt": 271.0}]}]}), encoding="utf-8")
+        b.add_paths([str(moe_rec)])
+        mid = next(x["id"] for x in b.library() if os.path.normpath(x["path"]) == os.path.normpath(str(moe_rec)))
+        c = call(srv, f"/api/ringcalls?id={mid}")[1]["games"][0]["calls"]
+        assert c[0]["called"] is True and c[0]["who"] == "self" and c[0]["at"] == 272.0, c
+        b._game_running = lambda: "Apex"                            # a game runs: the hub is not asked
+        assert [x["called"] for x in call(srv, f"/api/ringcalls?id={vid}")[1]["games"][0]["calls"]] == [None, None, False]
+        assert call(srv, "/api/ringcalls?id=nope")[0] >= 400
+        assert call(srv, f"/api/ringcalls?id={vid}", token=False)[0] == 403
+    finally:
+        srv.stop()
+        fake.stop()
+        _fresh_hub()
+        shutil.rmtree(data, ignore_errors=True)
+    assert "ringIntel" in pcs_server.GAME_FIELDS and "ringReveals" in pcs_server.GAME_FIELDS
+    js = (Path(pcs_server.WEB) / "app.js").read_text(encoding="utf-8")
+    assert "function ringScanEvents" in js and "/api/ringcalls?id=" in js and "ringCalls(d);" in js
+    assert "t('Ring scanned · map not opened')" in js and "t('Ring scanned · not called out')" in js
+    css = (Path(pcs_server.WEB) / "app.css").read_text(encoding="utf-8")
+    assert ".tick.ringmiss" in css and ".tick.ringscan" in css
+    build = (Path(pcs_server.WEB).parent.parent / ".github" / "workflows" / "build.yml").read_text(encoding="utf-8")
+    app_py = (Path(pcs_server.WEB).parent / "pcs_app.py").read_text(encoding="utf-8")
+    assert "pcs_recorder.ringcalls" in build and "pcs_recorder.ringcalls" in app_py
 
 
 def test_comms_in_review_page():
