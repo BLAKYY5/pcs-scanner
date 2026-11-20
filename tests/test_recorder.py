@@ -4338,6 +4338,111 @@ def _scanner():
     return pcs_scan
 
 
+def test_wildcard_games_left_out():
+    """Coach, 21 Nov 2026: Wildcard games are ignored altogether. The scan keeps each one as a minimal entry (times,
+    map, mode, modeSeen, skipped "wildcard"), drops every read inside it before the readers work, makes no 60 fps reads
+    for it; a mode set by hand (--mode) wins. The app never scans a recording labelled Wildcard by hand, passes any
+    other label set by hand as --mode, and sends no mic track or transcript for a Wildcard-only recording."""
+    import subprocess
+    SCAN = _scanner()
+    import pcs_ring, pcs_mapicons, pcs_respawn, pcs_bars, pcs_minimap, pcs_usage, pcs_fights, pcs_ammo, pcs_highlights, pcs_bans
+    import pcs_hud as HUD
+
+    def games3():
+        out = []
+        for t, word in ((100.0, "ranked"), (2000.0, "wildcard"), (4000.0, "pubs")):
+            g = SCAN.new_game(t, "SP"); g.update(banner={"mode": word, "map": "SP"}, harvesters=[]); out.append(g)
+        return out
+    samples = [[float(t), 0, 300.0, False, None, None, None, None, False, False] for t in range(100, 5000, 50)]
+    refined = []
+    real = HUD.refine_phases, HUD.refine_landing
+    HUD.refine_phases = lambda path, segs, S: refined.append(("phases", S[0][0] if S else None))
+    HUD.refine_landing = lambda path, ld: refined.append(("landing", ld))
+    try:
+        games = SCAN.timeline(games3(), samples, "rec.mp4", [], None, [], [], [])
+    finally:
+        HUD.refine_phases, HUD.refine_landing = real
+    assert [g["mode"] for g in games] == ["ranked", "wildcard", "pubs"], [g["modeSeen"] for g in games]
+    assert len([r for r in refined if r[0] == "phases"]) == 2 and games[1]["ring"] == [] and games[1]["landing"] is None
+    W = SCAN.skip_windows(games)
+    assert W == [(max(1940.0, games[0]["tEndGame"]), 3940.0)], W
+    reads = [(1000.0, "a"), [1990.0, "b"], {"t": 2500.0}, 3000.0, (3950.0, "c"), {"t": 4100.0}, ("x",)]
+    assert SCAN.drop_skipped(reads, W) == [(1000.0, "a"), (3950.0, "c"), {"t": 4100.0}, ("x",)]
+    assert SCAN.drop_skipped(reads, []) is reads
+    # every reader copes with a skipped game that has no reads of its own
+    pcs_ring.attach(games, []); pcs_mapicons.attach(games, []); pcs_respawn.attach(games, [], samples)
+    pcs_bars.attach(games, [], samples); pcs_minimap.attach(games, []); pcs_usage.attach(games, [], [])
+    pcs_fights.attach(games, [], [], [], None); pcs_ammo.attach(games, [], []); pcs_bans.attach(games, [], False)
+    pcs_highlights.attach(games, [], [], [], None)
+    m = SCAN.minimal(games[1])
+    assert m["skipped"] == "wildcard" and m["mode"] == "wildcard" and m["modeSeen"]["mode"] == "wildcard", m
+    assert (m["tStart"], m["map"], m["drop"], m["harvesters"], m["ring"], m["landing"]) == (2000.0, "SP", None, [], [], None)
+    assert not ({"samples", "own", "fights", "respawns", "select", "banner"} & set(m)), sorted(m)
+    # a mode forced by hand: nothing skipped
+    forced = SCAN.timeline(games3(), samples, None, [], "ranked", [], [], [])
+    assert [g["mode"] for g in forced] == ["ranked"] * 3 and SCAN.skip_windows(forced) == []
+    assert forced[1]["modeSeen"]["mode"] == "wildcard"            # what the screen showed stays as data
+
+    # the app: labels set by hand
+    from pcs_recorder import comms, labels, runtime
+    v = make_file(TMP, f"Apex Legends_wc-{time.time_ns()}.mp4", 10)
+    assert labels.scan_mode(str(v)) is None and not labels.skips_scan(str(v))
+    seen = []
+    real_popen = runtime.subprocess.Popen
+    runtime.subprocess.Popen = lambda cmd, **kw: seen.append(cmd)
+    try:
+        for kind, mode in (("scrims", "scrim"), ("ranked", "ranked"), ("pubs", "pubs"), (None, None)):
+            labels.set_label(str(v), kind)
+            assert labels.scan_mode(str(v)) == mode
+            runtime.scan_process(str(v), str(TMP))
+            assert (seen[-1][-2:] == ["--mode", mode]) if mode else ("--mode" not in seen[-1]), seen[-1]
+    finally:
+        runtime.subprocess.Popen = real_popen
+    assert labels.skipped_games({"games": [{"skipped": "wildcard"}, {"mode": "ranked"}]}) == 1
+    assert labels.all_skipped({"games": [{"skipped": "wildcard"}]}) and not labels.all_skipped({"games": []})
+    assert not labels.all_skipped({"games": [{"skipped": "wildcard"}, {"mode": "pubs"}]})
+
+    # a recording labelled Wildcard by hand is never scanned (nor scanned again)
+    retention.INDEX_FILE.unlink(missing_ok=True)
+    s = settings.load(); s.folder = str(TMP / f"vids-{time.time_ns()}"); s.folder_path.mkdir(parents=True, exist_ok=True)
+    starts = []
+    r = Recorder(s, FakeOBS(s.folder_path), FakeHub(), FakeUI(), lambda p, o: starts.append(p), is_apex_running=lambda: False)
+    w = make_file(s.folder_path, "Apex Legends_wild.mp4", UNIT)
+    r.idx["w"] = retention.Entry(path=str(w), started=time.time(), status="recorded")
+    labels.set_label(str(w), "wildcard")
+    try:
+        r._begin_scan("w")
+        assert starts == [] and r.scan_proc is None and r.idx["w"].status == "skipped", vars(r.idx["w"])
+        assert r.idx["w"].note == "Wildcard: not scanned"
+        assert r.rescan("w") is False and starts == []
+        assert comms._wildcard_only(str(w))
+        labels.set_label(str(w), None)
+        assert not comms._wildcard_only(str(w))
+        out = w.with_suffix(".scan"); out.mkdir(exist_ok=True)
+        (out / (w.stem + ".scan.json")).write_text(json.dumps({"games": [{"tStart": 5.0, "mode": "wildcard",
+                                                                          "skipped": "wildcard"}]}), encoding="utf-8")
+        assert comms._wildcard_only(str(w))
+        # no mic track for a Wildcard-only recording
+        s.comms_consent, s.send_mic = True, True
+        w.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game", "discord", "mic"]}), encoding="utf-8")
+        import pcs_recorder.core as rcore
+        cut = []
+        real_x = rcore.extract_track
+        rcore.extract_track = lambda video, i, o: cut.append(o)
+        try:
+            r._add_extras(r.idx["w"])
+            assert cut == [], cut
+            (out / (w.stem + ".scan.json")).write_text(json.dumps({"games": [{"tStart": 5.0, "mode": "ranked"}]}),
+                                                       encoding="utf-8")
+            r._add_extras(r.idx["w"])
+            assert len(cut) == 1, cut
+        finally:
+            rcore.extract_track = real_x
+    finally:
+        labels.set_label(str(w), None)
+        labels.set_label(str(v), None)
+
+
 def test_scan_resumes_from_finished_chunks():
     """A scan stopped part-way (Apex started: the app stops it) goes on from the chunks it had finished, and the
     merged result is the same as one uninterrupted scan. Chunks are reused only for the same file and cuts; the

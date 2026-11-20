@@ -137,6 +137,16 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
   emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
+- **Wildcard games are left out** (coach, 21 Nov 2026: modified maps, rings, weapons, LTMs: "just ignore their data
+  altogether"). The mode is known only after the keyframe pass (the emblem is voted over the game's window), so those
+  frames are still read once; then `timeline` makes no 60 fps reads for the game (no clips asked on the team server),
+  every read inside it (`skip_windows`: 60 s before its start, not before the previous game ended, to 60 s before the
+  next game) is dropped before the readers attach, its feed lines leave `feed.json`, and the game stays as a minimal
+  entry (`minimal`: tStart, tEnd, tEndGame, clockStart, map, mode, modeSeen, rankedShare, `skipped: "wildcard"`,
+  empty drop / harvesters / ring / landing; top level `skippedGames`). The hub imports no game without a landing.
+  A label set by hand wins: the app passes it as `--mode` (scrim / ranked / pubs; such a scan runs on this PC, never
+  on the team server); labelled Wildcard by hand = not scanned at all (status `skipped`); a hand label other than
+  Wildcard on a recording with skipped games scans it again. No mic track or transcript for a Wildcard-only recording.
 - **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 and 4:3 stretched): the round emblem at
   the top right (x 2422..2539, y 8..123 at 1440p in a game; 134 px lower on the "waiting for players" screen). Pubs =
   red "unranked" emblem, Wildcard = teal; ranked shows a rank badge there instead. Compared as 16 x 16 colour cells on

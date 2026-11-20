@@ -514,12 +514,25 @@ class Backend:
             raise RuntimeError("Recording not found")
         labels.set_label(it["path"], label)
         a = self.auto
-        if a and getattr(a.rec, "youtube", None):
+        key = None
+        if a:
             key = next((k for k, e in a.rec.idx.items() if e.path and os.path.normcase(os.path.abspath(e.path)) ==
                         os.path.normcase(os.path.abspath(it["path"]))), None)
-            if key:
-                a.rec.youtube.relabelled(key)
+        if a and getattr(a.rec, "youtube", None) and key:
+            a.rec.youtube.relabelled(key)
+        if label and label != "wildcard" and key and labels.skipped_games(self._scan_of(it["path"])):
+            # the scan left Wildcard games out; the label set by hand wins: scanned again with that mode
+            if a.rec.rescan(key):
+                self.say(f"Labelled {labels.TITLE[label]}: scanned again with every game.")
         return label
+
+    @staticmethod
+    def _scan_of(path: str) -> dict | None:
+        try:
+            f = scan_files(path)[0]
+            return json.loads(f.read_text(encoding="utf-8")) if f else None
+        except Exception:
+            return None
 
     def mics(self) -> dict:
         from pcs_recorder import obs
@@ -566,7 +579,8 @@ class Backend:
             if scan:
                 try:
                     d = full = json.loads(scan.read_text(encoding="utf-8"))
-                    summary = {"games": [{"map": g.get("map"), "mode": g.get("mode")} for g in d.get("games", [])],
+                    summary = {"games": [{"map": g.get("map"), "mode": g.get("mode"), "skipped": g.get("skipped")}
+                                         for g in d.get("games", [])],
                                "recStart": d.get("recStart"), "feedLines": d.get("perf", {}).get("feedLines")}
                 except Exception:
                     summary = None
@@ -825,7 +839,12 @@ class Backend:
                     continue
                 with self.scan_lock:
                     p = self.scan_queue.pop(0)
-                    self.scan_now, self.scan_started = p, time.time()
+                    skip = labels.skips_scan(p)
+                    if not skip:
+                        self.scan_now, self.scan_started = p, time.time()
+                if skip:                                 # labelled Wildcard by hand: never scanned (coach, 21 Nov 2026)
+                    self.say(f"{Path(p).name} is labelled Wildcard: not scanned.")
+                    continue
                 self.say(f"Scanning {Path(p).name}…")
                 code = self._run_scan(scan_process(p, core.OUT))
                 if code is None:                         # a game started: stopped, goes on from there when it closes

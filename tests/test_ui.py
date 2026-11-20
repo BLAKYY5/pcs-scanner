@@ -3103,6 +3103,25 @@ HL_TAKEDOWNS = [{"t": 300.0, "kind": "knock", "sources": ["feed", "fight"]}, {"t
                 {"t": 602.0, "kind": "kill", "sources": ["counter", "damage"]}]
 
 
+def test_scan_mode_from_label_set_by_hand():
+    """A label set by hand wins over the scan (coach, 21 Nov 2026): the scanner is told the mode (--mode, before the
+    highlight rules), and a scan with a mode never goes to the team server (it can't be told)."""
+    import pcs_scan
+    seen = []
+    real = pcs_scan.main
+    pcs_scan.main = lambda: seen.append(list(sys.argv))
+    try:
+        core.run_scan(["x.mp4"], print, str(TMP / "mode-out"), mode="ranked")
+        core.run_scan(["x.mp4"], print, str(TMP / "mode-out"))
+    finally:
+        pcs_scan.main = real
+    a, b = seen
+    assert a[a.index("--mode") + 1] == "ranked" and a.index("--mode") < a.index("--highlights"), a
+    assert "--mode" not in b, b
+    src = (Path(__file__).resolve().parent.parent / "app" / "pcs_app.py").read_text(encoding="utf-8")
+    assert "if len(args) == 1 and not mode:" in src and "mode=mode" in src
+
+
 def test_highlight_settings_and_scan_rules():
     """Settings -> Highlights: three numbers, clamped, saved, sent to the scanner as --highlights; the scan process
     only reads them (never writes recorder.json)."""

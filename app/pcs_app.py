@@ -66,15 +66,18 @@ def headless_scan(args):
     out = OUT
     if '--out' in args:
         i = args.index('--out'); out = args[i + 1]; args = args[:i] + args[i + 2:]
+    mode = None
+    if '--mode' in args:                         # a label set by hand: this PC scans it (the team server can't be told)
+        i = args.index('--mode'); mode = args[i + 1]; args = args[:i] + args[i + 2:]
     os.makedirs(out, exist_ok=True)
     sys.stdout = sys.stderr = open(os.path.join(out, 'scan.log'), 'a', encoding='utf-8')
     try:
         res = None
-        if len(args) == 1:                       # opt-in: the team server scans it, this PC only if that fails
+        if len(args) == 1 and not mode:          # opt-in: the team server scans it, this PC only if that fails
             from pcs_recorder import serverscan
             res = serverscan.scan(args[0], out, say=lambda m: print(m, flush=True))
         if not res:
-            res = core.run_scan(args, print, out)
+            res = core.run_scan(args, print, out, mode=mode)
         print(f'done: {len(res)} result file(s)')
         return 0 if res else 2
     except Exception:

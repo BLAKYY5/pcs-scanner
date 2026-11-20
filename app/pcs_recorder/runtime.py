@@ -375,6 +375,13 @@ def scan_process(video: str, out: str) -> subprocess.Popen:
         cmd = [sys.executable, "--scan", video, "--out", out]
     else:
         cmd = [sys.executable, str(Path(__file__).resolve().parent.parent / "pcs_app.py"), "--scan", video, "--out", out]
+    try:                                    # a label set by hand wins over what the scan reads (Wildcard is not scanned)
+        from . import labels
+        mode = labels.scan_mode(video)
+    except Exception:
+        mode = None
+    if mode:
+        cmd += ["--mode", mode]
     return subprocess.Popen(cmd, creationflags=BELOW_NORMAL | NO_WINDOW if os.name == "nt" else 0)
 
 
