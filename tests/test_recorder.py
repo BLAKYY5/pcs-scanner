@@ -2166,6 +2166,8 @@ def test_ranked_drops_from_dropzone_markers():
     # Ranked's dropzone screen: one marker per squad (~400 px). A grid line cuts a marker in pieces (joined), the map's
     # small red dots are not markers, two touching markers read as one blob of twice the size.
     import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_scan as SCAN
     M = np.array([[0.1, 0], [0, 0.1], [0, 0]])          # panel px -> map %: 1000 px = 100 %
     red = [(200.0, 300.0, 400), (500.0, 500.0, 240), (500.0, 515.0, 90), (700.0, 700.0, 16), (800.0, 200.0, 820),
            (900.0, 900.0, 5000)]
