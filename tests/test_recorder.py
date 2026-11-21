@@ -3131,7 +3131,7 @@ def test_fights_and_ring_damage():
 
 def test_fights_third_party_enemy_up_after_our_kill():
     """7 Nov 6300 (21 Nov 2026): we knock and kill one enemy; a second enemy knocks the player just after our kill (his
-    line above ours in the same capture) and keeps shooting. His name shape is close to the first enemy's (names are
+    line above ours in the same capture, or up to 5 s later) and keeps shooting. His name shape is close to the first enemy's (names are
     read over moving scenery), so the fight counts one opponent, yet he was still up: no 'gunfire after opponents
     died' third party. The same enemy line older than our kill (below it) leaves the rule as it was."""
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
@@ -3146,9 +3146,9 @@ def test_fights_third_party_enemy_up_after_our_kill():
     yani, bee = '0' * 36, 'ff' * 6 + '0' * 24                    # 48 points apart: read as one name
     assert F._bits(yani, bee) <= F.OPP_SAME_BITS
     loud = np.full(int(400 / 0.05), -50.0, np.float32); loud[int(304 / 0.05):int(330 / 0.05)] = -10.0
-    def fight(bee_y):
+    def fight(bee_y, bee_t=304):
         g = [game()]
-        feed = [line(296, 'knock', sq(73), other, vs=yani, y=287), line(304, 'knock', other, sq(73), ks=bee, y=bee_y, w='car'),
+        feed = [line(296, 'knock', sq(73), other, vs=yani, y=287), line(bee_t, 'knock', other, sq(73), ks=bee, y=bee_y, w='car'),
                 line(304, 'kill', sq(73), other, vs=yani, y=330)]
         F.attach(g, feed, [], [], loud, 0.05)
         assert len(g[0]['fights']) == 1, g[0]['fights']
@@ -3156,6 +3156,8 @@ def test_fights_third_party_enemy_up_after_our_kill():
     f = fight(288)                                                 # his knock is newer than our kill
     assert f['opponents'] == 1 and not f['thirdParty'], f
     f = fight(372)                                                 # older than our kill: every opponent met died
+    assert f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+    f = fight(288, 310)                                            # 6 s later: maybe a new squad, the rule stands
     assert f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
 
 

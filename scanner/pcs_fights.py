@@ -30,7 +30,7 @@ player's damage dealt (`damageDealt`: their own damage number's rise during the 
 background behind a white name) are not ours. Third party: a new enemy name after the fight started (`new enemy`)
 once more than a squad's worth of names showed, an enemy we had not met knocking or killing one of us late in the
 fight, or shooting / hits still going on after every opponent we met died (not when an enemy line on one of us is
-newer than our last kill: that enemy was still up).
+newer than our last kill by at most UP_AFTER s: that enemy was still up).
 Checked by eye on the coach's recordings (kill-feed line images + the own card), dev / held-out split decided first:
 `pcs-handoff/checkset/checkset-fights.json`.
 """
@@ -188,6 +188,7 @@ Y_SAME = 15           # px: one line read at one place (its band's top wobbles ~
 DEAD_AFTER = 2.0      # s after an own death (spectating starts) the feed's colours may be another squad's
 END_AFTER = 5.0       # s after tEndGame
 THIN_SIG = 45         # a name shape with fewer points than this was half hidden: it fits nothing
+UP_AFTER = 5.0        # s: an enemy line on one of us this soon after our last kill = that enemy was in the fight, still up
 
 
 def _same_sig(a, b):
@@ -456,16 +457,17 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
 
 
 def _up_after_kills(feed):
-    """An enemy line on one of us newer than our last kill line: that enemy was still up after it, so 'every opponent
-    we met died' does not hold, whatever the name count says (enemy name shapes are read over moving scenery: two names
-    can be closer than one name read twice). Lines come in at the top: in one capture, the line above is the newer one.
+    """An enemy line on one of us newer than our last kill line, by at most UP_AFTER s: that enemy was in the fight and
+    still up after it, so 'every opponent we met died' does not hold, whatever the name count says (enemy name shapes
+    are read over moving scenery: two names can be closer than one name read twice). Lines come in at the top: in one
+    capture, the line above is the newer one. An enemy first seen later than that may be a new squad: left to the rule.
     7 Nov 6304: BeeAreOhDeehy knocks the player (y 288) just after our kill on Yani Neko (y 330); his name shape is 50
     points from Yani Neko's, so the fight counted one opponent, 'all dead', and his shooting read as a third party."""
     kills = [(t, l) for t, kind, l in feed if kind == 'ourKill']
     if not kills: return False
     t_done = max(t for t, _ in kills)
     y_done = min((l.get('y') or 0) for t, l in kills if t == t_done)
-    return any(kind.startswith('their') and (t > t_done or (t == t_done and (l.get('y') or 0) < y_done))
+    return any(kind.startswith('their') and (t_done < t <= t_done + UP_AFTER or (t == t_done and (l.get('y') or 0) < y_done))
                for t, kind, l in feed)
 
 
