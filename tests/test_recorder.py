@@ -4672,6 +4672,60 @@ def test_keyframes_same_frames_unbuffered():
         SCAN.DECODER = real
 
 
+def test_chunk_cut_short_is_not_kept():
+    """A chunk whose ffmpeg stops before the chunk's end (killed with the scan tree, a decoder crash) must fail, never
+    count as finished. 20 Nov 2026: a scan stopped mid-chunk kept such a chunk in .partial; the rerun went on from it,
+    and the 18 Nov 22.28 Broken Moon game ended at 4155 s instead of 4310 s, the next game and every feed line up to the
+    next chunk (4613 s) were lost. Here the first chunk's ffmpeg is killed after one frame."""
+    SCAN = _scanner()
+    v = TMP / f"kf-cut-{time.time_ns()}.mp4"
+    if not _test_video(v, secs=6):
+        print("  (no ffmpeg: chunk test skipped)")
+        return
+    real_popen, real_dec = SCAN.subprocess.Popen, SCAN.DECODER
+    n = SCAN.W * SCAN.H * 3
+    cut = []
+
+    class Cut:                                     # gives one frame, then kills ffmpeg: the pipe ends early
+        def __init__(self, pr):
+            self.pr, self.out, self.left = pr, pr.stdout, n
+        def readinto(self, mv):
+            if self.left <= 0:
+                self.pr.kill(); self.pr.wait(); return 0
+            r = self.out.readinto(mv[:self.left]); self.left -= r; return r
+
+    def popen(cmd, *a, **kw):
+        pr = real_popen(cmd, *a, **kw)
+        if "nokey" in cmd and not cut:             # the first keyframe reader only
+            cut.append(cmd); pr.stdout = Cut(pr)
+        return pr
+    res = TMP / f"kf-cut-{time.time_ns()}.partial"
+    try:
+        SCAN.DECODER = ("CPU", [])
+        whole = [t for t, _ in SCAN.keyframes(str(v), 0.0, None)]
+        assert whole == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0], whole           # read to the end: no error
+        SCAN.subprocess.Popen = popen
+        got = []
+        try:
+            for t, _ in SCAN.keyframes(str(v), 0.0, None):
+                got.append(t)
+        except RuntimeError as e:
+            assert "ffmpeg stopped" in str(e), e
+        else:
+            raise AssertionError(f"ended quietly after {got}")
+        assert got == [0.0], got
+        cut.clear()
+        try:
+            SCAN.scan_video(str(v), workers=1, chunks=2, resume=str(res))
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("a chunk cut short counted as done")
+        assert not (res / "chunk00.pkl").exists(), sorted(p.name for p in res.iterdir())
+    finally:
+        SCAN.subprocess.Popen, SCAN.DECODER = real_popen, real_dec
+
+
 def test_stretched_views_fill_reader_boxes():
     """4:3 stretched recordings: the views fill only the boxes the readers look at, with the same pixels as the full
     remapped frames they replace (which were built 3 to 4 times per keyframe)."""

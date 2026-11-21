@@ -423,6 +423,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   build) until the scan completes: when Apex starts, the app stops the scan (`core.stop_tree`, nothing stays in
   memory) instead of suspending it, and the next run goes on from the chunks still to do. `result_files` never
   sends `.partial`. 4:3 stretched views fill only the boxes their readers look at (`view_top` rows 0..640).
+  `keyframes()` raises when ffmpeg ends with an error code before the chunk's end (killed with the scan tree, a decoder
+  crash): such a chunk fails, is never kept as finished (20 Nov 2026: a chunk cut short at 4155 s of 18 Nov 22.28 was kept
+  in `.partial`, and the rerun lost a game's last 7 minutes, the next game and every feed line up to the next chunk).
 - **Scan on the team server** (`pcs_recorder/serverscan.py`, hub `hub/scanjobs.py`, setting `server_scan`, off by
   default; prototype 19 Nov 2026): the headless scan process (`pcs_app.py --scan`) first tries the hub. It makes a
   light copy (stream copy of the keyframe packets + track 1, `-copyts`: ~0.7-0.95 GB per hour, seconds, no decoding),

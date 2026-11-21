@@ -402,28 +402,38 @@ def keyframes(path, start=0.0, end=None):
           ['-i', path, '-fps_mode', 'passthrough', '-vf', vf, '-f', 'rawvideo', '-pix_fmt', 'rgb24', '-']
     pr = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
                           creationflags=0x08000000 if os.name == 'nt' else 0)       # no console window
-    import threading, queue
-    ts = queue.Queue()
+    import threading, queue, collections
+    ts = queue.Queue(); tail = collections.deque(maxlen=3)
     def rd():
         for line in pr.stderr:
             m = re.search(rb'pts_time:([0-9.]+)', line)
             if m: ts.put(float(m.group(1)))
+            elif line.strip(): tail.append(line.strip()[-200:])
     threading.Thread(target=rd, daemon=True).start()
-    n = W * H * 3; i = 0
+    n = W * H * 3; i = 0; ended = False; last = None
     try:
         while True:
             buf = bytearray(n)                          # a new buffer per frame: a reader may keep the previous one
-            if not _read_full(pr.stdout, buf): break
+            if not _read_full(pr.stdout, buf): ended = True; break
             try: t = ts.get(timeout=10)
             except Exception: t = start + float(i)
             i += 1
             if t < start - 0.01: continue
             if end is not None and t >= end: break
             img = np.frombuffer(buf, np.uint8).reshape(H, W, 3); img.flags.writeable = False    # read-only, as before
+            last = t
             yield t, img
     finally:
         if pr.poll() is None: pr.kill()
-        pr.wait()
+        rc = pr.wait()
+    # ffmpeg stopped before the piece's end (killed by a stop of the scan tree, a decoder crash): the frames so far are
+    # not the whole piece. Never end quietly then: a chunk cut short this way was once kept as finished (.partial) and
+    # its game lost its last 7 minutes, the next game and every feed line in between (18 Nov 22.28, 20 Nov 2026).
+    if ended and rc:
+        try: why = b' | '.join(list(tail)).decode('utf-8', 'replace')
+        except RuntimeError: why = ''                   # the stderr thread still adding a line
+        raise RuntimeError(f'ffmpeg stopped (exit {rc}) after {"t=%.1f" % last if last is not None else "no frame"} '
+                           f'of {start:.1f}..{end if end is not None else "end"}: {why}')
 
 def duration(path):
     try:
