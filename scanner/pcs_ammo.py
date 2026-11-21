@@ -148,6 +148,29 @@ def heal_item(a):
     return None
 
 
+CELL_BOTTOM = 34        # rows into HEAL_ICON: a shield cell's blue box reaches row 34 or lower (37-38 measured)
+BATT_BOTTOM = 32        # a battery's box ends higher (29 measured), its white grille under it
+BATT_WHITE = 250        # white pixels under the battery's box (grille + frame: ~380; under a cell: ~120)
+
+
+def heal_kind(a, item=None):
+    """The exact item in the heal slot: 'cell' or 'battery' for a blue icon (same colours; the battery's box is
+    shorter, with a white grille under it, the cell's box reaches the icon's bottom), else the item heal_item names.
+    None when a blue icon fits neither shape."""
+    item = heal_item(a) if item is None else item
+    if item != 'shield': return item
+    y0, y1, x0, x1 = HEAL_ICON
+    p = a[y0:y1, x0:x1].astype(np.int16)
+    r, g, b = p[..., 0], p[..., 1], p[..., 2]
+    rows = np.flatnonzero(((b > 150) & (b - r > 80)).sum(1) >= 6)
+    if not len(rows): return None
+    bot = int(rows[-1])
+    if bot >= CELL_BOTTOM: return 'cell'
+    white = int((np.minimum(np.minimum(r, g), b)[bot + 1:] > 200).sum())
+    if bot <= BATT_BOTTOM and white >= BATT_WHITE: return 'battery'
+    return None
+
+
 def read_heal(a):
     """-> (item, count) when the heal slot shows a count, ('none', 0) when the slot is there (key hint) but empty
     (no count, no icon), else None."""
@@ -186,8 +209,9 @@ def read(a, t=None):
     h = read_heal(a)
     if h is not None and h[0] == 'none' and mag is None: h = None    # empty slot: only in the full HUD (ammo read)
     if mag is None and h is None: return None
+    kind = heal_kind(a, h[0]) if h and h[0] not in (None, 'none') else (h[0] if h else None)
     return (None if t is None else round(float(t), 2), mag, res, h[0] if h else None, h[1] if h else None,
-            slot(a) if mag is not None else None)
+            slot(a) if mag is not None else None, kind)
 
 
 # ---------------- per game ----------------
@@ -219,7 +243,7 @@ def fight_ammo(R, t0):
     low = less than one full magazine left in reserve (reserve < magFull), or nothing left at all."""
     before = [r for r in R if t0 - FIGHT_BEFORE <= r[0] <= t0 + 1.0 and r[1] is not None and r[2] is not None]
     if not before: return None
-    t, mag, res, _, _, sl = before[-1]
+    t, mag, res, _, _, sl = before[-1][:6]
     full = [r[1] for r in R if t - MAG_WINDOW <= r[0] <= t and r[1] is not None and r[5] == sl]
     mfull = max(full) if full else mag
     low = (res == 0 and mag == 0) or (mfull >= 2 and res < mfull)
@@ -244,10 +268,32 @@ def out_of_heals(R):
     return out
 
 
+SLOT_HOLD = 2           # reads in a row of a new item before the heal slot's item changes (healSlot)
+
+
+def _slot_rows(K):
+    """[(t, kind, count)] -> rows [t, item, count] kept on change; a new item (cell, battery, syringe, medkit,
+    phoenix, 'none' = empty) only once read SLOT_HOLD times in a row (one odd read is a flash or a half-drawn icon),
+    a new count of the same item at once (as healTimeline)."""
+    out = []; i = 0
+    while i < len(K):
+        t, k, n = K[i]
+        if out and k == out[-1][1]:
+            if n != out[-1][2]: out.append([t, k, n])
+            i += 1; continue
+        j = i
+        while j + 1 < len(K) and K[j + 1][1] == k: j += 1
+        if j - i + 1 >= SLOT_HOLD: out.append([t, k, n])
+        i += 1
+    return out
+
+
 def attach(games, ammo_reads, bar_reads=None):
     """ammo_reads: rows of read() for the recording. Per game (fields added, none changed):
     ammoTimeline {cols, rows [t, slot, mag, reserve]}: the reads, a row kept when it differs from the one before;
     healTimeline {cols, rows [t, item, count]}: the same for the selected heal item and its count ('none', 0 = empty);
+    healSlot {cols, rows [t, item, count]}: the same with the exact item (cell / battery told apart; 'none' = empty),
+    an item change only once read twice in a row;
     ammoEvents [{t, kind: lowAmmoFight, mag, reserve, magFull, fightEnd} | {t, kind: outOfHeals, end}];
     ammoSummary {reads, healReads, fightsChecked, lowAmmoFights, outOfHeals, outOfHealsSeconds};
     each fight (pcs_fights) gets ammoAtStart {mag, reserve, slot, magFull, at, low} when the ammo was read before it.
@@ -263,6 +309,8 @@ def attach(games, ammo_reads, bar_reads=None):
         H = [r for r in R if r[3] is not None]
         g['healTimeline'] = {'cols': ['t', 'item', 'count'],
                              'rows': [[r[0], r[3], r[4]] for r in _timeline(H, lambda r: (r[3], r[4]))]}
+        K = [(r[0], r[6], r[4]) for r in H if len(r) > 6 and r[6] is not None]
+        g['healSlot'] = {'cols': ['t', 'item', 'count'], 'rows': _slot_rows(K)}
         ev = []; checked = low = 0
         for f in g.get('fights') or []:
             fa = fight_ammo(R, f['t0'])
