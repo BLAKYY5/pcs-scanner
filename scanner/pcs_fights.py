@@ -179,6 +179,14 @@ LOUD_AFTER = 0.35       # share of loud windows 3..15 s after the last opponent 
 NEW_ENEMY_AFTER = 20.0  # s after the first enemy line for a new name to count as arriving later (a squad comes in together)
 SQUAD = 3
 DUP_MOVED_BITS = 60   # name shapes (of 144 points) of one line captured again lower in the feed
+HUE_MOVED = 35        # ... and its colour read off by this much at most (a red screen)
+OPP_SAME_BITS = 60    # two enemy name shapes this close are one enemy (third party: more names than a squad)
+OPP_MIN_ONES = 0      # a name shape with fewer points is not counted as an enemy name
+ENDED_IN_FIGHT = 3.0  # s: the game ending this soon after a fight's last evidence = the squad went out in it
+Y_SAME = 15           # px: one line read at one place (its band's top wobbles ~8 px; lines are ~43 px apart)
+DEAD_AFTER = 2.0      # s after an own death (spectating starts) the feed's colours may be another squad's
+END_AFTER = 5.0       # s after tEndGame
+THIN_SIG = 45         # a name shape with fewer points than this was half hidden: it fits nothing
 
 
 def _same_sig(a, b):
@@ -198,45 +206,102 @@ def loud_windows(loud, step, t0, t1):
     return [(round((i0 + j * k) * step, 2), bool(v > thr)) for j, v in enumerate(w)]
 
 
-def _hue_near(a, b):
+def _hue_near(a, b, tol=20):
     ha, hb = (a or {}).get('hue'), (b or {}).get('hue')
-    return ha is not None and hb is not None and min(abs(ha - hb), 360 - abs(ha - hb)) <= 20
+    return ha is not None and hb is not None and min(abs(ha - hb), 360 - abs(ha - hb)) <= tol
+
+
+def _ones(a):
+    return bin(int(a, 16)).count('1') if a else 0
 
 
 def _bits(a, b):
     return bin(int(a, 16) ^ int(b, 16)).count('1') if a and b else None
 
 
-def _dup(p, l):
+def _dup(p, l, strict=False):
     """Two captures of one kill-feed line: same event and weapon, the same squad member (by colour) and the same
     enemy name. Our own name's shape is not compared: the feed appends a distance ('15M') to it now and then. New
     lines come in at the top and push older ones down, so a capture lower than a like line seconds before is that
     line again; the name's shape then only has to be roughly alike (it is read over a moving background)."""
-    if l['t'] - p['t'] >= 25 or p['event'] != l['event'] or p.get('weapon') != l.get('weapon'): return False
+    # one '+N RP' kill line (the same number): its weapon icon can be misread over a red screen (car / nemesis, 17 Nov
+    # 3301 / 3303), so the weapon is not compared then
+    same_rp = p.get('rp') is not None and p.get('rp') == l.get('rp')
+    if l['t'] - p['t'] >= 25 or p['event'] != l['event'] or (p.get('weapon') != l.get('weapon') and not same_rp): return False
     ours = 'killer' if (l.get('killer') or {}).get('side') == 'squad' else 'victim'
     them = 'victim' if ours == 'killer' else 'killer'
-    if (p.get(ours) or {}).get('side') != 'squad' or not _hue_near(p.get(ours), l.get(ours)): return False
+    if (p.get(ours) or {}).get('side') != 'squad': return False
     a, b = p.get(them + 'Sig'), l.get(them + 'Sig')
+    dy = (l.get('y') or 0) - (p.get('y') or 0)
+    if not _hue_near(p.get(ours), l.get(ours)):
+        # a Ranked '+N RP' kill line whose killer name was cut off at the feed's left edge (or read over scenery) has no
+        # colour: it is ours all the same (only our kills give RP); two captures with the same number are compared by
+        # the victim's name alone
+        blind = same_rp and ((p.get(ours) or {}).get('hue') is None or (l.get(ours) or {}).get('hue') is None)
+        # over a red screen (ring, storm) one name's colour is read up to ~25 degrees off (lime 67 / 46 / 65 on
+        # 7 Nov 3585-3589): a line that moved down with the same enemy name is that line again
+        moved = (_hue_near(p.get(ours), l.get(ours), HUE_MOVED) and l['t'] - p['t'] < 10 and dy > Y_SAME
+                 and (_bits(a, b) or 999) <= DUP_MOVED_BITS)
+        if not (blind or moved): return False
     if _same_sig(a, b) or (a is None and b is None): return True
-    if l['t'] - p['t'] < 10 and (l.get('y') or 0) >= (p.get('y') or 0) + 10:
+    if strict: return False
+    if them == 'killer' and (l['event'] == 'kill' or (l['t'] - p['t'] < 10 and dy >= -Y_SAME)):
+        # a line on one of us: the enemy's name LEFT of the weapon is read over the bright scenery beyond the feed's
+        # plate, so its shape is often noise (17 Nov 6526 / 6528 / 6532: one knock on us, three shapes 74-79 points
+        # apart; 1264-1276: one knock and one kill on Xnoooo, 9 captures at one place). One of us knocked twice by
+        # one weapon within 10 s, or killed twice within 25 s, does not happen: it is the same line.
+        return True
+    if l['t'] - p['t'] < 10 and abs(dy) <= Y_SAME:
+        # the same place seconds later: the line did not move (a new line would have pushed it down); the victim's
+        # name is on the plate but the plate lets the scenery through, so only roughly alike (or a thin shape: half
+        # hidden while the line fades in or out)
         d = _bits(a, b)
-        return d is None or d <= DUP_MOVED_BITS
+        return d is None or d <= DUP_MOVED_BITS or min(_ones(a), _ones(b)) < THIN_SIG
+    if l['t'] - p['t'] < 10 and dy > Y_SAME:
+        # the line moved down (our kill: the victim's name on the plate, roughly alike over a moving background;
+        # a name half hidden by what scrolls in gives a thin shape that fits nothing: the same line too)
+        d = _bits(a, b)
+        return d is None or d <= DUP_MOVED_BITS or min(_ones(a), _ones(b)) < THIN_SIG
     return False
 
 
-def squad_lines(lines, t0, t1, squad=None):
+def dead_spans(g):
+    """[(from, to)] of one game where the feed is not our squad's: the player is dead and spectating (from just after
+    each own death, `ownDeaths`, to his respawn) and after the game ended for him (`tEndGame`). Once the squad is out,
+    the game spectates the killers and colours THEIR names (7 Nov 4299 / 4303 / 5954 / 6128 / 6427: their kills read
+    as ours); before the right edge fix these lines were rarely captured in Ranked."""
+    back = sorted(r['t'] for r in g.get('respawns') or [] if r.get('who') == 'self')
+    out = []
+    for d in g.get('ownDeaths') or []:
+        out.append((d + DEAD_AFTER, next((r for r in back if r > d), float('inf'))))
+    if g.get('tEndGame') is not None: out.append((g['tEndGame'] + END_AFTER, float('inf')))
+    return out
+
+
+def squad_lines(lines, t0, t1, squad=None, last=None, dead=None):
     """Kill-feed lines with one side in our squad inside [t0, t1), each counted once (the feed scrolls and fades).
     squad: [(slot, hue, self)] from the legend select screen: a 'squad' name in none of those colours is not ours
-    (a coloured background behind a white name)."""
-    seen, caps = [], []
+    (a coloured background behind a white name). last: a dict that gets, per line returned (by id), its last capture
+    (where the line was last seen in the feed)."""
+    seen, groups = [], []
     for l in lines:
         if not (t0 <= l['t'] < t1) or 'event' not in l: continue
+        if dead and any(a <= l['t'] < b for a, b in dead): continue
         k = (l.get('killer') or {}).get('side'); v = (l.get('victim') or {}).get('side')
         if (k == 'squad') == (v == 'squad'): continue
-        if squad and _who(l.get('killer') if k == 'squad' else l.get('victim'), squad) is None: continue
-        dup = any(_dup(p, l) for p in caps)
-        caps.append(l)
-        if not dup: seen.append(l)
+        side = l.get('killer') if k == 'squad' else l.get('victim')
+        # a Ranked '+N RP' kill line is ours even when the killer's name (cut off at the left) gave no colour
+        rp_ours = k == 'squad' and l.get('rp') is not None and l.get('marker') == 'rank' and (side or {}).get('hue') is None
+        if squad and not rp_ours and _who(side, squad) is None: continue
+        # each line counted is followed through its captures. A capture is that line again when it fits the line's
+        # LAST capture (same place or lower: lines never move up), or any capture by the same enemy name. Compared
+        # with every capture instead, a new line at the top fit an old one's first capture there although the old
+        # line had already moved down (17 Nov 2045 / 2048: two knocks by one player with one weapon, 3 s apart).
+        grp = next((G for G in groups if _dup(G[-1], l) or any(_dup(p, l, strict=True) for p in G)), None)
+        if grp is None: groups.append([l]); seen.append(l)
+        else: grp.append(l)
+    if last is not None:
+        for G in groups: last[id(G[0])] = G[-1]
     return seen
 
 
@@ -297,7 +362,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
     """One game's fights: [{t0, t1, opponents, ours, theirs, result, thirdParty, ...}]. own_stats: the own stats
     strip reads [(t, {damage, ...})] (pcs_hud.OwnStats) for damage dealt, or None."""
     t0g = g['tStart']; squad = _squad_hue(g)
-    L = squad_lines(lines, t0g, t_end, squad)
+    L = squad_lines(lines, t0g, t_end, squad, dead=dead_spans(g))
     H = hits(own, ring_segs)
     ev = []                                           # (t, kind, line or amount)
     for l in L:
@@ -348,7 +413,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
                     if kind.endswith('Knock'): self_in_feed += 1
                     else: self_killed = True
             if first_enemy is None: first_enemy = t
-            if sig and not any(_same_sig(sig, o['sig']) for o in opp):
+            if sig and _ones(sig) >= OPP_MIN_ONES and not any(_bits(sig, o['sig']) <= OPP_SAME_BITS for o in opp):
                 opp.append({'sig': sig, 't': round(t, 2), 'by': 'us' if ourside else 'them'})
                 if len(opp) > 1 and t - first_enemy >= NEW_ENEMY_AFTER and late_new is None:
                     late_new = (t, len(opp), ourside)
@@ -357,10 +422,15 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
         # line on him already counted it
         died = [d for d in deaths if a - 2 <= d <= b + DEATH_AFTER] +             [k['end'] for t, kind, k in knocked if k.get('outcome') == 'died'
              and not any(abs(d - k['end']) <= DEATH_AFTER for d in deaths)]
+        # the game ended for us while the fight was on (no HUD after it, not the last squad): the squad was eliminated
+        # in it ('SQUAD ELIMINATED' straight away, no own death read: 7 Nov 7091, killed outright as the last alive)
+        ended = t_end is not None and g.get('tEndGame') is not None and g['tEndGame'] <= b + ENDED_IN_FIGHT \
+            and not champion and not any(r > b for r in back)
+        if ended and not died: died = [g['tEndGame']]
         if died and not self_killed:
             theirs['kills'] += 1
-        wiped = any(a - 2 <= d <= b + 25 for d in deaths) and not any(r > b for r in back) \
-            and t_end is not None and (g.get('tEndGame') or t_end) <= b + 40 and not champion
+        wiped = ended or (any(a - 2 <= d <= b + 25 for d in deaths) and not any(r > b for r in back)
+                          and t_end is not None and (g.get('tEndGame') or t_end) <= b + 40 and not champion)
         dealt = damage_dealt(dvals, a, b)
         result = verdict(ours, theirs, wiped, dealt, int(dmg))
         third = None
