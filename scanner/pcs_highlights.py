@@ -100,7 +100,7 @@ def _bits(a, b):
 def own_lines(lines, t0, t1, squad, last=None, dead=None):
     """Kill-feed knocks / kills by our squad inside [t0, t1), each line once (pcs_fights.squad_lines rules) ->
     [(t, kind, line, who)]: who = 'self' (the player's own colour), 'mate' or None (colour not known).
-    last: a dict that gets each line's last capture by id (pcs_fights.squad_lines)."""
+    last: a dict that gets each line's captures by id (pcs_fights.squad_lines)."""
     import pcs_fights            # the same once-per-line rule as the fights (needs numpy: scanner side only)
     out = []
     for l in pcs_fights.squad_lines(lines, t0, t1, squad or None, last, dead):
@@ -111,11 +111,15 @@ def own_lines(lines, t0, t1, squad, last=None, dead=None):
     return out
 
 
-def _above(l, prev_last):
-    """l was first seen above where an earlier line of ours had already moved to: a new line (lines never move up;
-    17 Nov 2045 / 2048: two knocks by the player with one weapon, the first already pushed down when the second came)."""
+def _above(l, caps):
+    """l was first seen above where an earlier line of ours already was at that moment: a new line (lines never move
+    up). Every capture of the earlier line up to l's time is compared, the same keyframe included: 17 Nov 2045 / 2048,
+    two knocks by the player with one weapon; when the second came in at the top (y 288) the first was captured in the
+    same second further down (y 458), so its last capture was not earlier than the new line and the new knock was
+    dropped as the old one captured again."""
     import pcs_fights
-    return bool(prev_last) and l['t'] > prev_last['t'] and (l.get('y') or 0) < (prev_last.get('y') or 0) - pcs_fights.Y_SAME
+    y = l.get('y') or 0
+    return any(p is not l and p['t'] <= l['t'] and (p.get('y') or 0) > y + pcs_fights.Y_SAME for p in caps or [])
 
 
 def counter_reads(reads, key, t0, t1):

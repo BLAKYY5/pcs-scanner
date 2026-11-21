@@ -3038,6 +3038,30 @@ def test_highlights_key_plays():
     assert bad[0]['highlights'] == [] and 'highlightsError' in bad[0]
 
 
+def test_highlights_new_line_same_second():
+    """17 Nov 2045 / 2048 (21 Nov 2026): two knocks by the player with one weapon on two enemies, 3 s apart. When the
+    second came in at the top of the feed, the first was captured in the same second further down: the second is a
+    new line (lines never move up), not the first captured again. Both count: a quick double."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_highlights as H
+    SQ = {'select': {'squad': [{'slot': 1, 'hue': 40, 'self': False}, {'slot': 2, 'hue': 177, 'self': True},
+                               {'slot': 3, 'hue': 75, 'self': False}]}}
+    v1, v2 = 'c0807f9eaeddbfffddffff5dbfff5fbfff5f', '800880ff67fffffefffde6fffc267f002001'      # the two names
+    def knock(t, y, sig, hue=180):
+        return {'t': float(t), 'y': y, 'event': 'knock', 'weapon': 'car', 'arrow': True,
+                'killer': {'side': 'squad', 'hue': hue}, 'victim': {'side': 'other'}, 'victimSig': sig}
+    lines = [knock(2045, 288, v1), knock(2046, 288, None, 179), knock(2047, 373, 'c0807fceac7fbfffddfbff5dbfff5ebfff5f', 183),
+             knock(2048, 288, v2, 169), knock(2048, 458, 'c0807fce8c7fbfffddffff5dbfff5ebc1f0f', 164)]
+    g = {'tStart': 0.0, **SQ, 'fights': [{'t0': 2043.0, 't1': 2055.0, 'result': 'won'}]}
+    td = H.takedowns(g, lines, [], 0, 1e9)
+    assert [(e['t'], e['kind']) for e in td] == [(2045.0, 'knock'), (2048.0, 'knock')], td
+    hl = H.find(td, g['fights'], [])
+    assert len(hl) == 1 and hl[0]['kind'] == 'double' and hl[0]['count'] == 2, hl
+    # the first line captured again lower with a name read unlike (no capture of it below the new one): still one line
+    again = [knock(2045, 288, v1), knock(2048, 330, v2)]
+    assert [e['t'] for e in H.takedowns(g, again, [], 0, 1e9)] == [2045.0]
+
+
 def test_fights_and_ring_damage():
     """pcs_fights: ring damage from the red screen edges and health ticks (shield untouched); fights from our squad's
     kill-feed lines, own knocks and hits: kills decide, the player's own death counts, a wiped squad lost; one line
@@ -3103,6 +3127,36 @@ def test_fights_and_ring_damage():
     F.attach(g, [line(300, 'kill', sq(40), other, vs=sigs[0])], [], [], loud, 0.05)
     f = g[0]['fights'][0]
     assert f['result'] == 'won' and f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
+
+
+def test_fights_third_party_enemy_up_after_our_kill():
+    """7 Nov 6300 (21 Nov 2026): we knock and kill one enemy; a second enemy knocks the player just after our kill (his
+    line above ours in the same capture) and keeps shooting. His name shape is close to the first enemy's (names are
+    read over moving scenery), so the fight counts one opponent, yet he was still up: no 'gunfire after opponents
+    died' third party. The same enemy line older than our kill (below it) leaves the rule as it was."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_fights as F
+    sq = lambda hue: {'side': 'squad', 'hue': hue}
+    other = {'side': 'other'}
+    line = lambda t, ev, k, v, ks=None, vs=None, y=290, w='p2020': {'t': float(t), 'event': ev, 'weapon': w, 'killer': k,
+                                                                     'victim': v, 'killerSig': ks, 'victimSig': vs, 'y': y}
+    game = lambda: {'tStart': 0.0, 'tEndGame': 900.0, 'select': {'squad': [{'slot': 1, 'hue': 179}, {'slot': 2, 'hue': 76, 'self': True},
+                                                                            {'slot': 3, 'hue': 39}]}}
+    yani, bee = '0' * 36, 'ff' * 6 + '0' * 24                    # 48 points apart: read as one name
+    assert F._bits(yani, bee) <= F.OPP_SAME_BITS
+    loud = np.full(int(400 / 0.05), -50.0, np.float32); loud[int(304 / 0.05):int(330 / 0.05)] = -10.0
+    def fight(bee_y):
+        g = [game()]
+        feed = [line(296, 'knock', sq(73), other, vs=yani, y=287), line(304, 'knock', other, sq(73), ks=bee, y=bee_y, w='car'),
+                line(304, 'kill', sq(73), other, vs=yani, y=330)]
+        F.attach(g, feed, [], [], loud, 0.05)
+        assert len(g[0]['fights']) == 1, g[0]['fights']
+        return g[0]['fights'][0]
+    f = fight(288)                                                 # his knock is newer than our kill
+    assert f['opponents'] == 1 and not f['thirdParty'], f
+    f = fight(372)                                                 # older than our kill: every opponent met died
+    assert f['thirdParty'] and f['thirdPartyWhy'] == 'gunfire after opponents died', f
 
 
 def test_fights_even_rule_decision_32():

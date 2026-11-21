@@ -29,7 +29,8 @@ player's damage dealt (`damageDealt`: their own damage number's rise during the 
 (`damageTaken`) when they differ by DAMAGE_LEAD or more; a squad wiped in it always lost; else even. Kill-feed names in a colour none of our squad has (a coloured
 background behind a white name) are not ours. Third party: a new enemy name after the fight started (`new enemy`)
 once more than a squad's worth of names showed, an enemy we had not met knocking or killing one of us late in the
-fight, or shooting / hits still going on after every opponent we met died.
+fight, or shooting / hits still going on after every opponent we met died (not when an enemy line on one of us is
+newer than our last kill: that enemy was still up).
 Checked by eye on the coach's recordings (kill-feed line images + the own card), dev / held-out split decided first:
 `pcs-handoff/checkset/checkset-fights.json`.
 """
@@ -281,8 +282,8 @@ def dead_spans(g):
 def squad_lines(lines, t0, t1, squad=None, last=None, dead=None):
     """Kill-feed lines with one side in our squad inside [t0, t1), each counted once (the feed scrolls and fades).
     squad: [(slot, hue, self)] from the legend select screen: a 'squad' name in none of those colours is not ours
-    (a coloured background behind a white name). last: a dict that gets, per line returned (by id), its last capture
-    (where the line was last seen in the feed)."""
+    (a coloured background behind a white name). last: a dict that gets, per line returned (by id), all its captures
+    in time order (where the line was seen in the feed: lines never move up)."""
     seen, groups = [], []
     for l in lines:
         if not (t0 <= l['t'] < t1) or 'event' not in l: continue
@@ -301,7 +302,7 @@ def squad_lines(lines, t0, t1, squad=None, last=None, dead=None):
         if grp is None: groups.append([l]); seen.append(l)
         else: grp.append(l)
     if last is not None:
-        for G in groups: last[id(G[0])] = G[-1]
+        for G in groups: last[id(G[0])] = G
     return seen
 
 
@@ -438,7 +439,7 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
             third = {'t': late_new[0], 'why': 'new enemy'}
         if third is None and len(opp) > SQUAD:
             third = {'t': opp[SQUAD]['t'], 'why': 'new enemy'}
-        if third is None and opp and ours['kills'] >= len(opp):
+        if third is None and opp and ours['kills'] >= len(opp) and not _up_after_kills(feed):
             # every enemy we met is down for good: shooting or hits going on after that = someone else
             t_done = max(t for t, kind, l in feed if kind == 'ourKill')
             after_hits = sum(e[2] for e in grp if e[1] == 'hit' and e[0] > t_done + 2)
@@ -452,6 +453,20 @@ def fights(g, lines, own, loud, step, ring_segs, t_end, own_stats=None):
         if wiped: f['wiped'] = True
         out.append(f)
     return out
+
+
+def _up_after_kills(feed):
+    """An enemy line on one of us newer than our last kill line: that enemy was still up after it, so 'every opponent
+    we met died' does not hold, whatever the name count says (enemy name shapes are read over moving scenery: two names
+    can be closer than one name read twice). Lines come in at the top: in one capture, the line above is the newer one.
+    7 Nov 6304: BeeAreOhDeehy knocks the player (y 288) just after our kill on Yani Neko (y 330); his name shape is 50
+    points from Yani Neko's, so the fight counted one opponent, 'all dead', and his shooting read as a third party."""
+    kills = [(t, l) for t, kind, l in feed if kind == 'ourKill']
+    if not kills: return False
+    t_done = max(t for t, _ in kills)
+    y_done = min((l.get('y') or 0) for t, l in kills if t == t_done)
+    return any(kind.startswith('their') and (t > t_done or (t == t_done and (l.get('y') or 0) < y_done))
+               for t, kind, l in feed)
 
 
 def decided_by(ours, theirs, wiped=False, dealt=None, taken=0):
