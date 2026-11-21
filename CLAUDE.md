@@ -752,6 +752,24 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   read twice in a row after the player had heals in that game. Spectating frames are left out. Review: amber / red marks
   on the events lane, Events "Fight started low on ammo" / "Out of heals", game bar "Low-ammo fights a of b", "Out of
   heals". Check: hand-read samples (`pcs-handoff\checkset\ammo\`; see HANDOFF 19 Nov).
+- **Inventory screen** (`pcs_inventory.py`, table `pcs_inventory.json`, 16:9 only, 21 Nov 2026): what the player carries
+  when they open the inventory (Tab). Found by the dark bottom bar and the weapon cards' '1' / '2' boxes (x 901 / 1634,
+  rows 220..252): a few pixels, 0.05 ms on other keyframes; read only then (~15 ms, on ~2 % of keyframes). Weapons: the
+  white shape on each card against signs of the game's `weapon_icons/r5` images (40 x 14 cells + width / height; names
+  are the game's file names: r97 = R-99, energy_ar = Havoc, dragon = Rampage, `p2020_akimbo`). Attachment slots (4, or 5
+  with a hop-up) and armour / core / backpack: tier colours (1 white ... 5 red), 0 = a hop-up filled without a tier bar,
+  None = empty or covered. Backpack: 2 rows x 8 slots (x 1032 + 130 k, rows 803 / 934); a slot is read only when its
+  frame lines are all there (tooltips and dragged items cover slots); the item by 16 x 14 colour cells against signs of
+  the game's loot / ordnance / ammo images placed where the screen draws them (frag: colours from our recordings, the
+  image holds only its white), each with its own largest distance; how many by the stack bar (one segment per unit for
+  heals and grenades; ammo bars are coarse, so ammo is counted in stacks). `tools/inventory_signs.py` builds the table
+  from a private RSX export (`ui_named/rui`); no image is in the repo. Per game `inventory` = [{t, tEnd, reads, weapons,
+  attachments, heals {kind: n}, grenades, ammoStacks, ultAccel, armor, core, backpack, slotsOpen, slotsLocked,
+  slotsUnread}], one per opening (keyframes <= 3.5 s apart), from its last keyframe; a value that differs between the
+  last two keyframes is left out. Held-out check (`pcs-handoff\checkset\checkset-inventory.json`, 30 frames of 18 Nov
+  22.28, 15 Nov, 7 Nov; dev 17 Nov): no wrong value; weapons 52 / 58 (the rest covered), heal slots 140 / 146, grenade
+  slots 59 / 62, the count right on all 204 heal / grenade slots read, ammo kind 58 / 68, armour / core / backpack 30 / 29 / 30 all right. Not read yet: ammo
+  amounts (the count digits), attachment kinds, survival item, legend upgrade tree.
 - **Minimap position** (`pcs_minimap.py`): where the player is, every few seconds, without the debug overlay (only
   the coach has it). The HUD minimap (top left, 16:9, centre (226.5, 226) at 1440p) is north-up (only the arrow
   turns) and its centre is the player. Its zoom is one of a few fixed levels, the same world scale on every map:

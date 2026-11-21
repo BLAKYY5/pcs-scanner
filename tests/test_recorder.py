@@ -3329,6 +3329,81 @@ def test_ammo_reader_and_events():
     assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
 
 
+def _inventory_frame(weapon=None, items=(), armor=None, backpack=None):
+    """A drawn inventory screen (pcs_inventory's layout): bottom bar, card number boxes, the card's weapon as its sign's
+    shape, backpack slots with frames, the item's sign colours in its cells and a stack bar (lit, segments)."""
+    import numpy as np
+    import pcs_inventory as V
+    a = np.full((1440, 2560, 3), 60, np.uint8)
+    a[1360:1440] = 15                                                   # dark bottom bar
+    for x0, x1, y0, y1 in V.BOXES:                                      # '1' / '2' boxes: light, a dark stroke inside
+        a[y0:y1, x0:x1] = 210
+        a[y0 + 8:y1 - 8, (x0 + x1) // 2 - 3:(x0 + x1) // 2 + 3] = 30
+    if weapon:                                                          # card 1: the weapon's sign drawn white, 330 px wide
+        ar, s = V.WEAPONS[weapon]
+        cw = 8; ch = max(2, int(round(V.WSW * cw / ar / V.WSH)))
+        grid = np.indices((ch, cw)).sum(0)                              # each cell filled in a diagonal order
+        order = np.argsort(np.argsort(grid.ravel(), kind='stable')).reshape(ch, cw) / (ch * cw)
+        big = np.kron(s, np.ones((ch, cw))) > np.tile(order, (V.WSH, V.WSW))
+        h, w = big.shape; x0 = V.CARDS[0] + 230; y0 = 340 - h // 2
+        a[y0:y0 + h, x0:x0 + w][big] = 255
+    for (r, k), (name, lit, segs) in items:
+        x0, y0 = V._slot_xy(r, k); n = V.SLOT_N
+        a[y0:y0 + n, x0:x0 + n] = 30
+        if name:
+            rgb, _ = V.ITEMS[name]
+            a[y0:y0 + 98, x0:x0 + 112] = np.kron(rgb, np.ones((7, 7, 1))).astype(np.uint8)
+        a[y0:y0 + 3, x0:x0 + n] = 180; a[y0 + n - 3:y0 + n, x0:x0 + n] = 180   # the slot's frame
+        a[y0:y0 + n, x0:x0 + 3] = 180; a[y0:y0 + n, x0 + n - 3:x0 + n] = 180
+        seg = 110 // segs
+        for j in range(segs):                                           # segments with dark gaps, lit ones first
+            a[y0 + 103:y0 + 106, x0 + 4 + j * seg + 2:x0 + 4 + (j + 1) * seg - 2] = 210 if j < lit else 110
+    if armor:
+        a[1150:1180, 1030:1080] = {1: (220, 220, 220), 2: (40, 200, 250), 3: (200, 80, 250)}[armor]
+    if backpack:
+        a[1234:1238, 1737:1817] = {1: (210, 218, 218), 2: (106, 206, 254), 3: (207, 86, 254)}[backpack]
+    return a
+
+
+def test_inventory_reader():
+    """Inventory screen (pcs_inventory): found by the bottom bar and the card number boxes only; weapon by its shape;
+    backpack items by their signs and how many by the stack bar; nothing on other frames. Per game one entry per open
+    of the screen, values that changed between its last two keyframes left out."""
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import numpy as np
+    import pcs_inventory as V
+    assert len(V.WEAPONS) >= 30 and {'medkit', 'syringe', 'battery', 'cell', 'phoenix', 'heavy', 'frag'} <= set(V.ITEMS)
+    assert V.read(np.zeros((1440, 2560, 3), np.uint8), 1.0) is None
+    assert V.read(np.full((1440, 2560, 3), 200, np.uint8), 1.0) is None               # bright frame: no bottom bar
+    items = [((0, 0), ('heavy', 3, 3)), ((0, 1), ('cell', 4, 6)), ((0, 2), ('syringe', 6, 6)), ((1, 0), ('medkit', 1, 2)),
+             ((1, 1), ('frag', 1, 1)), ((1, 2), (None, 1, 1))]
+    a = _inventory_frame('hemlock', items, armor=2, backpack=3)
+    r = V.read(a, 12.0)
+    assert r and r['t'] == 12.0 and r['weapons'][0] == 'hemlock', r and r['weapons']
+    assert sorted(tuple(s) for s in r['slots']) == [(0, 0, 'heavy', 3, 3), (0, 1, 'cell', 4, 6), (0, 2, 'syringe', 6, 6),
+                                                    (1, 0, 'medkit', 1, 2), (1, 1, 'frag', 1, 1)], r['slots']
+    assert r['armor'] == 2 and r['backpack'] == 3, (r['armor'], r['backpack'])
+    s = V.summary(r)
+    assert s == {'heals': {'cell': 4, 'syringe': 6, 'medkit': 1}, 'grenades': {'frag': 1}, 'ammoStacks': {'heavy': 1},
+                 'ultAccel': 0}, s
+    b = a.copy(); b[1368:1432] = 200                                                   # no dark bottom bar: not the screen
+    assert V.read(b, 1.0) is None
+    c = a.copy(); x0, y0 = V._slot_xy(0, 1); c[y0 - 20:y0 + 40, x0 + 6:x0 + 112] = 90    # a tooltip over the cell slot
+    assert [s_[2] for s_ in V.read(c, 1.0)['slots']] == ['heavy', 'syringe', 'medkit', 'frag']
+    # per game
+    r2 = V.read(_inventory_frame('hemlock', items[:2] + [((0, 2), ('syringe', 5, 6))] + items[3:], armor=2), 13.0)
+    r3 = V.read(_inventory_frame('hemlock', items, armor=2), 14.0)
+    r4 = V.read(a, 60.0)
+    games = [{'tStart': 0.0, 'tEndGame': 100.0}, {'tStart': 200.0}]
+    V.attach(games, [r, r2, r3, r4])
+    inv = games[0]['inventory']
+    assert [(e['t'], e['tEnd'], e['reads']) for e in inv] == [(12.0, 14.0, 3), (60.0, 60.0, 1)], inv
+    assert inv[0]['weapons'] == ['hemlock', None] and inv[0]['heals'] == {'cell': 4, 'medkit': 1}, inv[0]   # syringe 5 -> 6
+    assert inv[0]['backpack'] is None and inv[0]['armor'] == 2                       # backpack only on the last read
+    assert inv[1]['heals'] == {'cell': 4, 'syringe': 6, 'medkit': 1} and inv[1]['ammoStacks'] == {'heavy': 1}
+    assert games[1]['inventory'] == []
+
+
 def test_gpu_frames_converted_like_cpu_frames():
     """GPU decoders hand frames over as NV12, the CPU decoder as yuv420p, with the same values. ffmpeg's NV12 -> RGB
     route rounds differently (84 % of values off by up to 51 on the coach's recordings), so the scanner repacks GPU

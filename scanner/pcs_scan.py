@@ -18,7 +18,7 @@ from PIL import Image
 from scipy import ndimage
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import pcs_hud as HUD
-import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo, pcs_highlights
+import pcs_ring, pcs_respawn, pcs_bars, pcs_mapicons, pcs_fights, pcs_usage, pcs_minimap, pcs_ranked, pcs_ammo, pcs_highlights, pcs_inventory
 import pcs_bans
 
 VERSION = '1.13.1'
@@ -574,6 +574,9 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
                 try: am = pcs_ammo.read(img, t)                         # ammo in hand, heals carried
                 except Exception: am = None
                 if am: perf.setdefault('_ammo', []).append(am)
+                try: iv = pcs_inventory.read(img, t)                    # inventory screen open (Tab): what the player carries
+                except Exception: iv = None
+                if iv: perf.setdefault('_inventory', []).append(iv)
         if mode is None and max(votes.values()) >= 3 and min(votes.values()) == 0:
             mode = votes[True] > votes[False]
             if not quiet: print(f'  layout: {"4:3 stretched" if mode else "16:9"}', flush=True)
@@ -685,13 +688,13 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
             for k, r in pool.imap_unordered(_segment_k, todo): got(k, r)
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
-    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []
+    rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []; inventory = []
     bans = []
     for start, ev, sm, reps, pf in out:
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
-        ammo += pf.pop('_ammo', [])
+        ammo += pf.pop('_ammo', []); inventory += pf.pop('_inventory', [])
         bans += pf.pop('_bans', [])
         remap = {}
         for i, (rep, n) in enumerate(reps):
@@ -710,6 +713,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     perf['_storm'] = sorted(storm, key=lambda r: r[0])
     perf['_usage'] = sorted(usage, key=lambda r: r[0])
     perf['_ammo'] = sorted(ammo, key=lambda r: r[0])
+    perf['_inventory'] = sorted(inventory, key=lambda r: r['t'])
     perf['_bans'] = sorted(bans, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
@@ -957,7 +961,7 @@ def main():
                  perf.pop('_emblem', []))
         skip = skip_windows(games)          # Wildcard games: their reads go before any reader works on them
         if skip:
-            for k in ('_rings', '_icons', '_cards', '_bars', '_minimap', '_usage', '_storm', '_ammo', '_bans', '_rp',
+            for k in ('_rings', '_icons', '_cards', '_bars', '_minimap', '_usage', '_storm', '_ammo', '_inventory', '_bans', '_rp',
                       '_rpLines', '_rpSeen', '_feed'):
                 if k in perf: perf[k] = drop_skipped(perf[k], skip)
             own_reads = drop_skipped(own_reads, skip)
@@ -1020,6 +1024,8 @@ def main():
         except Exception as e: perf['fightsError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_ammo.attach(games, perf.pop('_ammo', []), bar_reads)     # ammo, heals carried, low-ammo fights, out of heals
         except Exception as e: perf['ammoError'] = f'{type(e).__name__}: {e}'[:200]
+        try: pcs_inventory.attach(games, perf.pop('_inventory', []))       # what the player carried at each inventory open
+        except Exception as e: perf['inventoryError'] = f'{type(e).__name__}: {e}'[:200]
         try: pcs_highlights.attach(games, feed_lines, own_reads, bar_reads, pcs_highlights.parse_rules(A.highlights))   # key plays
         except Exception as e: perf['highlightsError'] = f'{type(e).__name__}: {e}'[:200]
         for i, gm in enumerate(games):       # ring console reveals in the feed: the squad knew the next ring early
