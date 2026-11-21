@@ -717,8 +717,10 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   no respawn after) = the squad went out in it: wiped, and a kill on us when no death was read. Third party: more than
   3 enemy names (two name shapes within 60 of 144 points are one name: read over scenery they vary), a name first seen
   >= 20 s after the first enemy line knocking one of us, or hits / gunfire (`pcs_audio` loudness 10 dB over the game's
-  median in 35 % of 3..15 s) after every opponent met died. Loudness does not find or join fights: 10 dB windows are
-  29 % of fight time and 12 % elsewhere (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
+  median in 35 % of 3..15 s) after every opponent met died (not when an enemy line on one of us is up to 5 s newer
+  than our last kill, or above it in the same capture: that enemy was still up; 7 Nov 6304, two names 50 points apart
+  read as one). Loudness does not find or join fights: 10 dB windows are 29 % of fight time and 12 % elsewhere
+  (7 Nov). Ring: a stretch outside needs ring ticks (health drops of one size,
   shield unchanged: ring damage skips shields; 3+ ticks with the shield up, 4+ without, or 2+ inside red edges; 1.5 s
   tick from the deathfield script; 3-4 a tick seen); `read_storm` (share of red-tinted pixels in four thin edge strips,
   own card alive only) only widens it: Storm Point's red grass and E-District's red-lit streets tint the strips like the
@@ -741,7 +743,9 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   player's own colour (legend select `self`), the kills number on the strip (only kills: in Ranked the third number rose
   when teammates knocked enemies the player had hit, so it is not his knocks), the damage number rising, a fight.
   The kills plate flashes red ~2 s after a change and is not read then: steps are placed inside that gap. A knock and a
-  kill of ours within 5 s are one enemy; one line captured again (same event and weapon within 10 s) counts once.
+  kill of ours within 5 s are one enemy; one line captured again (same event and weapon within 10 s) counts once,
+  unless it came in above where the earlier line already was at that moment, same capture included (lines never move
+  up; 17 Nov 2045 / 2048: the second knock at the top while the first was captured lower in the same second).
   Review: "Highlights (n)" at the top of Events (click = seek, "Clip it" = clip bar from 5 s before to 3 s after),
   gold stars on the kill feed lane. Truths and numbers: private handoff folder and the PR (feed lines with rank badges
   are sometimes not captured: then the kills number places the kill).
