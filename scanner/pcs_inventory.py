@@ -321,4 +321,6 @@ def _entry(op):
     for key in ('armor', 'core', 'backpack'):
         e[key] = last[key] if same(key) else None
     e['slotsOpen'] = last['open'] + 0; e['slotsLocked'] = last['locked']; e['slotsUnread'] = last['unread']
+    if not last['open']:            # no backpack slot could be read (all covered): nothing known, not "carries nothing"
+        for key in ('heals', 'grenades', 'ammoStacks', 'ultAccel'): e[key] = None
     return e

@@ -766,7 +766,7 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   from a private RSX export (`ui_named/rui`); no image is in the repo. Per game `inventory` = [{t, tEnd, reads, weapons,
   attachments, heals {kind: n}, grenades, ammoStacks, ultAccel, armor, core, backpack, slotsOpen, slotsLocked,
   slotsUnread}], one per opening (keyframes <= 3.5 s apart), from its last keyframe; a value that differs between the
-  last two keyframes is left out. Held-out check (`pcs-handoff\checkset\checkset-inventory.json`, 30 frames of 18 Nov
+  last two keyframes is left out; no slot read at all = heals etc. None. Held-out check (`pcs-handoff\checkset\checkset-inventory.json`, 30 frames of 18 Nov
   22.28, 15 Nov, 7 Nov; dev 17 Nov): no wrong value; weapons 52 / 58 (the rest covered), heal slots 140 / 146, grenade
   slots 59 / 62, the count right on all 204 heal / grenade slots read, ammo kind 58 / 68, armour / core / backpack 30 / 29 / 30 all right. Not read yet: ammo
   amounts (the count digits), attachment kinds, survival item, legend upgrade tree.
