@@ -739,7 +739,15 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   (∞ for the magazine) and modes with no reserve limit (∞ under the magazine: 7 Nov) read as nothing. The weapon in hand
   (slot 1 / 2) = the white name under the panel. Heal slot left of the tactical: the selected item's count (white,
   right-aligned at x 717, rows 1347..1364; columns searched below row 1352 left of x 702, where the icon reaches) and the
-  item by colour (blue = shield cell / battery, not told apart; white = syringe; red = med kit; orange = phoenix, unseen).
+  item by colour (blue = shield cell / battery; white = syringe; red = med kit; orange = phoenix, unseen).
+  Cell vs battery (`heal_kind`, 21 Nov 2026): same blue; a cell's box reaches the icon's bottom (blue rows to 37-38 of
+  `HEAL_ICON`), a battery's box ends higher (29) with a white grille under it (~380 white px; ~120 under a cell); neither
+  shape = no name. `read()` gives it as a 7th value, per game `healSlot` {cols [t, item, count]} (cell / battery /
+  syringe / medkit / phoenix / none; a new item kept once read twice in a row), `healTimeline` unchanged. Check set
+  `pcs-handoff\checkset\healslot\` (split as the ammo set): cells dev 94 / 95, held 91 / 93, batteries 25 / 26 and
+  25 / 25, syringes and med kits all right, none wrong (the rest unnamed). The ammo set's 'b' labels were cells.
+  Phoenix kit and ult accelerant: never selected in the slot on our 7 recordings; the game's phoenix icon is black and
+  white with an orange bar, which the colour test leaves unnamed (no false syringe): not read yet.
   Only the selected kind is shown, so this is "heals of that kind", not all heals. Empty slot = its key hint box (x
   673..701, rows 1380..1406) with no icon and no count, trusted only with the magazine read on the same frame (the death
   box screen hides the slot). Digits: 12 x 18 grey cells against `pcs_banner.json` `ammo` (fonts M, R, H, 'X' = not a
