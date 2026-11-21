@@ -496,11 +496,19 @@ def _hue(p):
     return float(np.median(h))
 
 SQUAD_HUES = (('orange', 20, 58), ('green', 58, 105), ('teal', 150, 195), ('blue', 195, 250), ('purple', 250, 320))
+NAME_WHITE = 0.08      # a squad name has (almost) no white letters: at most this share of its ink is white
+
 def _name(seg, white, col, run):
-    """One word of a name -> None (too little to say), {'side': 'other'} or {'side': 'squad', 'hue', 'color'}."""
+    """One word of a name -> None (too little to say), {'side': 'other'} or {'side': 'squad', 'hue', 'color'}.
+    The colour must be the letters' own, not the background's: the feed's plate is see-through, so on a bright orange,
+    yellow, red, blue or purple screen the background between and around white letters passes the colour test and
+    outnumbers them (about 1 in 30 new Ranked kill lines read an enemy as ours, 20 Nov 2026). The game draws a name
+    either white or in its squad colour, never both: a word with white letters is not a squad name (squad names read
+    on our recordings: at most 5 % white ink; white names over coloured screens: 9 to 40 %)."""
     s, e = run; w = int(white[:, s:e].sum()); c = int(col[:, s:e].sum())
     if w + c < 40: return None
     if c > 0.6 * (w + c):
+        if w > NAME_WHITE * (w + c): return None              # white letters: the colour is the screen behind them
         h = _hue(seg[:, s:e][col[:, s:e]])
         return {'side': 'squad', 'hue': round(h), 'color': next((n for n, lo, hi in SQUAD_HUES if lo <= h < hi), 'other')}
     if w > 0.6 * (w + c): return {'side': 'other'}

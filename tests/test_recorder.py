@@ -5420,6 +5420,45 @@ def test_feed_ranked_kill_lines():
     assert F.squad_lines([ln(400, "kill", sq(220), other, vs=v1)], 0, 900, squad) == []
 
 
+def test_feed_name_colour_vs_background():
+    """Kill-feed names (21 Nov 2026): the feed's plate is see-through, so on a bright orange / yellow / red / blue screen
+    the background between white letters passed the colour test and outnumbered them: an enemy read as our squad (about
+    1 in 30 new Ranked kill lines). The game draws a name white or in its squad colour, never both: a word with white
+    letters gets no side. Squad names, also pale ones on a light plate or on a red screen, stay ours."""
+    import numpy as np
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scanner"))
+    import pcs_hud as HUD
+
+    def seg(bg, ink, n=10):
+        """33 rows like kill_parts' slice; n letters (3 px strokes, rows 8..26) from x 4 in `ink` on `bg`."""
+        a = np.zeros((33, 80, 3), np.int16) + np.array(bg, np.int16)
+        for k in range(n):
+            a[8 if k % 2 else 12:27, 4 + 7 * k:7 + 7 * k] = ink
+        return a
+
+    def side(a):
+        white, red, col, gold = HUD._feed_masks(a)
+        r = HUD._gap_runs((white | col).sum(0) >= 2, 9)[0]
+        old_squad = int(col[:, r[0]:r[1]].sum()) > 0.6 * int((white | col)[:, r[0]:r[1]].sum())   # the rule before
+        return HUD._name(a, white, col, r), old_squad
+
+    WHITE = (240, 240, 240)
+    # white enemy names on bright screens: the colour between the letters outnumbers them (read as ours before)
+    for bg in ((235, 150, 45), (200, 112, 100), (125, 178, 216), (170, 100, 190)):     # orange, red, blue, purple
+        got, old = side(seg(bg, WHITE))
+        assert old and got is None, (bg, got)
+    # our orange name on a dark olive plate (7 Nov 6427, a teammate with +8 RP a second later): still ours
+    got, _ = side(seg((70, 62, 30), (235, 160, 45)))
+    assert got and got["side"] == "squad" and got["color"] == "orange", got
+    # our green name on a red screen, and a pale green name on a light plate (firing range, 7 Nov): still ours
+    for bg, ink in (((200, 40, 35), (150, 215, 60)), ((150, 160, 120), (150, 171, 51))):
+        got, _ = side(seg(bg, ink))
+        assert got and got["side"] == "squad" and got["color"] == "green", (bg, got)
+    # white name on a dark plate: an enemy, as before
+    got, _ = side(seg((40, 40, 45), WHITE))
+    assert got == {"side": "other"}, got
+
+
 def test_ranked_rp_and_badges():
     """Ranked: the green '+N RP' at the end of our kill lines (and Team Eliminated / Previous Kill Points lines), the
     victim's rank badge, and the game's RP counter under the rank emblem. Digits are drawn from the table's own shapes."""

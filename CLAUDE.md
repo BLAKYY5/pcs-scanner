@@ -520,7 +520,12 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   event and weapon within 10 s (kill: 25 s) at the same place or lower is that line whatever the name; '+N RP' kill
   lines with the same number are compared without weapon (misread over red) and colour. Lines while the player is dead
   and spectating (`dead_spans`: 2 s after each `ownDeaths` to his respawn, and 5 s after `tEndGame`) are not ours: the
-  game spectates the killers and colours their names. Measured: see "Fights" and the PR.
+  game spectates the killers and colours their names. Colour against the background (`_name`, coach's decision
+  21 Nov 2026): the plate is see-through, so on a bright orange / yellow / red / blue screen the background between
+  white letters passed the colour test and outnumbered them (about 1 in 30 new Ranked lines read an enemy as ours); a
+  name is drawn white or in its squad colour, never both, so a word whose ink is more than `NAME_WHITE` (8 %) white gets
+  no side (squad names on our recordings: at most 5 %; white names over coloured screens: 9 to 40 %). Left: a bright
+  patch next to the weapon icon with no letters (7 Nov 4482), and coloured names of other squads. Measured: see "Fights" and the PR.
 - **Legend select screen**: `pcs_hud.Legends` recognises the squad roster at the top left before a game (ranked:
   rank badges left of the slots; other modes: no badges, roster 114 px further left). A screen seen for 8 s to
   2 min starts a game (`games[].select`: `tFirst`, `tLast`, `ranked`, `squad[]` with `slot`, `legend`, `self`,
