@@ -1090,6 +1090,10 @@ def _lin(n, m):
 class OwnStats:
     """The recording player's own numbers in the strip under "SQUADS LEFT": kills (skull), assists (handshake),
     knocks (dark digits on a white plate, ranked) and damage (its own plate, right).
+    'knocks' is the reader's old name for the third number: in Ranked it is not the player's knocks but "participation",
+    the squad's kills the player took part in without the kill or an assist (by eye on the 17 / 18 Nov Ranked
+    recordings: it never moved on the player's own knocks, and rose with each teammate kill that gave neither a kill nor
+    an assist). The scan keeps 'knocks' and adds the same value as games[].own.participation.
 
     Nothing is at a fixed place: the strip is built from the right (the damage plate's digits end at x = 2336, the
     plate grows to the left with the number), and the other plates come and go (kills + assists once one is not zero,

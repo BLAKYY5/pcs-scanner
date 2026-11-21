@@ -946,6 +946,13 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
                         if f[3]:    # the read before it: the rise happened in between (the sound check looks there)
                             prev = [t_ for t_, o in own if 'damage' in o and g['tStart'] <= t_ < f[1]]
                             if prev: st['damagePrevReadAt'] = round(prev[-1], 2)
+            if 'knocks' in st:
+                # The strip's third number (dark digits on the white plate, Ranked) is NOT the player's knocks: it counts
+                # the squad's kills the player took part in without the kill or an assist ("participation"; checked by
+                # eye on the 17 / 18 Nov Ranked recordings, 20 Nov 2026). 'knocks' is kept as it was (contract); the
+                # same value under its right name:
+                for a, b in (('knocks', 'participation'), ('knocksAt', 'participationAt'), ('knocksLastRead', 'participationLastRead')):
+                    st[b] = st[a]
             dr = change_reads(own, 'damage', g['tStart'], hi)
             if dr and st: st['damageReads'] = dr                           # the hub splits damage per life (decision 35);
             #   never alone: no number confirmed = no games[].own, as before

@@ -250,6 +250,8 @@ def test_review_page_texts():
     assert "'banner picked up'" in js and "'banner crafted'" in js and "t('beacon') + at(r.beaconAt)" in js   # respawn steps
     assert "+ 480)" not in js and "r.gbPerHour + ' GB" not in js               # GB per hour: one formula (gbHour)
     assert "File missing" in js and "Video format not supported" in js
+    # the Ranked strip's third number: "Participation", only when the scan has it (pubs and scrims show no such plate)
+    assert "if (own.knocks != null) stats.push(v('knocks'" in js and "t('Participation')" in js and "t('Knocks')" not in js
 
 
 class _S:            # recorder settings stand-in
