@@ -3241,7 +3241,9 @@ def _ammo_frame(mag=None, res=None, heal=None, item=None, hint=False, slot=2):
         for ch in reversed(str(heal)):
             w = 7 if ch == '1' else 12
             put('H', ch, (x - w - 1, x + 1, A.HEAL_ROWS[0], A.HEAL_ROWS[1]), 245, 30); x -= w + 4
-    if item == 'shield': a[1322:1360, 656:684] = (40, 70, 200)
+    if item in ('shield', 'cell'): a[1322:1360, 656:684] = (40, 70, 200)           # a cell: the blue box to the bottom
+    if item == 'battery':                                                               # shorter box, white grille under it
+        a[1318:1346, 656:684] = (40, 70, 200); a[1349:1359, 656:684] = 235
     if hint: a[1380:1406, 673:701] = 235
     if slot == 2: a[1390:1402, 2300:2420:2] = 240
     if slot == 1: a[1390:1402, 2080:2240:2] = 240
@@ -3347,10 +3349,13 @@ def test_ammo_reader_and_events():
     assert set(A.T) == {'M', 'R', 'H'}, list(A.T)
     assert A.read(np.zeros((1440, 2560, 3), np.uint8), 1.0) is None
     r = A.read(_ammo_frame(24, 72, 12, 'shield'), 5.0)
-    assert r == (5.0, 24, 72, 'shield', 12, 2), r
+    assert r == (5.0, 24, 72, 'shield', 12, 2, 'cell'), r
     r = A.read(_ammo_frame(8, 140, 3, 'shield', slot=1), 6.0)
-    assert r == (6.0, 8, 140, 'shield', 3, 1), r
+    assert r == (6.0, 8, 140, 'shield', 3, 1, 'cell'), r
+    r = A.read(_ammo_frame(8, 140, 2, 'battery', slot=1), 6.0)                         # same blue, the battery's shape
+    assert r == (6.0, 8, 140, 'shield', 2, 1, 'battery'), r
     assert A.read(_ammo_frame(30, 210, hint=True), 7.0)[3:5] == ('none', 0)             # heal slot empty
+    assert A.read(_ammo_frame(30, 210, hint=True), 7.0)[6] == 'none'
     assert A.read(_ammo_frame(hint=True), 7.0) is None                                  # no ammo read: not trusted
     assert A.read(_ammo_frame(30, 210), 7.0)[3:5] == (None, None)                        # no key hint: unknown
     # per game
@@ -3373,6 +3378,18 @@ def test_ammo_reader_and_events():
                                 'outOfHealsSeconds': 20.0}, g['ammoSummary']
     assert [r[0] for r in g['ammoTimeline']['rows']] == [10.0, 20.0, 40.0, 50.0, 70.0], g['ammoTimeline']   # same reads kept once
     assert g['healTimeline']['rows'][0] == [10.0, 'shield', 4]
+    assert g['healSlot']['rows'] == [], g['healSlot']                                    # old 6-value reads: no exact item
+    rows7 = [(10.0, 28, 200, 'shield', 4, 1, 'cell'), (11.0, 28, 200, 'shield', 4, 1, 'cell'),
+             (12.0, 28, 200, 'shield', 2, 1, 'battery'),                                 # one read: not yet
+             (13.0, 28, 200, 'shield', 3, 1, 'cell'),                                    # a new count: at once
+             (14.0, 28, 200, 'shield', 2, 1, 'battery'), (15.0, 28, 200, 'shield', 2, 1, 'battery'),
+             (16.0, 28, 200, 'shield', 2, 1, None),                                      # unsure: left out
+             (17.0, 28, 200, 'none', 0, 1, 'none'), (18.0, 28, 200, 'none', 0, 1, 'none')]
+    g2 = [{'tStart': 0.0, 'tEndGame': 100.0, 'fights': []}]
+    A.attach(g2, rows7, [])
+    assert g2[0]['healSlot'] == {'cols': ['t', 'item', 'count'], 'rows': [[10.0, 'cell', 4], [13.0, 'cell', 3],
+                                 [14.0, 'battery', 2], [17.0, 'none', 0]]}, g2[0]['healSlot']
+    assert [r[1] for r in g2[0]['healTimeline']['rows']] == ['shield'] * 4 + ['none']   # unchanged
     h = games[1]
     assert h['ammoEvents'] == [{'t': 132.0, 'kind': 'lowAmmoFight', 'mag': 6, 'reserve': 0, 'magFull': 6, 'fightEnd': 140.0}], h['ammoEvents']
     assert h['ammoSummary']['outOfHeals'] == 0                                           # empty from the start: not "ran out"
