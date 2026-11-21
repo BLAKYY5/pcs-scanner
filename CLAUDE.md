@@ -137,6 +137,17 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   signs: rank badges are round too). Wildcard and pubs come from the loading banner's word (pubs: trios
   only, word TRIOS) or the playlist emblem (`pcs_hud.ModeEmblem`; pubs duos likely shows the same "unranked"
   emblem: not seen yet). The block label (`labels.explain_block`) takes scrims, ranked, wildcard, pubs in that order.
+- **Every squad's drop in Ranked** (`games[].rankedDrops`, 21 Nov 2026): the dropzone screen first shows the squads near
+  ours, then for its last ~3 s every squad's marker (red shield; ours green, with a green ring). `read_dropscreen` keeps
+  the screen's markers in `DROP_MARKS` (`drop_marks`: blobs of a marker's size, `MARK_AREA` 120..560 px at 1440p: ~400,
+  a grid line across one or our green ring over it leaves 140-250, pieces within 25 px joined, the map's 16 px red dots
+  left out; a blob of 2-4 markers' size = touching markers, `squads`); the rankedDrop events carry them as `marks`.
+  `ranked_drops` joins them over the screen's keyframes: a marker counts when read on 2 keyframes within 1.5 % ->
+  [{x, y (map %), poi, poiName (`landing_poi`: BM / KC far from every centre = none), ours, reads, squads?}], ours first.
+  Absent when the screen was not read (a map zoomed in on the screen: markers pinned at the edges). Check set
+  `pcs-handoff\checkset\rankeddrops\` (dev 17 Nov, held 18 Nov 16.32 + 22.28, split before tuning): dev 303 / 303 enemy
+  drops, held 189 / 189, none false; our drop named as the screen's "DROPPING AT" words 16 / 16 and 9 / 10 (the game
+  calls our "Jurassic" "Forbidden Zone"). Lobbies of 19 squads show 19 markers.
 - **Wildcard games are left out** (coach, 21 Nov 2026: modified maps, rings, weapons, LTMs: "just ignore their data
   altogether"). The mode is known only after the keyframe pass (the emblem is voted over the game's window), so those
   frames are still read once; then `timeline` makes no 60 fps reads for the game (no clips asked on the team server),

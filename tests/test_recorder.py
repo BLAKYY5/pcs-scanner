@@ -2127,6 +2127,26 @@ def test_scrim_drop_screen_read_under_a_banner():
     assert (rd["tFirst"], rd["tLast"], rd["frames"], len(rd["spots"]), rd["ranked"]) == (600.0, 602.0, 3, 20, True), rd
     assert games[0]["mode"] == "ranked" and games[0]["banner"]["mode"] == "ranked", games[0]["modeSeen"]
 
+    # with the screen's markers read (the real read_dropscreen keeps them in DROP_MARKS): every squad's drop point
+    marks = [{"x": 20.35, "y": 69.68, "kind": "ours", "area": 400, "n": 1, "px": 0, "py": 0},
+             {"x": 58.0, "y": 69.0, "kind": "enemy", "area": 400, "n": 1, "px": 0, "py": 0}]
+    def stub(a, loose=False):
+        SCAN.DROP_MARKS = None
+        if not (a[600, 2000] == (90, 40, 40)).all(): return None
+        SCAN.DROP_MARKS = marks
+        return {"map": "SP", "err": 0.02, "spots": spots}
+    HUD.BANNER_T = {"mode": {"ranked": [HUD.Banner.read(banner_only)["modeSig"]]}, "map": {}}
+    SCAN.read_dropscreen = stub
+    try:
+        events, samples, _ = SCAN.scan_frames([(600.0 + k, img) for k in range(3)], quiet=True)
+    finally:
+        SCAN.read_dropscreen = real; HUD.BANNER_T = keep; SCAN.DROP_MARKS = None
+    events += [{"t": 638.0 + 2 * k, "kind": "select", "data": {"squad": sq, "ranked": True}} for k in range(14)]
+    games = SCAN.assemble(events); SCAN.timeline(games, [])
+    assert "marks" not in games[0]["rankedDrop"], games[0]["rankedDrop"].keys()       # rankedDrop as before
+    assert [(d["poi"], d["poiName"], d["ours"], d["reads"]) for d in games[0]["rankedDrops"]] == \
+        [("sp-cenote-cave", "Cenote Cave", True, 3), ("sp-wattsons-pylon", "The Pylon", False, 3)], games[0]["rankedDrops"]
+
     # any ranked sign beats a drop screen read without the RANKED title; Wildcard / pubs signs don't (as before)
     def seen(**kw):
         g = {"tStart": 100.0, "drop": {"map": "WE", "spots": spots}, **kw}
@@ -2140,6 +2160,33 @@ def test_scrim_drop_screen_read_under_a_banner():
     assert m["mode"] == "ranked" and g["drop"]["ranked"] is True, m
     g, m = seen(banner={"mode": "wildcard"})
     assert m["mode"] == "scrim" and "ranked" not in g["drop"], m
+
+
+def test_ranked_drops_from_dropzone_markers():
+    # Ranked's dropzone screen: one marker per squad (~400 px). A grid line cuts a marker in pieces (joined), the map's
+    # small red dots are not markers, two touching markers read as one blob of twice the size.
+    import numpy as np
+    M = np.array([[0.1, 0], [0, 0.1], [0, 0]])          # panel px -> map %: 1000 px = 100 %
+    red = [(200.0, 300.0, 400), (500.0, 500.0, 240), (500.0, 515.0, 90), (700.0, 700.0, 16), (800.0, 200.0, 820),
+           (900.0, 900.0, 5000)]
+    grn = [(150.0, 650.0, 410)]
+    m = SCAN.drop_marks(M, "SP", red, grn)
+    got = sorted((d["kind"], round(d["x"]), round(d["y"]), d["n"]) for d in m)
+    assert got == [("enemy", 20, 30, 1), ("enemy", 50, 50, 1), ("enemy", 80, 20, 2), ("ours", 15, 65, 1)], got
+
+    # across keyframes: a marker counts when read twice at the same place; a single read is dropped
+    one = lambda x, y, kind="enemy", n=1: {"x": x, "y": y, "kind": kind, "area": 400, "n": n}
+    frames = [(10.0, [one(20.35, 69.68, "ours"), one(58.0, 69.0), one(80.0, 23.0, n=2), one(40.0, 10.0)]),
+              (11.0, [one(20.4, 69.7, "ours"), one(58.3, 69.2), one(80.1, 23.1, n=2)])]
+    d = SCAN.ranked_drops("SP", frames)
+    assert [(x["poi"], x["poiName"], x["ours"], x["reads"], x.get("squads")) for x in d] == [
+        ("sp-cenote-cave", "Cenote Cave", True, 2, None), ("sp-lightning-rod", "Lightning Rod", False, 2, 2),
+        ("sp-wattsons-pylon", "The Pylon", False, 2, None)], d
+    assert abs(d[0]["x"] - 20.375) < 0.01 and abs(d[0]["y"] - 69.69) < 0.01, d[0]
+    assert SCAN.ranked_drops("SP", []) is None
+    # Broken Moon has POI centres only: a drop far from every centre gets no name (as landings)
+    far = SCAN.ranked_drops("BM", [(1.0, [one(99.0, 99.0)]), (2.0, [one(99.0, 99.0)])])
+    assert far[0]["poi"] is None and far[0]["poiName"] is None, far
 
 
 def test_mode_from_playlist_emblem():

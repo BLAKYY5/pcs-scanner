@@ -140,9 +140,38 @@ def landing_poi(mp, x, y):
     return pid if (p['x'] - x) ** 2 + (p['y'] - y) ** 2 <= POI_NEAR ** 2 else None
 
 # ---------- frame readers ----------
+MARK_AREA = (120, 560)      # px at 1440p: one drop marker (shield) on the drop screen's map, red or green, after closing
+                            # (~400; a grid line across it or the green ring over it leaves 140-250)
+MARK_MAX = 4                # touching markers read as one blob: up to this many, split by area
+DROP_MARKS = None           # the markers of the last drop screen read_dropscreen accepted (else None)
+
+def drop_marks(M, mp, red, grn, scale=1.0):
+    """Drop markers on the drop screen's map: blobs the size of a marker (the map's small red dots are 16 px, the
+    'nearby' rings are not filled), touching markers split by area. -> [{x, y, kind, area}] in map %."""
+    out = []
+    lo, hi = MARK_AREA[0] * scale * scale, MARK_AREA[1] * scale * scale
+    for kind, L in (('enemy', red), ('ours', grn)):
+        merged = []     # the map's grid lines cut a marker in two: pieces within 25 px are one marker
+        for x, y, ar in sorted(L, key=lambda v: -v[2]):
+            for m in merged:
+                if abs(m[0] - x) < 25 and abs(m[1] - y) < 25:
+                    m[0] = (m[0] * m[2] + x * ar) / (m[2] + ar); m[1] = (m[1] * m[2] + y * ar) / (m[2] + ar); m[2] += ar; break
+            else: merged.append([x, y, ar])
+        for x, y, ar in merged:
+            n = 1 if ar <= hi else int(round(ar / ((lo + hi) / 2)))
+            if ar < lo or n > MARK_MAX: continue
+            X, Y = (np.array([x, y, 1]) @ M)
+            if not (0 <= X <= 100 and 0 <= Y <= 100): continue
+            out.append({'x': round(float(X), 2), 'y': round(float(Y), 2), 'kind': kind, 'area': int(ar), 'n': n,
+                        'px': round(float(x)), 'py': round(float(y))})      # panel pixels (checking by eye)
+    return out
+
 def read_dropscreen(a, loose=False):
     """Scrim/custom pre-game screen: drop map panel on the right with red/green markers.
-    a: the frame (uint8 or int16); the gates only compare values, the panel is made int16 here for its arithmetic."""
+    a: the frame (uint8 or int16); the gates only compare values, the panel is made int16 here for its arithmetic.
+    Also keeps the screen's whole markers in DROP_MARKS (Ranked's dropzone screen: rankedDrops)."""
+    global DROP_MARKS
+    DROP_MARKS = None
     q = a[88:1088:4, 1520:2520:4]            # cheap gate on a 1/16 sample: dark panel with red markers
     if ((q[..., 0] > 140) & (q[..., 1] < 50) & (q[..., 2] < 50)).sum() < 25: return None   # no brightness test: Storm Point is bright
     lg = a[1125:1180, 1740:1800]; lr = a[1125:1180, 2020:2075]
@@ -173,6 +202,7 @@ def read_dropscreen(a, loose=False):
             X, Y = (np.array([x, y, 1]) @ M)
             pid, inside = poi_at(mp, X, Y)
             spots.append({'poi': pid, 'inside': inside, 'x': round(float(X), 2), 'y': round(float(Y), 2), 'kind': kind})
+    DROP_MARKS = drop_marks(M, mp, red, grn)
     return {'map': mp, 'err': round(err, 3), 'spots': spots}
 
 class MapReader:
@@ -222,6 +252,36 @@ class MapReader:
         me = [[round(float(v), 2) for v in (np.array([x, y, 1]) @ M)] + [a_] for x, y, a_ in me]
         return {'map': mp, 'err': round(err, 3), 'scale': round(float(M[0, 0]), 4), 'harv': hv, 'me': me, 'dropMarks': dm}
 
+DROP_NEAR = 1.5            # map %: one marker read on two keyframes lands within this (markers are ~3 % wide)
+DROP_READS = 2             # keyframes a marker must be read on to count
+
+def ranked_drops(mp, frames):
+    """Ranked's dropzone screen (17 Nov 2026 update): every squad's drop point. The screen first shows the squads
+    near ours, then for its last ~3 s every squad's marker (red; ours green). frames = [(t, marks)] of the screen's
+    keyframes; a marker counts when read on DROP_READS keyframes at the same place (one read alone could be anything
+    red of that size). -> [{x, y, poi, poiName, ours, reads, squads?}] in map %, ours first, then top to bottom;
+    None when the screen was not read (zoomed in, other screen)."""
+    if not frames: return None
+    cl = []
+    for t, marks in frames:
+        for m in marks:
+            for c in cl:
+                if c['kind'] == m['kind'] and abs(c['x'] - m['x']) < DROP_NEAR and abs(c['y'] - m['y']) < DROP_NEAR:
+                    c['xs'].append(m['x']); c['ys'].append(m['y']); c['ns'].append(m['n']); c['ts'].add(t); break
+            else: cl.append({'kind': m['kind'], 'x': m['x'], 'y': m['y'], 'xs': [m['x']], 'ys': [m['y']], 'ns': [m['n']], 'ts': {t}})
+    names = {p['id']: p['name'] for p in MAPS[mp]['pois']}
+    out = []
+    for c in cl:
+        if len(c['ts']) < DROP_READS: continue
+        x, y = round(sum(c['xs']) / len(c['xs']), 2), round(sum(c['ys']) / len(c['ys']), 2)
+        pid = landing_poi(mp, x, y)
+        d = {'x': x, 'y': y, 'poi': pid, 'poiName': names.get(pid), 'ours': c['kind'] == 'ours', 'reads': len(c['ts'])}
+        n = max(set(c['ns']), key=c['ns'].count)
+        if n > 1: d['squads'] = n         # touching markers read as one
+        out.append(d)
+    out.sort(key=lambda d: (not d['ours'], d['y'], d['x']))
+    return out
+
 # ---------- games ----------
 def new_game(t, mp):
     return {'tStart': t, 'tEnd': t, 'map': mp, 'drop': None, 'harvRaw': [], 'mapFrames': 0, 'calib': []}
@@ -233,7 +293,8 @@ def assemble(events):
         R = [x for x in rdrop if 0 <= t - x[0] < 180]; rdrop.clear()
         if not R: return
         best = max(R, key=lambda x: len(x[1]['spots']))[1]
-        g['rankedDrop'] = dict(best, tFirst=R[0][0], tLast=R[-1][0], frames=len(R))
+        g['rankedDrop'] = dict({k: v for k, v in best.items() if k != 'marks'}, tFirst=R[0][0], tLast=R[-1][0], frames=len(R))
+        g['rankedDrops'] = ranked_drops(best['map'], [(t, d['marks']) for t, d in R if d.get('marks') is not None and d['map'] == best['map']])
     def titled(g, t):
         """Give the game the mode and map words of the loading banner seen just before its legend select
         (the word read most often; a word the scanner doesn't know yet is kept as its shape)."""
@@ -303,6 +364,7 @@ def assemble(events):
         if g.get('select'): out[-1]['select'] = {k: v for k, v in g['select'].items() if not k.startswith('_')}
         if g.get('banner'): out[-1]['banner'] = g['banner']
         if g.get('rankedDrop'): out[-1]['rankedDrop'] = g['rankedDrop']
+        if g.get('rankedDrops') is not None: out[-1]['rankedDrops'] = g['rankedDrops']
     # a game opened by its legend select where nobody opened the full map: same map as the nearest game of the
     # session (less than 45 min away), marked as a guess
     known = [g for g in out if g['map'] != '?']
@@ -494,6 +556,7 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             d = read_dropscreen(view_drop(img) if st else img, st)
             if d and bn and bn.get('mode') == 'ranked':     # Ranked's drop-point screen ("RANKED - DROPZONE", 17 Nov
                 d['ranked'] = True                          # 2026 update): same layout as the scrim one, kept as data only
+                if DROP_MARKS is not None: d['marks'] = DROP_MARKS   # every squad's marker: rankedDrops
                 events.append({'t': round(t, 2), 'kind': 'rankedDrop', 'data': d}); break
             if d: events.append({'t': round(t, 2), 'kind': 'drop', 'data': d}); votes[st] += 1; break
             d = mr.read(view_map(img) if st else img, st)
