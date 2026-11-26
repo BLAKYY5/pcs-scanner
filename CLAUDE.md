@@ -189,6 +189,14 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   Wildcard / pubs games (69 to 369 reads each, never the other one) and was read once in 38 ranked games.
 - **YouTube**: blocks = recordings less than `yt_gap_min` apart, one video per block per player, ffmpeg concat
   with stream copy, chapters per game. State in `youtube.json` keyed by the block's first recording.
+  Firing Range minutes are cut out (coach, 27 Nov 2026: "Yes, cut them") when a recording has games and scan
+  `firingRange` stretches (`range_cuts`; older scans: no cut): never within 150 s before / 30 s after a game
+  (`GAME_MARGIN_S`) or 60 s of a hand mark, pieces of 60 s or more; the next kept piece starts on the keyframe at or
+  before the cut's end (`plan_cuts`, ffprobe packet flags, no decoding; no keyframe found = no cut), so only ever a
+  little more is kept. Each kept piece is its own part (`-ss <keyframe> -to`, picture copied), all joined as before.
+  `youtube.json` keeps `segments` per recording [[from, to, video at]] (from the parts' own lengths); chapters and
+  marked moments go through `video_at`, and the hub gets each recording's `segments` with `/api/videos` (hub `videos.video_time`;
+  `offset` stays right for the first piece for older hubs). Checked on a test video: the same frame at mapped times.
   `ready_blocks()` has side effects (marks skipped, asks for EEC once); `queue()` is the read-only view.
   Uploads pause while Apex runs; night mode gates them unless the block was requested by hand.
 - **EEC drops** (`eec.py`, coach's rule 18 Nov 2026: "EEC is correct 95% of the time"): drops come from the export's

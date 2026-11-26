@@ -4282,6 +4282,102 @@ def test_silent_voice_or_mic_track_warned_once():
     assert [t for t, *_ in ui.notes] == ["Mic track was silent"] and read == [1]      # mic = 2nd track here
 
 
+def test_youtube_cuts_firing_range():
+    """Coach, 27 Nov 2026: Firing Range minutes are cut out of a block's YouTube video when the recording also has
+    games, from the scan's `firingRange` stretches, on the safe side (margins around games and hand marks, pieces of
+    60 s or more, the next piece starting on the keyframe at or before the cut's end). Chapters, marks and what the
+    hub is told (offsets, durations, each recording's kept parts) follow the cut video; a scan without `firingRange`
+    is not cut."""
+    import json
+    import shutil
+    import subprocess
+    from pcs_recorder import youtube as Y
+    games = [{"tStart": 1000.0, "tEndGame": 2000.0}, {"tStart": 6000.0, "tEndGame": 7000.0}]
+    fr = [{"t0": 2010.0, "t1": 5900.0, "reads": 3000}, {"t0": 100.0, "t1": 150.0, "reads": 40}]
+    assert Y.range_cuts({"games": games}) == [] and Y.range_cuts({"games": [], "firingRange": fr}) == []
+    assert Y.range_cuts({"games": games, "firingRange": fr}) == [(2030.0, 5850.0)]       # 30 s after, 150 s before
+    marks = {"events": [{"t": 4000.0, "kind": "mark"}, {"t": 3000.0, "kind": "mute", "track": "mic", "muted": True}]}
+    assert Y.range_cuts({"games": games, "firingRange": fr}, marks) == [(2030.0, 3940.0), (4060.0, 5850.0)]
+    segs = [[0.0, 2030.0, 0.0], [5849.0, 8000.0, 2030.0]]
+    assert Y.video_at(segs, 0, 1000.0) == 1000.0 and Y.video_at(segs, 0, 6000.0) == 2030.0 + 151.0
+    assert Y.video_at(segs, 0, 3000.0) == 2030.0 and Y.video_at(None, 50.0, 10.0) == 60.0     # in a cut: where it goes on
+
+    if shutil.which("ffmpeg") is None:
+        print("  (no ffmpeg: cutting not tested)")
+        return
+    folder = TMP / f"ytcut-{time.time_ns()}"
+    folder.mkdir()
+    real_margin = Y.GAME_MARGIN_S
+    Y.GAME_MARGIN_S = (10, 5)                                    # short test videos
+    try:
+        idx = {}
+        for key, scan in (("a", {"games": [{"map": "WE", "mode": "scrim", "tStart": 5.0, "tEndGame": 15.0,
+                                           "drop": {"spots": [{"poi": "x"}] * 20}, "landing": {"exitAtExact": 8.0}},
+                                          {"map": "SP", "mode": "scrim", "tStart": 110.0, "tEndGame": 115.0,
+                                           "drop": {"spots": [{"poi": "x"}] * 20}, "landing": {"exitAtExact": 112.0}}],
+                                "firingRange": [{"t0": 30.0, "t1": 95.4, "reads": 60}]}),
+                          ("b", {"games": [{"map": "WE", "mode": "scrim", "tStart": 10.0, "tEndGame": 20.0,
+                                           "drop": {"spots": [{"poi": "x"}] * 20}, "landing": {"exitAtExact": 12.0}}]})):
+            v = folder / f"Apex Legends_{key}.mp4"
+            subprocess.run(["ffmpeg", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "testsrc=s=160x90:d=120:r=30",
+                            "-f", "lavfi", "-i", "sine=440:d=120", "-map", "0:v", "-map", "1:a", "-c:v", "mpeg4", "-g", "30",
+                            "-c:a", "aac", "-shortest", str(v)], check=True)
+            (v.with_suffix(".scan")).mkdir()
+            (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps(scan))
+            v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game"], "events": []}))
+            idx[key] = retention.Entry(path=str(v), started=time.time() - 3600 + (200 if key == "b" else 0), status="scanned")
+        cuts = Y.range_cuts(Y.scan_of(idx["a"]))
+        assert cuts == [(30.0, 95.4)], cuts
+        pieces = Y.plan_cuts(idx["a"].path, cuts, Y.duration(idx["a"].path))
+        assert pieces == [(0.0, 30.0), (95.0, None)], pieces                  # keyframe at or before 95.4
+        assert Y.plan_cuts(idx["b"].path, [], 120.0) is None
+
+        class Rec:
+            current = None
+        rec = Rec()
+        rec.idx = idx
+        Y.STATE_FILE.unlink(missing_ok=True)
+        s = settings.Settings(player="Moe", folder=str(folder), yt_enabled=True, yt_wait_eec=False)
+        up = Y.Uploader(s, rec, FakeUI(), lambda: None, lambda: False)
+        sent, kept = [], {}
+
+        def send(path, title, desc, privacy=None, kind=None):
+            sent.append(desc)
+            shutil.copy(path, folder / "uploaded.mp4")
+            return "AbCdEfGhIjK"
+        up._send = send
+        up.state["a"] = {"keys": ["a", "b"]}
+        up._upload_block(["a", "b"])
+        st = up.state["a"]
+        assert st["status"] == "done", st
+        sg = st["segments"]
+        assert [x[:2] for x in sg[0]] == [[0.0, 30.0], [95.0, 120.0]] and [x[:2] for x in sg[1]] == [[0.0, 120.0]], sg
+        assert sg[0][0][2] == 0.0 and abs(sg[0][1][2] - 30.0) < 0.1 and abs(sg[1][0][2] - 55.0) < 0.2, sg
+        assert st["offsets"] == [0.0, sg[1][0][2]] and abs(st["durations"][0] - 55.0) < 0.2, st
+        out = folder / "uploaded.mp4"
+        assert abs(Y.duration(str(out)) - 175.0) < 0.5                       # 65 s of Firing Range cut out
+        # the same picture at the mapped times (testsrc draws a moving pattern + counter)
+        import numpy as np
+
+        def frame(f, t):
+            r = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", f"{t:.3f}", "-i", f, "-frames:v", "1", "-f",
+                                "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True).stdout
+            return np.frombuffer(r, np.uint8).astype(int)
+        for k, t in (("a", 10.0), ("a", 112.0), ("b", 12.0)):
+            i = ["a", "b"].index(k)
+            vt = Y.video_at(sg[i], st["offsets"][i], t)
+            assert np.abs(frame(idx[k].path, t) - frame(str(out), vt)).mean() < 1.0, (k, t, vt)
+        # chapters follow the cut video: game 2 of "a" at 30 + (110 - 95) = 0:45, "b"'s game at 55 + 10 = 1:05
+        assert "0:45 Game 2" in sent[0] and "1:05 Game 3" in sent[0], sent[0]
+        m = up.video_mapping("a")
+        assert m["recordings"][0]["segments"] == sg[0] and "segments" in m["recordings"][1]
+        assert [round(g["videoAt"]) for g in m["games"]] == [8, 47, 67], m["games"]     # 112 -> 30 + 17
+        assert m["recordings"][0]["offset"] == 0.0
+    finally:
+        Y.GAME_MARGIN_S = real_margin
+        Y.STATE_FILE.unlink(missing_ok=True)
+
+
 def test_youtube_video_map_to_hub():
     """After a block is on YouTube, the app tells the hub which recordings the video holds, at what offsets (Watch
     together). No hub: nothing. Same retry rules as the scan results; an older hub (404) is asked again later."""
