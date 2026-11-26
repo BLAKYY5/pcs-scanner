@@ -597,7 +597,6 @@
  "Only after a night upload, once nothing is left to send and the PC is still unused. Windows warns 1 minute before; moving the mouse cancels it.": "Only after a night upload, once nothing is left to send and the PC is still unused. Windows warns 1 minute before; moving the mouse cancels it.",
  "Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.": "Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.",
  "Only if {player} still shares it: the team hub is asked when the clip is made": "Only if {player} still shares it: the team hub is asked when the clip is made",
- "Only menus or lobby were recorded: it's deleted {when} (and first, if space is needed).": "Only menus or lobby were recorded: it's deleted {when} (and first, if space is needed).",
  "Only on this recording.": "Only on this recording.",
  "Only our squad": "Only our squad",
  "Only recordings made by auto-record belong to a scrim block": "Only recordings made by auto-record belong to a scrim block",
@@ -962,7 +961,6 @@
  "The recording's picture can't be read.": "The recording's picture can't be read.",
  "the scan couldn't read the video": "the scan couldn't read the video",
  "The scan couldn't read this recording. It's kept: press Scan again on it in Recordings.": "The scan couldn't read this recording. It's kept: press Scan again on it in Recordings.",
- "The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings": "The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings",
  "The scan starts in {n} s, then the results are sent.": "The scan starts in {n} s, then the results are sent.",
  "The scanner stopped with an error (code {code}). The recording is kept; details in {file}": "The scanner stopped with an error (code {code}). The recording is kept; details in {file}",
  "The session ended (the coach left).": "The session ended (the coach left).",
@@ -1260,5 +1258,9 @@
  "Labelled {label}: scanned again with every game.": "Labelled {label}: scanned again with every game.",
  "Wildcard: not scanned": "Wildcard: not scanned",
  "Participation": "Participation",
- "Ranked only: your squad's kills you took part in, without the kill or an assist": "Ranked only: your squad's kills you took part in, without the kill or an assist"
+ "Ranked only: your squad's kills you took part in, without the kill or an assist": "Ranked only: your squad's kills you took part in, without the kill or an assist",
+ "Firing Range": "Firing Range",
+ "Training ground: left out of the scan": "Training ground: left out of the scan",
+ "The scan found no game in it (menus, lobby, Firing Range): deleted first, and after the time set in Settings": "The scan found no game in it (menus, lobby, Firing Range): deleted first, and after the time set in Settings",
+ "Only menus, lobby or Firing Range were recorded: it's deleted {when} (and first, if space is needed).": "Only menus, lobby or Firing Range were recorded: it's deleted {when} (and first, if space is needed)."
 }

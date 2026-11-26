@@ -184,6 +184,7 @@ select.label:disabled{opacity:.5;cursor:default}
 .lane-label{position:absolute;left:6px;top:-15px;font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);pointer-events:none}
 .tl .lanes{display:flex;flex-direction:column;gap:14px;padding-top:14px}
 .segm{position:absolute;top:2px;bottom:2px;border-radius:3px;background:linear-gradient(90deg,#3a1512,#2a1412);border:1px solid #5a211b;font:600 12px/24px var(--display);letter-spacing:.06em;text-transform:uppercase;color:#f3c9c4;padding:0 6px;overflow:hidden;white-space:nowrap}
+.segm.range{background:repeating-linear-gradient(135deg,#1d2226 0 6px,#171b1e 6px 12px);border-color:#3a4248;color:#aeb8bf}
 .mk{position:absolute;top:50%;transform:translate(-50%,-50%);width:18px;height:18px;border-radius:50%;border:2px solid var(--bg);display:grid;place-items:center;font:700 10px var(--display);color:#111;cursor:pointer;padding:0}
 .mk:hover,.mk:focus-visible{transform:translate(-50%,-50%) scale(1.25);z-index:3;outline:none}
 .mk.drop{background:#e6ad45}.mk.jump{background:#6aa0ff}.mk.land{background:#5fd08f}.mk.ring{background:#c48bff}.mk.ringclose{background:#8f5ee0;color:#fff}

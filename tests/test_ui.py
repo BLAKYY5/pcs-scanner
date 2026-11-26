@@ -47,7 +47,8 @@ def setup():
             "ring": [{"kind": "wait", "round": 1, "appearedAt": 196.0, "firstSeen": 197.0, "endsAt": 271.5, "lastSeen": 261.0}],
             "landing": {"exitAtExact": 180.2, "landedAtExact": 187.05},
             "samples": [[154.0, -1, None, False, 1.0, 2.0, 3.0, 0.0, False, False], [160.0, -1, None, False, None, None, None, 0, False, False]]}
-    (scan / (VIDEO.stem + ".scan.json")).write_text(json.dumps({"games": [game], "recStart": "2026-11-02T09:03:00", "perf": {"feedLines": 1}}))
+    (scan / (VIDEO.stem + ".scan.json")).write_text(json.dumps({"games": [game], "recStart": "2026-11-02T09:03:00", "perf": {"feedLines": 1},
+                                                            "firingRange": [{"t0": 10.0, "t1": 100.0, "reads": 80}]}))
     (scan / (VIDEO.stem + ".feed.json")).write_text(json.dumps({"lines": [{"t": 123.0, "y": 260, "jpg": "AAAA"}]}))
     (TMP / "vods" / "notes.txt").write_text("not a video")
 
@@ -102,6 +103,7 @@ def test_server():
         assert code == 200 and d["games"][0]["landing"]["landedAtExact"] == 187.05
         assert d["games"][0]["track"] == [[154.0, 1.0, 2.0, 3.0, 0.0]]          # rows without a position are dropped
         assert d["feed"] == [{"t": 123.0, "jpg": "AAAA"}]
+        assert d["firingRange"] == [[10.0, 100.0]] and lib[0]["scan"]["firingRange"] == [[10.0, 100.0]]   # shown, never a game
         assert call(srv, "/api/library/000000000000")[0] == 404
 
         # video: whole file, a range, an open range, the last bytes, an impossible range

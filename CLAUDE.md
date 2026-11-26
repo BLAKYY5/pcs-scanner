@@ -158,6 +158,25 @@ Bump `VERSION` in `scanner/pcs_scan.py` once per release PR (currently 1.13.1 is
   A label set by hand wins: the app passes it as `--mode` (scrim / ranked / pubs; such a scan runs on this PC, never
   on the team server); labelled Wildcard by hand = not scanned at all (status `skipped`); a hand label other than
   Wildcard on a recording with skipped games scans it again. No mic track or transcript for a Wildcard-only recording.
+- **Firing Range is left out** (coach, 26 Nov 2026: "a training ground ... just don't use it in full game scans or
+  analysis in general unless it's for a specific test"). Found by its settings box at the top right
+  (`pcs_hud.RangePanel`, every HUD keyframe, a few slices: grey border lines top y ~70 / bottom ~165 / right x ~2495 at
+  1440p, opaque ~150, plus two rows of white labels right-aligned to x ~2382 and an empty gap before ON / OFF; the
+  lines alone also match a grey rock or the legend select screen, the labels never do). `range_stretches`: reads joined
+  over gaps <= 120 s (menus hide the box), >= 3 reads, dropped when ring clock / squads counter reads inside pass 10 %
+  of its reads. Before games are put together, everything read inside a stretch +-5 s (`drop_range`: screens that start
+  games, HUD samples, feed lines, every `_x` reader list, sound cues) is dropped, so it never starts, extends or feeds a
+  game and its lines are not in `feed.json`. Scan: top-level `firingRange: [{t0, t1, reads}]`,
+  `perf.feedLinesFiringRange`. `no_game` doesn't count those lines, so a Firing Range-only recording is a no-game
+  recording (deleted first) unless the player marked a moment with the mark hotkey (`core.hand_marks`: then kept like
+  a game recording); clips (`Clips` folder) are never touched. Such a recording gets no mic track / transcript
+  (`labels.all_skipped`) and is in no YouTube block (`youtube.blocks`). The review shows a striped "Firing Range" band
+  on the Games lane and in the "what the scanner sees" box; the list a "Firing Range" chip. Developers:
+  `pcs_scan.py --firing-range` keeps everything and makes each stretch a game of its own (`firingRange: true`, map `?`,
+  no ring / landing / 60 fps reads) so heals, heal slot, bars... report it (the hub leaves such games out,
+  `hub/modes.py`). Checked: region cache 7 Nov 21.42 (30 min of Firing Range read 1,616 times, nothing elsewhere), 15 Nov
+  (none) and full keyframe passes of 8 more recordings (see the PR). English game text only checked; labels' length
+  doesn't matter (right-aligned), but other languages and 4:3 stretched recordings were not seen.
 - **Playlist emblem** (`pcs_hud.ModeEmblem`, every `EMBLEM_EVERY` = 3 s, ~3 ms a read, 16:9 and 4:3 stretched): the round emblem at
   the top right (x 2422..2539, y 8..123 at 1440p in a game; 134 px lower on the "waiting for players" screen). Pubs =
   red "unranked" emblem, Wildcard = teal; ranked shows a rank badge there instead. Compared as 16 x 16 colour cells on

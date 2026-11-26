@@ -597,7 +597,6 @@
  "Only after a night upload, once nothing is left to send and the PC is still unused. Windows warns 1 minute before; moving the mouse cancels it.": "Seulement après un envoi de nuit, quand il ne reste rien à envoyer et que le PC n'est toujours pas utilisé. Windows prévient 1 minute avant ; bouger la souris annule.",
  "Only if your team agreed that comms are recorded. Records your voice app and mic, sends your mic track to your teammates, and gets theirs by itself while Apex is closed.": "Seulement si ton équipe est d'accord pour enregistrer les comms. Enregistre ton app vocale et ton micro, envoie ta piste micro à tes coéquipiers et récupère les leurs tout seul quand Apex est fermé.",
  "Only if {player} still shares it: the team hub is asked when the clip is made": "Seulement si {player} la partage encore : le hub de l'équipe est consulté à la création du clip",
- "Only menus or lobby were recorded: it's deleted {when} (and first, if space is needed).": "Seuls des menus ou le lobby ont été enregistrés : il est supprimé {when} (et en premier s'il manque de la place).",
  "Only on this recording.": "Seulement sur cet enregistrement.",
  "Only our squad": "Seulement notre squad",
  "Only recordings made by auto-record belong to a scrim block": "Seuls les enregistrements faits par l'enregistrement auto font partie d'un bloc de scrims",
@@ -962,7 +961,6 @@
  "The recording's picture can't be read.": "L'image de l'enregistrement est illisible.",
  "the scan couldn't read the video": "le scan n'a pas pu lire la vidéo",
  "The scan couldn't read this recording. It's kept: press Scan again on it in Recordings.": "Le scan n'a pas pu lire cet enregistrement. Il est gardé : appuie sur Scanner à nouveau dans Enregistrements.",
- "The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings": "Le scan n'y a trouvé aucune partie (menus, lobby) : supprimé en premier, après le délai réglé dans les paramètres",
  "The scan starts in {n} s, then the results are sent.": "Le scan démarre dans {n} s, puis les résultats sont envoyés.",
  "The scanner stopped with an error (code {code}). The recording is kept; details in {file}": "Le scanner s'est arrêté avec une erreur (code {code}). L'enregistrement est gardé ; détails dans {file}",
  "The session ended (the coach left).": "La session est terminée (le coach est parti).",
@@ -1260,5 +1258,9 @@
  "Labelled {label}: scanned again with every game.": "Classé {label} : scanné à nouveau avec toutes les parties.",
  "Wildcard: not scanned": "Wildcard : pas scanné",
  "Participation": "Participation",
- "Ranked only: your squad's kills you took part in, without the kill or an assist": "Ranked uniquement : les kills de ta squad auxquels tu as participé, sans faire le kill ni une assist"
+ "Ranked only: your squad's kills you took part in, without the kill or an assist": "Ranked uniquement : les kills de ta squad auxquels tu as participé, sans faire le kill ni une assist",
+ "Firing Range": "Firing Range",
+ "Training ground: left out of the scan": "Terrain d'entraînement : laissé hors du scan",
+ "The scan found no game in it (menus, lobby, Firing Range): deleted first, and after the time set in Settings": "Le scan n'y a trouvé aucune partie (menus, lobby, Firing Range) : supprimé en premier, après le délai réglé dans les paramètres",
+ "Only menus, lobby or Firing Range were recorded: it's deleted {when} (and first, if space is needed).": "Seuls des menus, le lobby ou le Firing Range ont été enregistrés : il est supprimé {when} (et en premier s'il manque de la place)."
 }

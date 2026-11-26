@@ -4750,6 +4750,102 @@ def test_wildcard_games_left_out():
         labels.set_label(str(v), None)
 
 
+def _range_frame(text=True, gap=False, lines=True, base=40):
+    """A 1440p frame with the Firing Range's settings box drawn the way the game draws it (measured on 7 Nov 2026):
+    grey border lines (top, bottom, right), two rows of white labels ending at x 2382, ON / OFF values from x 2432."""
+    import numpy as np
+    a = np.full((1440, 2560, 3), base, np.uint8)
+    if lines:
+        a[70:72, 2140:2497] = 150; a[165:167, 2090:2497] = 150; a[70:167, 2495:2497] = 150
+    if text:
+        for y0, y1, x0 in ((90, 108, 2245), (130, 148, 2140)):
+            for x in range(x0, 2382, 9):
+                a[y0:y1, x:x + 5] = 235                         # letters: white strokes with gaps
+        a[90:108, 2432:2464] = (240, 140, 40)                   # ON (orange)
+        a[130:148, 2432:2470] = 150                             # OFF (grey)
+    if gap:
+        a[95:105, 2395:2420] = 240
+    return a
+
+
+def test_firing_range_left_out():
+    """Coach, 26 Nov 2026: the Firing Range is a training ground. The scan reads its settings box, keeps the stretches
+    at the top level (`firingRange`) and drops every read inside them before games are put together, so it never
+    starts, extends or feeds a game; --firing-range keeps it as a game of its own for a test. A recording of the
+    Firing Range only is a recording with no game (deleted first), unless the player marked a moment by hand; it gets
+    no mic track and goes in no YouTube block."""
+    import json
+    SCAN = _scanner()
+    import pcs_hud as HUD
+    P = HUD.RangePanel
+    assert P.read(_range_frame()) is True
+    assert P.read(_range_frame(base=110)) is True                 # see-through box over a bright scene
+    assert P.read(_range_frame(text=False)) is False              # border-grey lines alone: a grey rock, legend select
+    assert P.read(_range_frame(text=False, base=150)) is False    # a plain grey scene
+    assert P.read(_range_frame(gap=True)) is False                # something white between labels and values
+    assert P.read(_range_frame(lines=False)) is False
+    # stretches: reads joined over short gaps (a menu hides the box), a stray read alone is none, in-game reads cancel
+    reads = [float(t) for t in range(200, 800, 2)] + [900.0, 1010.0, 1100.0] + [5000.0]
+    st = HUD.range_stretches(reads)
+    assert [(s["t0"], s["t1"]) for s in st] == [(200.0, 1100.0)], st
+    assert HUD.range_stretches(reads, [float(t) for t in range(300, 700)]) == []
+    assert HUD.range_stretches([10.0, 20.0]) == []
+    # everything read inside is dropped before games are put together
+    W = SCAN.range_windows(st)
+    assert W == [(195.0, 1105.0)]
+    events = [{"t": 300.0, "kind": "map", "data": {"map": "SP", "harv": []}}, {"t": 2000.0, "kind": "select", "data": {}}]
+    samples = [[float(t), -1, None, False, 1.0, 2.0, 3.0, None, False, False] for t in (150, 300, 900, 1200)]
+    perf = {"_feed": [{"t": 250.0}, {"t": 260.0}, {"t": 1500.0}], "_usage": [(400.0, "heal"), (1300.0, "heal")],
+            "_squads": [(1200.0, 50)], "frames": 9, "decoder": "CPU"}
+    ev, sm, n = SCAN.drop_range(events, samples, perf, W)
+    assert [e["t"] for e in ev] == [2000.0] and [s[0] for s in sm] == [150.0, 1200.0] and n == 2
+    assert perf["_feed"] == [{"t": 1500.0}] and perf["_usage"] == [(1300.0, "heal")] and perf["frames"] == 9
+    assert SCAN.drop_range(events, samples, {}, []) == (events, samples, 0)
+    # --firing-range: the stretch becomes a game of its own (no ring, no landing), games keep their place
+    g = SCAN.new_game(2000.0, "SP"); g["harvesters"] = []
+    games = SCAN.range_games([g], st)
+    assert [x["tStart"] for x in games] == [200.0, 2000.0] and games[0]["firingRange"] and games[0]["map"] == "?"
+    S = [[float(t), -1, None, False, 1.0, 2.0, 3.0, 40.0, False, False] for t in range(200, 1100, 5)]
+    out = SCAN.timeline(games, S, None, [], None, [], [], [])
+    assert out[0]["ring"] == [] and out[0]["landing"] is None and out[0]["hud"]["samples"] > 0
+    assert SCAN.range_games([g], [{"t0": 1998.0, "t1": 2100.0, "reads": 5}]) == [g]   # a game starts in it: no extra
+
+    # the app: a Firing Range-only recording has no game; its feed lines don't count; a hand mark keeps it
+    from pcs_recorder import labels, youtube
+    from pcs_recorder.core import no_game, hand_marks
+    folder = TMP / f"range-{time.time_ns()}"
+    folder.mkdir()
+    fr = [{"t0": 30.0, "t1": 900.0, "reads": 700}]
+
+    def rec(name, scan, events=None):
+        v = folder / f"{name}.mp4"
+        v.write_bytes(b"\0" * 10)
+        (v.with_suffix(".scan")).mkdir()
+        (v.with_suffix(".scan") / f"{name}.scan.json").write_text(json.dumps(scan))
+        if events is not None:
+            v.with_suffix(".events.json").write_text(json.dumps({"tracks": ["game"], "events": events}))
+        return retention.Entry(path=str(v), started=time.time() - 3600, status="scanned")
+    votes = {"layoutVotes": {"16:9": 900}}
+    only = rec("only", {"games": [], "firingRange": fr, "perf": dict(votes, feedLines=12, feedLinesFiringRange=12)})
+    marked = rec("marked", {"games": [], "firingRange": fr, "perf": dict(votes, feedLines=12, feedLinesFiringRange=12)},
+                 [{"t": 400.0, "kind": "mark"}])
+    muted = rec("muted", {"games": [], "firingRange": fr, "perf": dict(votes, feedLines=0)},
+                [{"t": 40.0, "kind": "mute", "track": "mic", "muted": True}])
+    more = rec("more", {"games": [], "firingRange": fr, "perf": dict(votes, feedLines=13, feedLinesFiringRange=12)})
+    game = rec("game", {"games": [{"map": "SP", "mode": "ranked"}], "firingRange": fr, "perf": dict(votes, feedLines=40)})
+    assert no_game(only) and no_game(muted) and not no_game(marked) and not no_game(more) and not no_game(game)
+    assert hand_marks(marked) and not hand_marks(muted) and not hand_marks(only)
+    assert labels.firing_range_only(youtube.scan_of(only)) and labels.all_skipped(youtube.scan_of(only))
+    assert not labels.firing_range_only(youtube.scan_of(game)) and not labels.all_skipped(youtube.scan_of(game))
+    # no YouTube block for it (a no-game recording of the lobby stays where it was)
+    only.nogame = True
+    lobby = rec("lobby", {"games": [], "perf": dict(votes, feedLines=0)}); lobby.nogame = True
+    idx = {"only": only, "lobby": lobby, "game": game}
+    only.started, lobby.started, game.started = 1000.0, 1100.0, 1200.0
+    keys = [k for b in youtube.blocks(idx, 100000) for k in b]
+    assert keys == ["lobby", "game"], keys
+
+
 def test_scan_resumes_from_finished_chunks():
     """A scan stopped part-way (Apex started: the app stops it) goes on from the chunks it had finished, and the
     merged result is the same as one uninterrupted scan. Chunks are reused only for the same file and cuts; the

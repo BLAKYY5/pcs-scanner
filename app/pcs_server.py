@@ -582,7 +582,8 @@ class Backend:
                     d = full = json.loads(scan.read_text(encoding="utf-8"))
                     summary = {"games": [{"map": g.get("map"), "mode": g.get("mode"), "skipped": g.get("skipped")}
                                          for g in d.get("games", [])],
-                               "recStart": d.get("recStart"), "feedLines": d.get("perf", {}).get("feedLines")}
+                               "recStart": d.get("recStart"), "feedLines": d.get("perf", {}).get("feedLines"),
+                               "firingRange": [[r.get("t0"), r.get("t1")] for r in d.get("firingRange") or [] if isinstance(r, dict)]}
                 except Exception:
                     summary = None
             status = "scanned" if scan else "not scanned"
@@ -664,6 +665,8 @@ class Backend:
                                 "seen": seen, "seenFrom": seen_from})
             regroup_highlights(d.get("games", []), games, self.auto.s if self.auto else None)
             it["games"] = games
+            # Firing Range stretches the scan left out (coach, 26 Nov 2026): shown as such, never as a game
+            it["firingRange"] = [[r.get("t0"), r.get("t1")] for r in d.get("firingRange") or [] if isinstance(r, dict)]
         if feed:
             f = json.loads(feed.read_text(encoding="utf-8"))
             it["feed"], it["feedSides"] = feed_lines(f.get("lines", []))

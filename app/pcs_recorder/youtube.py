@@ -51,8 +51,10 @@ def end_of(e: retention.Entry) -> float:
 
 
 def blocks(idx: dict[str, retention.Entry], gap_min: int) -> list[list[str]]:
-    """Recording keys grouped into blocks, oldest first."""
-    keys = sorted((k for k, e in idx.items() if e.path), key=lambda k: idx[k].started)
+    """Recording keys grouped into blocks, oldest first. A recording of the Firing Range only (no game) is in no block:
+    a training ground never goes to YouTube (coach, 26 Nov 2026)."""
+    keys = sorted((k for k, e in idx.items() if e.path and not (e.nogame and labels.firing_range_only(scan_of(e)))),
+                  key=lambda k: idx[k].started)
     out: list[list[str]] = []
     for k in keys:
         if out and idx[k].started - end_of(idx[out[-1][-1]]) < gap_min * 60:
