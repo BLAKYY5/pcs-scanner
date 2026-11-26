@@ -3101,6 +3101,59 @@ def test_review_respawns_like_kills():
 
 
 
+def test_review_shows_firing_range():
+    """Firing Range time the scan left out (coach, 26 Nov 2026) shows in the review as a "Firing Range" band on the
+    Games lane (never as a game) and in the scanner box, at 1320 and 900 px wide without a sideways scroll; a
+    recording of the Firing Range only gets a "Firing Range" chip in the list."""
+    folder = TMP / "range-vods"
+    folder.mkdir(parents=True, exist_ok=True)
+    rec = folder / "Apex Legends_2026.11.26-20.10.mp4"
+    rec.write_bytes(b"x" * 1000)
+    only = folder / "Apex Legends_2026.11.26-19.00.mp4"
+    only.write_bytes(b"x" * 1000)
+    game = {"map": "WE", "mode": "ranked", "tStart": 1500.0, "tEnd": 1500.0, "tEndGame": 2400.0,
+            "drop": {"spots": [], "err": 0}, "samples": []}
+    for v, scan in ((rec, {"games": [game], "firingRange": [{"t0": 100.0, "t1": 900.0, "reads": 700}]}),
+                    (only, {"games": [], "firingRange": [{"t0": 20.0, "t1": 600.0, "reads": 500}]})):
+        (v.with_suffix(".scan")).mkdir(exist_ok=True)
+        (v.with_suffix(".scan") / (v.stem + ".scan.json")).write_text(json.dumps(scan))
+    before = list(core.SETTINGS.get("library", []))
+    core.SETTINGS["library"] = [str(rec), str(only)]
+    b = pcs_server.Backend()
+    srv = pcs_server.Server(b)
+    srv.start()
+    try:
+        lib = {Path(x["path"]).name: x for x in call(srv, "/api/library")[1]}
+        assert lib[only.name]["scan"]["firingRange"] == [[20.0, 600.0]] and lib[only.name]["scan"]["games"] == []
+        vid = lib[rec.name]["id"]
+        d = call(srv, f"/api/library/{vid}")[1]
+        assert d["firingRange"] == [[100.0, 900.0]] and len(d["games"]) == 1
+        page = _Page(srv.url + f"#review/{vid}")               # skipped without Edge
+        try:
+            for width in (1320, 900):
+                page.send("Emulation.setDeviceMetricsOverride", {"width": width, "height": 860, "deviceScaleFactor": 1, "mobile": False})
+                page.js("typeof drawTimeline === 'function' && window.RV && drawTimeline(); 1")
+                end = time.time() + 15
+                while time.time() < end and not page.js("!!document.querySelector('#laneG .segm.range')"):
+                    time.sleep(0.2)
+                bands = page.js("[...document.querySelectorAll('#laneG .segm')].map(x => [x.classList.contains('range'), x.textContent.trim(), +x.dataset.t])")
+                assert bands == [[True, "Firing Range", 100], [False, "World's Edge · ranked", 1500]] or \
+                       (bands[0] == [True, "Firing Range", 100] and len(bands) == 2 and not bands[1][0]), bands
+                box = page.js("(() => { const r = document.querySelector('#laneG .segm.range').getBoundingClientRect(), "
+                              "l = document.querySelector('#laneG').getBoundingClientRect(); return [r.left >= l.left - 1, r.right <= l.right + 1, r.width > 20]; })()")
+                assert box == [True, True, True], (width, box)
+                assert page.js("document.documentElement.scrollWidth <= window.innerWidth + 1"), width
+            seen = page.js("(() => { const o = document.querySelector('#seen'); if (!o) return null; o.hidden = false; drawSeen(500); "
+                           "const a = o.textContent; drawSeen(1200); return [a, o.textContent]; })()")
+            if seen is not None:
+                assert "Firing Range" in seen[0] and "Firing Range" not in seen[1], seen
+        finally:
+            page.close()
+    finally:
+        srv.stop()
+        core.SETTINGS["library"] = before
+
+
 HL_TAKEDOWNS = [{"t": 300.0, "kind": "knock", "sources": ["feed", "fight"]}, {"t": 303.0, "kind": "knock", "sources": ["feed", "fight"]},
                 {"t": 307.0, "kind": "kill", "sources": ["counter", "feed"]}, {"t": 308.0, "kind": "kill", "sources": ["counter", "feed"]},
                 {"t": 600.0, "kind": "kill", "sources": ["counter", "damage"]}, {"t": 601.0, "kind": "kill", "sources": ["counter", "damage"]},

@@ -933,7 +933,7 @@ function theatre(on, quiet) {
 }
 function dur() {
   if (RV.dur) return RV.dur;
-  const last = Math.max(0, ...RV.ev.map(e => e.t), ...RV.spans.map(s => s.to || 0));
+  const last = Math.max(0, ...RV.ev.map(e => e.t), ...RV.spans.map(s => s.to || 0), ...(RV.d.firingRange || []).map(r => r[1] || 0));
   return last ? last * 1.05 : 600;
 }
 function seek(t) {
