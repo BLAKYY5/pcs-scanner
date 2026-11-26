@@ -608,6 +608,9 @@ def scan_frames(frames, snapdir=None, total=0, quiet=False, perf=None):
             except Exception: own = {}
             if own and not (hud and hud[2] and hud[2]['spec']):       # while spectating the strip is someone else's
                 perf.setdefault('_own', []).append((round(t, 2), own))
+            try: rng = HUD.RangePanel.read(view_top_once() if st else img)     # the Firing Range's settings box
+            except Exception: rng = False
+            if rng: perf.setdefault('_range', []).append(round(t, 2))
             if not st:
                 if t - mm_at >= pcs_minimap.EVERY and not (hud and hud[2] and hud[2]['spec']):   # HUD minimap: position
                     try: mm = pcs_minimap.grab(img)
@@ -752,8 +755,9 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     out.sort(key=lambda r: r[0])
     labels = HUD.Labels(); events = []; samples = []; perf = {}; feed = []; rpc = []; rpl = []; rps = []; rank = []; squads = []; own = []
     rings = []; cards = []; icons = []; bars = []; storm = []; usage = []; minimap = []; emblem = []; ammo = []; inventory = []
-    bans = []
+    bans = []; rng = []
     for start, ev, sm, reps, pf in out:
+        rng += pf.pop('_range', [])
         feed += pf.pop('_feed', []); rpc += pf.pop('_rp', []); rpl += pf.pop('_rpLines', []); rps += pf.pop('_rpSeen', []); rank += pf.pop('_rank', []); squads += pf.pop('_squads', []); own += pf.pop('_own', [])
         rings += pf.pop('_rings', []); cards += pf.pop('_cards', []); icons += pf.pop('_icons', []); bars += pf.pop('_bars', []); storm += pf.pop('_storm', [])
         usage += pf.pop('_usage', []); minimap += pf.pop('_minimap', []); emblem += pf.pop('_emblem', []); pf.pop('_usageMaskAt', None)
@@ -780,6 +784,7 @@ def scan_video(path, snap=None, workers=0, chunks=0, resume=None, total=None):
     perf['_bans'] = sorted(bans, key=lambda r: r[0])
     perf['_minimap'] = sorted(minimap, key=lambda r: r[0])
     perf['_emblem'] = sorted(emblem, key=lambda r: r[0])
+    perf['_range'] = sorted(rng)
     return events, samples, labels, perf
 
 def split_restarts(games, samples):
@@ -885,6 +890,37 @@ def minimal(g):
     out.update(drop=None, harvesters=[], ring=[], landing=None, skipped=g['mode'])
     return out
 
+# Firing Range (coach, 26 Nov 2026): "leave out the firing range from the recordings too, as it is a training ground,
+# unless a player marks a clip ... otherwise just don't use it in full game scans or analysis in general unless it's for
+# a specific test." Its settings box (pcs_hud.RangePanel) is read on every HUD keyframe; the stretches it gives
+# (pcs_hud.range_stretches) are kept at the top level of the scan (`firingRange`), and every read inside one (screens
+# that start games, HUD samples, feed lines, every reader's reads, sound cues) is dropped before games are put
+# together: Firing Range time never starts, extends or feeds a game, and its feed lines are not in feed.json.
+# --firing-range (developers, for a test in the Firing Range) keeps everything and makes each stretch a game of its own
+# (`firingRange: true`, map '?', no ring or landing), so the per-game readers (heals, heal slot, bars...) report it.
+RANGE_PAD = 5           # s around a stretch's first and last read (loading in, going back to the lobby)
+
+def range_windows(stretches):
+    return [(s['t0'] - RANGE_PAD, s['t1'] + RANGE_PAD) for s in stretches or []]
+
+def drop_range(events, samples, perf, W):
+    """Everything read inside the Firing Range windows W is dropped (in place for perf). -> (events, samples, lines dropped)."""
+    if not W: return events, samples, 0
+    events = drop_skipped(events, W); samples = drop_skipped(samples, W)
+    n = len(perf.get('_feed') or [])
+    for k in [k for k, v in perf.items() if k.startswith('_') and isinstance(v, list)]:
+        perf[k] = drop_skipped(perf[k], W)
+    return events, samples, n - len(perf.get('_feed') or [])
+
+def range_games(games, stretches):
+    """--firing-range: each stretch no game starts in becomes a game of its own (in time order)."""
+    for s in stretches:
+        if any(s['t0'] - RANGE_PAD <= g['tStart'] <= s['t1'] + RANGE_PAD for g in games): continue
+        g = new_game(s['t0'], '?'); g.update(tEnd=s['t1'], harvesters=[], firingRange=True)
+        games.append(g)
+    games.sort(key=lambda g: g['tStart'])
+    return games
+
 def change_reads(own, key, t0, t1):
     """The own stats reads of one number inside [t0, t1) as change points: [[t, value], ...] with a read each time the
     value differs from the read before, plus the last read (so the list ends where the reading ended). Small enough to
@@ -914,10 +950,11 @@ def timeline(games, samples, path=None, rank=None, mode=None, squads=None, own=N
             g['ring'] = []; g['landing'] = None; g['samples'] = S
             g['hud'] = {'samples': len(S), 'self': sum(1 for s in S if s[4] is not None and not s[3])}
             continue
-        g['ring'] = HUD.number_rounds(HUD.ring_segments(S), g['map'])
-        if path: HUD.refine_phases(path, g['ring'], S)
+        rng = bool(g.get('firingRange'))     # --firing-range test game: no ring, no landing, no 60 fps reads
+        g['ring'] = [] if rng else HUD.number_rounds(HUD.ring_segments(S), g['map'])
+        if path and not rng: HUD.refine_phases(path, g['ring'], S)
         t0 = g['drop']['tLast'] if g['drop'] else lo
-        ld = HUD.landing(HUD.clean_pos(S), t0)
+        ld = None if rng else HUD.landing(HUD.clean_pos(S), t0)
         if ld:
             if path: HUD.refine_landing(path, ld)
             mp = HUD.to_map(g['map'], ld['x'], ld['y'])
@@ -999,6 +1036,8 @@ def main():
     ap.add_argument('--fresh', action='store_true', help='ignore chunks kept from an earlier, unfinished scan of the same file')
     ap.add_argument('--mode', choices=['ranked', 'scrim', 'pubs', 'wildcard'],
                     help='force the game mode instead of detecting it (the app passes a label set by hand; wildcard = every game skipped)')
+    ap.add_argument('--firing-range', action='store_true',
+                    help='keep the Firing Range (for a test there): each stretch becomes a game of its own instead of being left out')
     ap.add_argument('--highlights', default='', help='highlight rules: chain seconds, enemies for a multi-kill, seconds for a double (default 8,3,5)')
     ap.add_argument('--layout', choices=['auto', '16:9', '4:3'], default='auto', help='screen layout of the recordings (default: detect; 4:3 = 4:3 stretched to 16:9)')
     # scan on the team server: the file is a keyframes-only copy of the recording (pcs_recorder.serverscan)
@@ -1023,9 +1062,16 @@ def main():
             if A.fresh: Resume(resume, path, [], ('', []), snap).clear()
             events, samples, labels, perf = scan_video(path, snap, A.workers, A.chunks, resume, A.duration or None)
         t_tl = time.time()
+        # Firing Range: its stretches, then (unless --firing-range) every read inside them is dropped
+        firing = HUD.range_stretches(perf.pop('_range', []), [s[0] for s in samples if s[2] is not None] +
+                                     [r[0] for r in perf.get('_squads', [])])
+        range_lines = 0
+        if firing and not A.firing_range:
+            events, samples, range_lines = drop_range(events, samples, perf, range_windows(firing))
         games = assemble(events)
         if not games and samples: games = [new_game(samples[0][0], '?')]; games[0].update(harvesters=[])
         if kind == 'video': games = split_restarts(games, samples)
+        if firing and A.firing_range: games = range_games(games, firing)
         own_reads = perf.pop('_own', [])     # the own stats strip: also the counter rises behind highlights
         timeline(games, samples, path if kind == 'video' else None, perf.pop('_rank', []), A.mode, perf.pop('_squads', []), own_reads,
                  perf.pop('_emblem', []))
@@ -1060,6 +1106,8 @@ def main():
                 import pcs_audio
                 audio = pcs_audio.scan(path)
                 loud = audio.get('_loud')
+                if firing and not A.firing_range and isinstance(audio.get('cues'), dict):      # no cue from the Firing Range
+                    audio['cues'] = {k: drop_skipped(v, range_windows(firing)) if isinstance(v, list) else v for k, v in audio['cues'].items()}
                 pcs_audio.attach(games, audio)
             except Exception as e:      # never lose a scan to the sound check
                 audio = {'error': f'{type(e).__name__}: {e}'[:200]}
@@ -1112,6 +1160,10 @@ def main():
             if isinstance((audio or {}).get('cues'), dict):
                 audio['cues'] = {k: drop_skipped(v, skip) if isinstance(v, list) else v for k, v in audio['cues'].items()}
             print(f'  {sum(1 for g in games if g.get("skipped"))} Wildcard game(s) left out (times and mode kept)', flush=True)
+        if firing:
+            mins = sum(s['t1'] - s['t0'] for s in firing) / 60
+            print(f'  Firing Range: {len(firing)} stretch(es), {mins:.0f} min '
+                  + ('kept for a test (--firing-range)' if A.firing_range else f'left out ({range_lines} feed line(s) dropped)'), flush=True)
         if feed_lines or rp_lines:
             json.dump({'scanner': VERSION, 'scannerBuild': build_stamp(), 'file':os.path.basename(path), 'recStart': st, 'lines': feed_lines,
                        **({'rpLines': rp_lines} if rp_lines else {})},
@@ -1121,6 +1173,10 @@ def main():
                'events': len(events), 'perf': {k: (round(v, 1) if isinstance(v, float) else v) for k, v in perf.items()},
                'ringLabels': labels.export(), 'games': games}
         if skip: res['skippedGames'] = sum(1 for g in games if g.get('skipped'))
+        if firing:              # Firing Range stretches [{t0, t1, reads}]: left out of every game (kept with --firing-range)
+            res['firingRange'] = firing
+            res['perf']['feedLinesFiringRange'] = range_lines
+            if A.firing_range: res['firingRangeKept'] = True
         if audio is not None: res['audio'] = audio
         op = os.path.join(A.out, name + '.scan.json')
         json.dump(res, open(op, 'w'), indent=1)

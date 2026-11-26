@@ -73,9 +73,17 @@ def skipped_games(scan: dict | None) -> int:
 
 
 def all_skipped(scan: dict | None) -> bool:
-    """Every game of the recording was left out (a Wildcard-only session): no mic track or transcript for it."""
+    """Every game of the recording was left out (a Wildcard-only session, or the Firing Range only: no game, Firing
+    Range stretches): no mic track or transcript for it."""
     games = (scan or {}).get("games", [])
-    return bool(games) and skipped_games(scan) == len(games)
+    if not games:
+        return firing_range_only(scan)
+    return skipped_games(scan) == len(games)
+
+
+def firing_range_only(scan: dict | None) -> bool:
+    """No game, only Firing Range time (a training ground, left out by the scanner: coach, 26 Nov 2026)."""
+    return bool(scan) and not scan.get("games") and bool(scan.get("firingRange"))
 
 
 def auto(scan: dict) -> str | None:

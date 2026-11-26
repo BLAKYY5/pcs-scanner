@@ -886,7 +886,7 @@ class Recorder:
                 retention.save_index(self.idx)
                 if e.nogame:
                     when = ("now" if self.s.nogame_keep_h == 0 else f"in {self.s.nogame_keep_h} h")
-                    self.ui.notify("No game in this recording", "Only menus or lobby were recorded: it's deleted "
+                    self.ui.notify("No game in this recording", "Only menus, lobby or Firing Range were recorded: it's deleted "
                                    f"{when} (and first, if space is needed).")
                     if self.s.nogame_keep_h == 0:
                         self.cleanup()
@@ -1272,11 +1272,26 @@ def read_nothing(e) -> bool:
 def no_game(e) -> bool:
     """True only when the scan is sure nothing was played: it read the video (frames were looked at), found
     no game (no drop map, no ring, no HUD) and not a single kill-feed line. Anything doubtful counts as a game,
-    so a real game is never deleted early."""
+    so a real game is never deleted early.
+    Firing Range (coach, 26 Nov 2026: a training ground): its feed lines don't count, so a recording of the Firing
+    Range only is a recording with no game. A moment the player marked by hand (mark hotkey) keeps any recording
+    out of this rule: it is kept like one with a game."""
     d = _scan_json(e)
     if d is None or read_nothing(e):
         return False
-    return not d.get("games") and int((d.get("perf") or {}).get("feedLines") or 0) == 0
+    perf = d.get("perf") or {}
+    lines = int(perf.get("feedLines") or 0) - int(perf.get("feedLinesFiringRange") or 0)
+    return not d.get("games") and lines <= 0 and not hand_marks(e)
+
+
+def hand_marks(e) -> bool:
+    """The player marked a moment of this recording by hand (the mark hotkey: events.json, kind "mark")."""
+    import json
+    try:
+        ev = json.loads(Path(e.path).with_suffix(".events.json").read_text(encoding="utf-8"))
+        return any(isinstance(x, dict) and x.get("kind") == "mark" for x in ev.get("events") or [])
+    except Exception:
+        return False
 
 
 def extract_track(video: str, index: int, out: Path) -> Path:

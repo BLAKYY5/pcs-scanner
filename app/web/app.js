@@ -431,7 +431,8 @@ function switchHTML(id, on, label, hint) {
 function gameChips(it) {
   const games = (it.scan && it.scan.games) || [];
   if (!it.scan) return '';
-  if (!games.length) return '<span class="faint" style="font-size:12px">' + t('no game found') + '</span>';
+  if (!games.length) return (it.scan.firingRange || []).length ? '<span class="chip" title="' + t('Training ground: left out of the scan') + '">' + t('Firing Range') + '</span>'
+    : '<span class="faint" style="font-size:12px">' + t('no game found') + '</span>';
   const n = {}; games.forEach(g => { n[g.map] = (n[g.map] || 0) + 1; });
   return Object.entries(n).map(([m, c]) => `<span class="chip">${esc(mapName(m))}${c > 1 ? ' ×' + c : ''}</span>`).join('');
 }
@@ -494,7 +495,7 @@ function drawList() {
       items.map(it => `<div class="recrow" data-id="${it.id}">
         <input type="checkbox" ${selected.has(it.id) ? 'checked' : ''} aria-label="${t('Select {name}', {name: esc(it.name)})}">
         <div style="min-width:0"><div class="name" title="${esc(it.path)}">${esc(it.name)}</div><div class="sub">${labelSelect(it.label, it.label_by_hand, 'data-label', it.label_why, it.label_source)}${gameChips(it)}${it.auto ? '<span class="faint" style="font-size:12px">' + t('auto-recorded') + '</span>' : ''}${hubNote(it)}</div></div>
-        <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="' + t('The scan found no game in it (menus, lobby): deleted first, and after the time set in Settings') + '">' + t('No game') + '</span>' : statusPill(it.status)}${ytPill(it)}</span>
+        <span class="c3 muted">${fmtDate(recTime(it))}</span><span class="c4 mono muted">${fmtGB(it.size)}</span><span class="c5">${it.nogame ? '<span class="pill warn" title="' + t('The scan found no game in it (menus, lobby, Firing Range): deleted first, and after the time set in Settings') + '">' + t('No game') + '</span>' : statusPill(it.status)}${ytPill(it)}</span>
         <div class="acts">${['scanning', 'waiting', 'recording'].includes(it.status) ? '' : !it.scan ? '<button class="btn small" data-a="scan">' + t('Scan') + '</button>' :
           `<button class="btn small ${it.status === 'failed' ? '' : 'ghost'}" data-a="rescan" title="${t('Scan this recording again')}">${t('Scan again')}</button>`}
           <a class="btn small ${it.scan ? 'brand' : ''}" href="#review/${it.id}">${t('Review')}</a>
@@ -932,7 +933,7 @@ function theatre(on, quiet) {
 }
 function dur() {
   if (RV.dur) return RV.dur;
-  const last = Math.max(0, ...RV.ev.map(e => e.t), ...RV.spans.map(s => s.to || 0));
+  const last = Math.max(0, ...RV.ev.map(e => e.t), ...RV.spans.map(s => s.to || 0), ...(RV.d.firingRange || []).map(r => r[1] || 0));
   return last ? last * 1.05 : 600;
 }
 function seek(t) {
@@ -943,7 +944,11 @@ const USEK = ['heal', 'ult', 'tac'], AMMOK = ['lowammo', 'noheals'];
 function drawTimeline() {
   if (!RV || !$('#laneG')) return;
   const D = dur(), pct = t => (t / D * 100).toFixed(3) + '%';
-  $('#laneG').innerHTML = '<span class="lane-label">' + t('Games') + '</span>' + (RV.spans.length ? RV.spans.map(s =>
+  const fr = RV.d.firingRange || [];
+  $('#laneG').innerHTML = '<span class="lane-label">' + t('Games') + '</span>' +
+    // Firing Range stretches (coach, 26 Nov 2026): a training ground, left out of the scan, never a game
+    fr.map(([a, b]) => `<div class="segm range" data-t="${a}" style="left:${pct(a)};width:calc(${pct(Math.max(1, b - a))})" title="${esc(t('Firing Range'))} · ${fmtT(a)}–${fmtT(b)} · ${esc(t('Training ground: left out of the scan'))}">${esc(t('Firing Range'))}</div>`).join('') +
+    (RV.spans.length || fr.length ? RV.spans.map(s =>
     `<div class="segm" data-t="${s.from}" style="left:${pct(s.from)};width:calc(${pct(Math.max(1, s.to - s.from))})" title="${esc(mapName(s.map))} · ${fmtT(s.from)}–${fmtT(s.to)}">${esc(mapName(s.map))}${s.mode ? ' · ' + esc(s.mode) : ''}</div>`).join('') :
     `<span class="faint" style="position:absolute;left:8px;top:4px;font-size:12px">${RV.d.scan ? t('No game found in this recording') : t('Not scanned yet: scan it to see games and events here')}</span>`) +
     // small ticks under the games where the "squads left" count went down (tooltip: the count)
@@ -1136,7 +1141,12 @@ function drawSeen(at) {
   const games = RV.d.games, spans = RV.spans;
   let gi = -1;
   spans.forEach((sp, i) => { if (at >= sp.from - 5 && at <= sp.to + 5) gi = i; });
-  if (gi < 0) { o.innerHTML = '<b>' + t('Lobby / menus') + '</b><span>' + t('No game on screen') + '</span>'; return; }
+  if (gi < 0) {
+    const inRange = (RV.d.firingRange || []).some(([a, b]) => at >= a - 5 && at <= b + 5);
+    o.innerHTML = inRange ? '<b>' + t('Firing Range') + '</b><span>' + t('Training ground: left out of the scan') + '</span>'
+      : '<b>' + t('Lobby / menus') + '</b><span>' + t('No game on screen') + '</span>';
+    return;
+  }
   const g = games[gi], L = g.landing || {};
   // the scanner's reading for this second (at most 3 s old)
   let s = null;

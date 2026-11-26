@@ -1136,6 +1136,60 @@ def emblem_vote(reads, lo, hi, need=3, share=0.9):
     return key, mode, C
 
 
+# ---------- Firing Range (coach, 26 Nov 2026: a training ground, never a game) ----------
+class RangePanel:
+    """The Firing Range's settings box at the top right ("Friendly Fire ON", "Full Combat Dummies OFF", then
+    "[HOLD] CUSTOMIZE RANGE" under it). It is drawn nowhere else. Read at 1440p, 16:9:
+    - its border: a light grey line (about 150 on 0..255, opaque, so the same on a dark or a bright scene) along the top
+      (y ~70), the bottom (y ~165) and the right side (x ~2495);
+    - two rows of white labels, right-aligned so they end at x ~2382 whatever the language, then an empty gap
+      (x 2388..2425) before the values (ON / OFF).
+    The lines alone also match a plain grey rock or the legend select screen (7 Nov 2026); the labels never do.
+    Checked on the region caches of 7 Nov 21.42 (1,631 reads in its 30 min of Firing Range, none elsewhere) and
+    15 Nov 17.09 (none)."""
+    GREY = (128, 180)            # border line: mean of the channels
+    SAT = 45                     # ... and grey (max - min of the channels)
+    LINE = 0.8                   # share of the line's pixels that must be border grey
+    WHITE = 170                  # label letters: every channel above this
+    END, GAP = 30, 20            # white pixels at the labels' right end (each row), at most in the gap
+    @staticmethod
+    def _line(band, axis):
+        g = band.mean(2); s = band.max(2) - band.min(2)
+        ok = (g >= RangePanel.GREY[0]) & (g <= RangePanel.GREY[1]) & (s <= RangePanel.SAT)
+        return float(ok.mean(axis=1 if axis == 0 else 0).max())
+    @classmethod
+    def read(cls, a):
+        """a: full 16:9 frame (uint8). -> True when the Firing Range box is on screen, else False."""
+        r = a[76:160, 2490:2502].astype(np.int16)
+        if cls._line(r, 1) < cls.LINE: return False                 # cheap first test: the right side's line
+        wh = a[85:153, 2360:2426].min(2) > cls.WHITE
+        if wh[:, 28:].sum() > cls.GAP: return False                  # something white between the labels and values
+        if wh[:28, :26].sum() < cls.END or wh[40:, :26].sum() < cls.END: return False   # rows 85..112 and 125..152
+        if cls._line(a[66:76, 2300:2486].astype(np.int16), 0) < cls.LINE: return False
+        return cls._line(a[160:172, 2300:2486].astype(np.int16), 0) >= cls.LINE
+
+
+RANGE_JOIN = 120        # s: Firing Range reads closer than this are one stretch (the box hides while a menu is open)
+RANGE_MIN_READS = 3     # a stretch needs this many reads (one stray read never makes one)
+RANGE_GAME_SHARE = 0.1  # in-game reads (ring clock, squads counter) inside a stretch above this share of its reads: not one
+
+def range_stretches(reads, game_reads=()):
+    """Firing Range reads (times) -> [{t0, t1, reads}] (t1 = the last read). A stretch holding in-game reads (the ring
+    clock, "N SQUADS LEFT": the Firing Range has neither) for more than RANGE_GAME_SHARE of its reads is dropped:
+    the box was mis-read in a game."""
+    out = []
+    for t in sorted(reads):
+        if out and t - out[-1]['t1'] <= RANGE_JOIN: out[-1]['t1'] = t; out[-1]['reads'] += 1
+        else: out.append({'t0': t, 't1': t, 'reads': 1})
+    G = sorted(game_reads); keep = []
+    for s in out:
+        if s['reads'] < RANGE_MIN_READS: continue
+        n = sum(1 for t in G if s['t0'] <= t <= s['t1'])
+        if n > RANGE_GAME_SHARE * s['reads']: continue
+        keep.append({'t0': round(float(s['t0']), 2), 't1': round(float(s['t1']), 2), 'reads': s['reads']})
+    return keep
+
+
 # ---------- "N SQUADS LEFT" (top right during a game) ----------
 class SquadsLeft:
     """The number in front of "SQUADS LEFT": white digits 22 px high, right-aligned just left of the words.
