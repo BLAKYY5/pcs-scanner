@@ -115,6 +115,117 @@ def duration(path: str) -> float:
     return float(r.stdout.strip() or 0)
 
 
+# Firing Range minutes are cut out of the block's video (coach, 27 Nov 2026: "Yes, cut them"), from the scan's
+# `firingRange` stretches, when the recording also has games. On the safe side, so no game time is lost: never within
+# GAME_MARGIN_S of a game (legend select / waiting screen before it, the end after it) or MARK_MARGIN_S of a moment the
+# player marked by hand, never a piece shorter than CUT_MIN_S, and each kept piece starts on the keyframe at or before
+# the end of the cut (stream copy can only start on a keyframe), so a cut only ever keeps a little more.
+CUT_MIN_S = 60
+GAME_MARGIN_S = (150, 30)
+MARK_MARGIN_S = 60
+
+
+def _minus(pieces: list[tuple[float, float]], a: float, b: float) -> list[tuple[float, float]]:
+    out = []
+    for x, y in pieces:
+        if b <= x or a >= y:
+            out.append((x, y))
+            continue
+        if a > x:
+            out.append((x, a))
+        if b < y:
+            out.append((b, y))
+    return out
+
+
+def range_cuts(scan: dict | None, events: dict | None = None) -> list[tuple[float, float]]:
+    """The parts of a recording (recording seconds) left out of its YouTube video: its Firing Range stretches, only
+    when the recording also has games, minus the margins around games and hand marks. Older scans (no `firingRange`):
+    none."""
+    scan = scan or {}
+    games = [g for g in scan.get("games") or [] if isinstance(g, dict) and isinstance(g.get("tStart"), (int, float))]
+    fr = [r for r in scan.get("firingRange") or [] if isinstance(r, dict)
+          and isinstance(r.get("t0"), (int, float)) and isinstance(r.get("t1"), (int, float))]
+    if not games or not fr:
+        return []
+    keep = []
+    for g in games:
+        end = max(float(g.get("tEndGame") or 0), float(g.get("tEnd") or 0), float(g["tStart"]))
+        keep.append((float(g["tStart"]) - GAME_MARGIN_S[0], end + GAME_MARGIN_S[1]))
+    for m in (events or {}).get("events") or []:
+        if isinstance(m, dict) and m.get("kind") == "mark" and isinstance(m.get("t"), (int, float)):
+            keep.append((m["t"] - MARK_MARGIN_S, m["t"] + MARK_MARGIN_S))
+    cuts: list[tuple[float, float]] = []
+    for r in fr:
+        pieces = [(float(r["t0"]), float(r["t1"]))]
+        for a, b in keep:
+            pieces = _minus(pieces, a, b)
+        cuts += [p for p in pieces if p[1] - p[0] >= CUT_MIN_S]
+    return sorted(cuts)
+
+
+def keyframes_near(path: str, t: float) -> tuple[float, list[float]]:
+    """(the file's start time, keyframe times from 20 s before t to t), from the packets: nothing is decoded."""
+    start = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=start_time", "-of", "csv=p=0", path],
+                           capture_output=True, text=True, timeout=60, creationflags=_quiet()).stdout.strip()
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals",
+                        f"{max(0.0, t - 20):.3f}%{t + 0.01:.3f}", "-show_entries", "packet=pts_time,flags", "-of",
+                        "csv=p=0", path], capture_output=True, text=True, timeout=120, creationflags=_quiet())
+    kf = []
+    for line in r.stdout.splitlines():
+        parts = line.strip().split(",")
+        if len(parts) >= 2 and "K" in parts[1]:
+            try:
+                kf.append(float(parts[0]))
+            except ValueError:
+                pass
+    try:
+        st = float(start or 0)
+    except ValueError:
+        st = 0.0
+    return st, sorted(kf)
+
+
+def plan_cuts(path: str, cuts: list[tuple[float, float]], dur: float) -> list[tuple[float, float | None]] | None:
+    """The kept pieces [(from, to)] of a recording (positions in the file; to None = up to its end). After each cut
+    the next piece starts on the keyframe at or before the cut's end. None = nothing to cut, or no keyframe found:
+    then the recording goes in whole, never with a piece missing."""
+    if not cuts:
+        return None
+    pieces: list[tuple[float, float | None]] = []
+    at = 0.0
+    for a, b in cuts:
+        st, kf = keyframes_near(path, b)
+        if b < dur - 1:
+            k = [x for x in kf if x <= b + 1e-3]
+            if not k or k[-1] <= a:
+                return None
+            nxt = k[-1] - st                           # the keyframe, as a position in the file
+        else:
+            nxt = None                                 # the cut runs to the end: the recording stops at a
+        if a - st - at >= 1:
+            pieces.append((at, a - st))
+        if nxt is None:
+            return pieces or None
+        at = nxt
+    pieces.append((at, None))
+    return pieces
+
+
+def video_at(segs: list | None, off: float, t: float) -> float:
+    """A recording's time t -> the block video's time. segs = [[from, to, at], ...] (the kept pieces and where each
+    starts in the video) or None (the whole recording from `off`). A time inside a cut gives where the video goes on."""
+    if not segs:
+        return off + t
+    for a, b, at in segs:
+        if t < a:
+            return at
+        if t < b:
+            return at + t - a
+    a, b, at = segs[-1]
+    return at + b - a
+
+
 def pl(n: int, word: str) -> str:
     """'1 kill', '3 kills', '1 pt', '5 pts'."""
     plural = {"pt": "pts", "point": "points", "kill": "kills", "game": "games"}[word]
@@ -154,23 +265,25 @@ def tags_for(s: Settings, desc: str, kind: str | None = "scrims") -> list[str]:
 
 def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: list[str] | None = None,
              audio: str = "game", results: dict | None = None, kind: str | None = None,
-             check: dict | None = None) -> tuple[str, str, int]:
+             check: dict | None = None, segments: list | None = None) -> tuple[str, str, int]:
     """Title, description with chapters, and the number of games. check (eec.check_block): EEC's drop is shown for
-    the games it was compared on; where our scan says otherwise, ours follows in brackets."""
+    the games it was compared on; where our scan says otherwise, ours follows in brackets. segments: per recording,
+    the kept pieces when Firing Range minutes were cut out (`video_at`), else None."""
     games, marks = [], []
     by_game = {(x["rec"], x["i"]): x for x in (check or {}).get("games", [])}
-    for k, off in zip(keys, offsets):
+    for ki, (k, off) in enumerate(zip(keys, offsets)):
+        segs = segments[ki] if segments and ki < len(segments) else None
         for gi, g in enumerate(scan_of(idx[k]).get("games", [])):
             if g.get("tStart") is not None:
                 drop = our_drop(g)
                 x = by_game.get((k, gi))
                 if x and x.get("eecDrop"):
                     drop = x["eecDrop"] + (f" (scan: {x['ourDrop']})" if x.get("check") == "different" else "")
-                games.append((off + g["tStart"], g.get("map"), "scrim" if is_scrim(g) else ("ranked" if g.get("mode") == "ranked" else "unknown"), drop,
+                games.append((video_at(segs, off, g["tStart"]), g.get("map"), "scrim" if is_scrim(g) else ("ranked" if g.get("mode") == "ranked" else "unknown"), drop,
                               idx[k].started + g["tStart"]))
         for m in events_of(idx[k]).get("events", []):
             if m.get("kind") == "mark":
-                marks.append(off + m["t"])
+                marks.append(video_at(segs, off, m["t"]))
     games.sort(key=lambda x: x[0])
     start = dt.datetime.fromtimestamp(idx[keys[0]].started)
     team = s.yt_team or "PCS"
@@ -227,25 +340,40 @@ def describe(s: Settings, idx, keys: list[str], offsets: list[float], links: lis
     return title, "\n".join(lines), len(games)
 
 
-def build_video(paths: list[str], tracks: list[list[str]], audio: str, out: Path) -> Path:
+def build_video(paths: list[str], tracks: list[list[str]], audio: str, out: Path,
+                pieces: list | None = None) -> list | None:
     """Join the block's recordings into one file with a single sound track (game, or the mix).
-    The picture is copied as is; only the sound is encoded (seconds per hour of video)."""
+    The picture is copied as is; only the sound is encoded (seconds per hour of video).
+    pieces (per recording, `plan_cuts`; None = whole): only those parts of a recording go in (Firing Range cut out).
+    -> None without pieces, else per recording [[from, to, at], ...] (file positions, and the video time of `from`),
+    from the parts' own lengths."""
     tmp_dir = out.parent / (out.stem + ".parts")
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    parts = []
+    parts, segs, at = [], [], 0.0
     for i, (p, tr) in enumerate(zip(paths, tracks)):
-        part = tmp_dir / f"part{i}.mp4"
-        cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", p, "-map", "0:v:0"]
-        n = max(1, len(tr))
-        game = tr.index("game") if "game" in tr else 0
-        if audio == "mix" and n > 1:
-            cmd += ["-filter_complex", "".join(f"[0:a:{j}]" for j in range(n)) +
-                    f"amix=inputs={n}:duration=longest:normalize=0[a]", "-map", "[a]"]
-        else:
-            cmd += ["-map", f"0:a:{game}?"]
-        cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(part)]
-        subprocess.run(cmd, check=True, capture_output=True, timeout=3600, creationflags=_quiet())
-        parts.append(part)
+        cut = pieces[i] if pieces and i < len(pieces) else None
+        rec_segs = []
+        for j, (a, b) in enumerate(cut or [(0.0, None)]):
+            part = tmp_dir / f"part{i}-{j}.mp4"
+            cmd = ["ffmpeg", "-nostdin", "-loglevel", "error", "-y"]
+            if cut:                                    # a is a keyframe (plan_cuts): stream copy starts right there
+                cmd += (["-ss", f"{a:.3f}"] if a > 0 else []) + (["-to", f"{b:.3f}"] if b is not None else [])
+            cmd += ["-i", p, "-map", "0:v:0"]
+            n = max(1, len(tr))
+            game = tr.index("game") if "game" in tr else 0
+            if audio == "mix" and n > 1:
+                cmd += ["-filter_complex", "".join(f"[0:a:{k}]" for k in range(n)) +
+                        f"amix=inputs={n}:duration=longest:normalize=0[a]", "-map", "[a]"]
+            else:
+                cmd += ["-map", f"0:a:{game}?"]
+            cmd += ["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(part)]
+            subprocess.run(cmd, check=True, capture_output=True, timeout=3600, creationflags=_quiet())
+            parts.append(part)
+            if pieces:
+                d = duration(str(part))
+                rec_segs.append([round(a, 3), round(a + d, 3), round(at, 3)])
+                at += d
+        segs.append(rec_segs)
     if len(parts) == 1:
         shutil.move(str(parts[0]), out)
     else:
@@ -255,7 +383,7 @@ def build_video(paths: list[str], tracks: list[list[str]], audio: str, out: Path
                         "-c", "copy", "-movflags", "+faststart", str(out)], check=True, capture_output=True,
                        timeout=3600, creationflags=_quiet())
     shutil.rmtree(tmp_dir, ignore_errors=True)
-    return out
+    return segs if pieces else None
 
 
 class Uploader:
@@ -460,15 +588,21 @@ class Uploader:
             except Exception:
                 return None
             offs = [sum(durs[:i]) for i in range(len(keys))]
+        segments = st.get("segments") if isinstance(st.get("segments"), list) and len(st["segments"]) == len(keys) else None
         recs, games = [], []
-        for k, off, d in zip(keys, offs, durs):
+        for ki, (k, off, d) in enumerate(zip(keys, offs, durs)):
             name = Path(idx[k].path).stem
-            recs.append({"file": name, "offset": round(off, 3), "duration": round(d, 3)})
+            segs = segments[ki] if segments else None
+            r = {"file": name, "offset": round(off, 3), "duration": round(d, 3)}
+            if segs:                                   # Firing Range cut out: which parts of the recording, where
+                r["offset"] = round(max(0.0, segs[0][2] - segs[0][0]), 3)   # right for the first part (hubs before segments)
+                r["segments"] = [[round(a, 3), round(b, 3), round(at, 3)] for a, b, at in segs]
+            recs.append(r)
             for g in scan_of(idx[k]).get("games", []):
                 ld = g.get("landing") or {}
                 jump = ld.get("exitAtExact") or ld.get("exitAt")
                 if jump is not None:
-                    games.append({"file": name, "jumpAt": round(jump, 3), "videoAt": round(off + jump, 3)})
+                    games.append({"file": name, "jumpAt": round(jump, 3), "videoAt": round(video_at(segs, off, jump), 3)})
         return {"video": vid, "privacy": st.get("privacy_used") or st.get("privacy") or self.s.yt_privacy,
                 "title": st.get("title") or "", "duration": round(sum(durs), 3), "recordings": recs, "games": games}
 
@@ -573,21 +707,32 @@ class Uploader:
                 offsets.append(t)
                 durations.append(duration(p))
                 t += durations[-1]
+            # Firing Range minutes of recordings that also have games: left out of the video (plan_cuts)
+            pieces = [plan_cuts(p, range_cuts(scan_of(idx[k]), events_of(idx[k])), d)
+                      for k, p, d in zip(keys, paths, durations)]
+            segments = None
+            if any(pieces):
+                segments = build_video(paths, tracks, audio, out, pieces)
+                offsets = [sg[0][2] if sg else 0.0 for sg in segments]
+                durations = [sum(b - a for a, b, _ in sg) for sg in segments]
             res, chk = self.usable(keys)
             kind, _ = block_label(idx, keys, chk)
             links = st.get("eec", [])
             if chk and chk["verdict"] == "mismatch":        # the lobby the drops refused isn't linked either
                 links = [l for l in links if l != chk.get("lobby")]
             title, desc, n_games = describe(self.s, idx, keys, offsets, links=links, audio=audio,
-                                            results=res, kind=kind, check=chk)
+                                            results=res, kind=kind, check=chk, segments=segments)
             title = (st.get("custom_title") or title)[:100]
-            build_video(paths, tracks, audio, out)
+            if segments is None:
+                build_video(paths, tracks, audio, out)
             st.update(status="uploading", title=title)
             save_state(self.state)
             vid = self._send(out, title, desc, privacy=st.get("privacy"), kind=kind)
             st.update(status="done", video=vid, url=f"https://youtu.be/{vid}", at=self.clock(),
                       offsets=offsets, durations=durations, privacy_used=st.get("privacy") or self.s.yt_privacy,
                       hub_video="pending")
+            if segments is not None:
+                st["segments"] = segments                  # kept pieces per recording (Firing Range cut out)
             save_state(self.state)
             self.ui.notify("Scrim block on YouTube", f"{title}\nhttps://youtu.be/{vid}")
         except Exception as e:
